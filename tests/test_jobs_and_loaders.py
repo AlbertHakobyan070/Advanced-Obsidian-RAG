@@ -1,0 +1,108 @@
+"""Job-builder + loader guard tests (session 11).
+
+Covers the console job argv builder (param validation is the API's contract
+with agents), the PDF --pages spec parser, and the code-loader discovery
+guard for directories named like files.
+"""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import pytest
+
+from manage_api import _build_argv, _retag_meta, _safe_rel
+from src.ingestion.pdf_loader import parse_page_spec
+from src.ingestion.code_loader import CodeLoader
+
+
+# ---- _build_argv: the agent-facing job contract ----
+
+def test_ingest_pdfs_chunking_flag():
+    argv = _build_argv("ingest_pdfs", {"chunking": "fixed"})
+    assert argv[-2:] == ["--chunking", "fixed"]
+    argv = _build_argv("ingest_pdfs", {})
+    assert "--chunking" not in argv
+
+
+def test_ingest_pdfs_chunking_invalid():
+    with pytest.raises(ValueError):
+        _build_argv("ingest_pdfs", {"chunking": "semantic"})
+
+
+def test_ingest_pdfs_ocr_invalid():
+    with pytest.raises(ValueError):
+        _build_argv("ingest_pdfs", {"ocr_engine": "gpt4v"})
+
+
+def test_ingest_pdfs_pages_validated():
+    argv = _build_argv("ingest_pdfs", {"pages": "1-50,60,70-80"})
+    assert "--pages" in argv
+    with pytest.raises(ValueError):
+        _build_argv("ingest_pdfs", {"pages": "0-5"})       # 1-based
+
+
+def test_unknown_kind_raises():
+    with pytest.raises(ValueError):
+        _build_argv("drop_all_tables", {})
+
+
+def test_safe_rel_guards():
+    assert _safe_rel("foo.jsonl") == "data/foo.jsonl"       # bare name -> data/
+    assert _safe_rel("data/foo.jsonl") == "data/foo.jsonl"
+    for bad in ("C:/windows/x.jsonl", "/etc/passwd", "../outside.jsonl",
+                "data/../../x.jsonl", ""):
+        with pytest.raises(ValueError):
+            _safe_rel(bad)
+
+
+# ---- _retag_meta: the metadata transform behind /api/documents/retag ----
+
+def test_retag_meta_domain_course_tags():
+    m = {"source_file": "x.sql", "domain": "general",
+         "course_code": "unknown", "course_name": "unknown", "tags": ["old"]}
+    out = _retag_meta(m, "db", "Databases & Data Engineering", ["sql"], {"old"})
+    assert out["domain"] == "db"
+    # course sets BOTH fields (manifest + eval read course_name first)
+    assert out["course_name"] == "Databases & Data Engineering"
+    assert out["course_code"] == "Databases & Data Engineering"
+    assert out["tags"] == ["sql"]
+
+
+def test_retag_meta_none_keeps_everything():
+    m = {"domain": "biz", "course_name": "Business Intelligence & Analytics",
+         "course_code": "DS 206"}
+    out = _retag_meta(m, None, None, [], set())
+    assert out == {"domain": "biz",
+                   "course_name": "Business Intelligence & Analytics",
+                   "course_code": "DS 206"}
+
+
+# ---- parse_page_spec ----
+
+def test_page_spec_ranges_and_singletons():
+    # 1-based spec -> SORTED 0-BASED indices (what pymupdf4llm wants)
+    assert parse_page_spec("1-3,5") == [0, 1, 2, 4]
+    assert parse_page_spec("7") == [6]
+    assert parse_page_spec("3, 1-2 ,3") == [0, 1, 2]        # whitespace + dups
+    assert parse_page_spec("") == []                        # empty = no subset
+    assert parse_page_spec("1-9999", page_count=3) == [0, 1, 2]   # clamped
+
+
+def test_page_spec_rejects_garbage():
+    for bad in ("0", "5-3", "a-b", "1-2-3", "-4"):
+        with pytest.raises(ValueError):
+            parse_page_spec(bad)
+
+
+# ---- code loader: directories named like files ----
+
+def test_discovery_skips_dir_named_like_sql(tmp_path):
+    (tmp_path / "real.sql").write_text("SELECT 1;", encoding="utf-8")
+    trap = tmp_path / "PSS2_Solutions.sql"                  # a real vault pattern
+    trap.mkdir()
+    (trap / "inner.sql").write_text("SELECT 2;", encoding="utf-8")
+    loader = CodeLoader(vault_path=tmp_path, output_file=tmp_path / "out.jsonl")
+    found = loader.discover_files()
+    names = {f.relative_to(tmp_path).as_posix() for f in found}
+    assert names == {"real.sql", "PSS2_Solutions.sql/inner.sql"}

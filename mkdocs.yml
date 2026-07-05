@@ -1,0 +1,77 @@
+site_name: Advanced Obsidian RAG
+site_description: >-
+  Grounded, cited question-answering over a large personal Obsidian vault —
+  hybrid retrieval, scope routing, a code lane, cross-encoder reranking, and
+  citation-audited generation, running on free / local infrastructure.
+site_url: ""
+repo_url: https://github.com/the userHakobyan070/Advanced-Obsidian-RAG
+repo_name: Advanced-Obsidian-RAG
+edit_uri: ""
+
+theme:
+  name: material
+  icon:
+    logo: material/book-search
+    repo: fontawesome/brands/github
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.instant
+    - navigation.tracking
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+
+nav:
+  - Home: index.md
+  - Architecture: architecture.md
+  - Getting started: getting-started.md
+  - Usage: usage.md
+  - Evaluation: evaluation.md
+  - Operations: operations.md
+  - Docker deployment: deployment-docker.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - footnotes
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+plugins:
+  - search

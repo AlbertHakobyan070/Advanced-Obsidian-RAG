@@ -1,0 +1,256 @@
+# ============================================================
+#  Personal RAG — central configuration
+#  Copy this file to config.yaml and adapt the paths to your machine.
+#  config.yaml is gitignored, so pulls never overwrite your settings.
+#  Secrets live in .env (also gitignored). Tunables live here.
+# ============================================================
+
+parser:
+  vault_path: "path/to/your/obsidian/vault"
+  max_chunk_size: 3000
+  min_chunk_size: 200
+  overlap_size: 150
+  chunking: heading              # heading | fixed (how OVERSIZED sections split)
+  skip_dirs: [".obsidian", ".trash", ".git", "__path_fix_backups", "__MACOSX"]
+
+paths:
+  chunks_file: "data/chunks.jsonl"
+  chroma_dir: "data/chroma_db"
+  bm25_index: "data/bm25_index.pkl"
+  collection_name: "obsidian_vault"
+
+
+embedding:
+  # provider: openai | local
+  #   openai -> text-embedding-3-small via API
+  #   local  -> sentence-transformers model running on this machine (no API cost)
+  provider: local
+  local_model: "BAAI/bge-small-en-v1.5"
+  batch_size: 100
+  dimensions: 384
+
+generation:
+  provider: openai
+  base_url: "http://localhost:3001/v1"
+  model: "auto"
+  temperature: 0.1
+  max_tokens: 2500
+  verify_citations: false                          # text-embedding-3-small native dim
+
+retrieval:
+  dense_top_k: 20
+  sparse_top_k: 20
+  rrf_k: 60
+  rerank_top_k: 7
+  rerank_mode: cross_encoder                # cross_encoder | none
+  cross_encoder_model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  use_hyde: true
+  # If a query mentions a course/domain, bias retrieval toward it
+  metadata_boost: true
+
+  # HyDE bypass for code-intent queries. If the query contains any of these
+  # signals (case-insensitive, word-boundary matched; trailing '_' or '.'
+  # behaves like a prefix, e.g. "geom_" matches geom_point), the hypothetical-
+  # answer LLM call is skipped and the raw query is used for search. Prose
+  # hypotheticals bias dense retrieval toward lecture notes and away from
+  # actual code chunks (~2.4% of the corpus). Extend freely — no code change.
+  hyde_skip_signals:
+    - code
+    - script
+    - function
+    - snippet
+    - notebook
+    - implement
+    - implementation
+    - "show me my"
+    - "my r"
+    - "my python"
+    - ggplot
+    - geom_
+    - dplyr
+    - tidyverse
+    - matplotlib
+    - seaborn
+    - pandas
+    - numpy
+    - sklearn
+    - pytorch
+    - regex
+    - sql
+
+  # File types that count as "the user's own code" for the code lane: when a
+  # code-intent query fires, an extra dense+sparse pass restricted to these
+  # types joins the RRF fusion, guaranteeing actual script/notebook chunks
+  # reach the reranker (they're ~2.4% of the corpus and otherwise get
+  # outscored by lecture PDFs that merely mention the same keywords).
+  code_file_types: [ipynb, py, r, rmd]
+
+  # ------------------------------------------------------------------
+  # Scope routing: queries that NAME a domain or content type get extra
+  # filtered dense+sparse lanes in the RRF fusion (soft routing — the
+  # reranker still decides; a bad hint can't empty the results).
+  # Same matcher as hyde_skip_signals: word-boundary, plural-tolerant.
+  # ------------------------------------------------------------------
+
+  # domain metadata value -> query keywords/aliases that point at it.
+  # Keys MUST be values the `domain` metadata field actually holds
+  # (stats, ml, nlp, viz, biz, ts, db, math, swe, prog).
+  domain_signals:
+    stats: [statistics, statistical, stats, probability, bayesian, bayes,
+            hypothesis testing, conjugate prior, confidence interval]
+    ml:    [machine learning, ml, deep learning, dl, neural network,
+            neural networks, sklearn, scikit-learn, pytorch, tensorflow,
+            reinforcement learning, rl, genai, generative ai, llm,
+            gradient descent, hugging face]
+    nlp:   [nlp, natural language processing, natural language, transformer,
+            transformers, bert, mbert, tokenizer, tokenization, embedding,
+            embeddings, spacy, nltk, stanza, sentencepiece]
+    viz:   [visualization, visualizations, dataviz, data viz,
+            data visualization, ggplot, matplotlib, seaborn, plotly,
+            tableau, power bi]
+    biz:   [business intelligence, bi, business analytics,
+            marketing analytics, marketing, dax, power bi, tableau]
+    ts:    [time series, forecasting, arima, sarima, seasonality]
+    db:    [database, databases, sql, postgresql, postgres, mysql, mongodb,
+            data engineering, sqlalchemy]
+    math:  [calculus, linear algebra, numerical methods, math, mathematics,
+            eigenvalue, eigenvalues]
+    swe:   [software architecture, software engineering, devops, docker,
+            kubernetes, fastapi, web development, design pattern,
+            design patterns, microservices]
+    prog:  [data structures, algorithms, python development]
+
+  # content label -> {signals: query keywords, path_contains: source_file
+  # substrings (case-insensitive), file_types: file_type metadata values}.
+  # Content aspects OR together; domain AND content must both hold
+  # ("my homework from NLP" = homework path AND nlp domain).
+  content_signals:
+    homework:    {signals: [homework, hw, assignment, assignments, problem set],
+                  path_contains: [homework, hw, assignment]}
+    lectures:    {signals: [lecture, lectures, slides, lecture notes],
+                  path_contains: [lecture, slides]}
+    tech_books:  {signals: [tech book, tech books],
+                  path_contains: [tech books]}
+    books:       {signals: [textbook, textbooks, book, books],
+                  path_contains: [books]}
+    cheatsheets: {signals: [cheat sheet, cheat sheets, cheatsheet, cheatsheets],
+                  path_contains: [cheat sheet, cheatsheet]}
+    notebooks:   {signals: [notebook, notebooks, jupyter],
+                  file_types: [ipynb]}
+    capstone:    {signals: [capstone, thesis],
+                  path_contains: [capstone]}
+    coursera:    {signals: [coursera],
+                  path_contains: [coursera]}
+    daily_notes: {signals: [daily note, daily notes, study notes],
+                  file_types: [daily_note]}
+    current:     {signals: [current course, current courses, this semester],
+                  path_contains: [current courses]}
+    passed:      {signals: [passed course, passed courses, passed coursework],
+                  path_contains: [passed]}
+
+# ------------------------------------------------------------------
+  # Live-vault lane via Obsidian's Omnisearch plugin (community plugin).
+  # Adds an extra RRF lane of LIVE results — notes edited since the last
+  # ingest, with Omnisearch's filename/heading-weighted BM25. Requires
+  # Obsidian OPEN with Omnisearch's "HTTP Server" setting enabled
+  # (default port 51361, localhost only). Fail-soft: Obsidian closed ->
+  # the lane is silently empty, queries never break. Toggle per query
+  # with {"omnisearch": true/false} on /query and /search.
+  # ------------------------------------------------------------------
+  omnisearch:
+    enabled: false            # default OFF; flip on, or pass per-query
+    base_url: "http://127.0.0.1:51361"
+    top_k: 8                  # live results offered to the fusion
+    timeout: 1.5              # seconds; keeps a closed Obsidian cheap
+    excerpt_min_chars: 40     # drop excerpts too short to rerank meaningfully
+    # allowed_exts: [.md, .markdown, .txt, .canvas]   # PDFs/images skipped —
+    #                                 they're in our own index already
+
+  # Named retrieval presets — per-query bundles of overrides, selected via
+  # POST /query {"preset": "code"}, `python main.py query --preset code`, or
+  # the Streamlit sidebar. The "code" preset is auto-applied when a query
+  # trips hyde_skip_signals (wider candidate pool so BM25's code hits survive
+  # RRF fusion and reach the reranker). Omitted keys fall back to the
+  # defaults above.
+  # (presets may also set `omnisearch: true` to include the live-vault lane)
+  presets:
+    code:      {rerank_top_k: 10, use_hyde: false, dense_top_k: 40, sparse_top_k: 40, boost_code: true}
+    concept:   {rerank_top_k: 5,  use_hyde: true}
+    synthesis: {rerank_top_k: 10, use_hyde: true, dense_top_k: 30, sparse_top_k: 30}
+    fresh:     {rerank_top_k: 8,  omnisearch: true}
+
+
+  # --- local provider block (KoboldCPP serving Gemma-4-E4B-it-Q8) ---
+  local:
+    base_url: "http://localhost:5001/v1"
+    api_key: "koboldcpp"                    # dummy; KoboldCPP ignores it
+    model: "gemma-4-E4B-it-Q8_k"            # whatever /v1/models reports
+    # NOTE: KoboldCPP context length is set at LAUNCH (--contextsize),
+    #       NOT per request. Launch with --contextsize 8192 or higher.
+
+logging:
+  level: INFO                               # DEBUG | INFO | WARNING | ERROR
+  file: "logs/rag.log"
+  console: true
+
+pdf:
+  output_file: "data/pdf_chunks.jsonl"
+  scratch_dir: null                           # optional: route HF cache + temp to a big drive
+  min_chunk_size: 200
+  max_chunk_size: 3000
+  overlap_size: 150
+  skip_scanned_threshold: 50                # chars/page below which a page = scanned
+  skip_list_file: null                      # optional JSON array of vault-relative paths to skip
+  skip_scripts: ["armenian"]
+  script_sample_pages: 3
+  skip_folders: []
+  extract_images: true
+  figures_dir: data/figures
+  image_min_frac: 0.08
+  ocr_enabled: true
+  ocr_language: "eng"                       # add "+hye" for Armenian if tessdata present
+  # OCR engine for scanned pages:
+  #   auto      -> historical behavior (Tesseract-first probe)   [default]
+  #   tesseract -> pin the classic path
+  #   vlm       -> vision-model document parsing via the endpoint below
+  #   none      -> disable OCR (same as --no-ocr)
+  ocr_engine: auto
+  # VLM document-parsing OCR (reference model: baidu/Unlimited-OCR, 3B).
+  # Reached over ANY OpenAI-compatible /chat/completions endpoint that takes
+  # image_url content — SGLang/vLLM on a GPU box, llama.cpp/LM Studio serving
+  # a GGUF quant locally, or FreeLLMAPI (:3001) fronting a free hosted vision
+  # model. Per-page markdown replaces the scanned page's empty extraction.
+  vlm_ocr:
+    base_url: "http://127.0.0.1:8100/v1"
+    model: "Unlimited-OCR"                  # match what the server reports
+    api_key_env: "OPENAI_API_KEY"           # sent if set; local servers ignore it
+    prompt: "<image>document parsing."      # Unlimited-OCR's parsing prompt
+    dpi: 200                                # 300 for dense math scans (slower)
+    timeout: 300                            # generous — CPU-quant servers are slow
+    max_tokens: 8192
+    max_pages_per_pdf: null                 # safety cap for huge scanned books
+  only_book_folders: false                  # true = only ingest PDFs under Books/ dirs
+  max_pages_per_pdf: null                   # cap pages (null = no cap)
+notebooks:
+  # vault_path falls back to pdf.vault_path -> parser.vault_path if unset
+  output_file: "data/ipynb_chunks.jsonl"
+  extensions: [".ipynb", ".py", ".R", ".Rmd"]   # file types to ingest
+  min_chunk_size: 200
+  max_chunk_size: 3000
+  overlap_size: 150
+  include_outputs: true                          # append text cell outputs
+  max_output_chars: 2000                         # cap per-cell output length
+  skip_scripts: ["armenian"]                     # per-cell: placeholder Armenian prose/output
+  save_figures: false                            # true = decode image outputs to figures_dir
+  figures_dir: data/notebook_figures
+
+webui:
+  # Management console (manage_api.py) — ingest/index/OCR/delete from a browser.
+  #   python -m uvicorn manage_api:app --host 127.0.0.1 --port 8052
+  port: 8052                                 # 8051 = query API, 8501 = Streamlit
+  rag_api: "http://127.0.0.1:8051"           # the query endpoint the console talks to
+  # Browser uploads land INSIDE the vault here (created if missing), so the
+  # normal ingest passes pick them up with --include-path "Inbox":
+  inbox_dir: "00 – AUA_DS/Other/Inbox"
+  jobs_dir: "logs/jobs"                      # one log file per job
+  manifest_cache: "data/.manifest_cache.json"

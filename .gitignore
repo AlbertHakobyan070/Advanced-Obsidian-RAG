@@ -1,0 +1,34 @@
+# Secrets — never commit. Ship .env.example instead.
+.env
+*.key
+
+# Data & indexes — rebuildable artifacts, hundreds of MB to GB
+data/
+logs/
+*.pkl
+*.jsonl
+
+# Local-only dedup artifacts (referenced by config, regenerable, private file lists)
+dedup_report.json
+dedup_skiplist.json
+
+# Private session notes & one-off diagnostics
+HANDOFF*.md
+check_meta.py
+check_techbooks.py
+_verify_*.py
+_check_*.py
+
+# Eval outputs (keep golden_queries.yaml, ignore results)
+eval/results.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db

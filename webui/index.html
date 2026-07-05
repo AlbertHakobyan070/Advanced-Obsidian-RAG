@@ -1,0 +1,1339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Corpus Ledger — Personal RAG</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='3' y='3' width='5' height='18' rx='1' fill='%23E8A33D'/%3E%3Crect x='10' y='3' width='5' height='18' rx='1' fill='%238A6423'/%3E%3Crect x='17' y='6' width='4' height='15' rx='1' fill='%23A99F8F'/%3E%3C/svg%3E">
+<script>/* theme is applied BEFORE first paint to avoid a flash of the wrong palette */
+document.documentElement.dataset.theme=localStorage.getItem("ledger-theme")||"dark";</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<!-- Answer preview (md + LaTeX). Loaded lazily; the console degrades to raw
+     text if these CDNs are unreachable (offline) — nothing else depends on them. -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<style>
+/* ————— engineer's logbook: warm dark paper, amber ink ————— */
+:root{
+  --bg:#161310; --panel:#221E19; --panel-2:#2A251E; --line:#3A332A;
+  --ink:#EDE6DA; --ink-dim:#A99F8F; --ink-faint:#6E6557;
+  --amber:#E8A33D; --amber-dim:#8A6423; --blue:#7FA6C9; --red:#C4574E; --green:#8FAE6B;
+  --btn-primary-ink:#1d1712; --log-bg:#100E0B; --skel-mid:#332c23;
+  --td-line:rgba(58,51,42,.5); --row-sel:rgba(232,163,61,.06); --row-hover:rgba(237,230,218,.03);
+  --bar-border:rgba(232,163,61,.35); --glow:rgba(232,163,61,.05);
+  --disp:"Fraunces",Georgia,serif; --body:"Inter",system-ui,sans-serif; --mono:"IBM Plex Mono",ui-monospace,monospace;
+  --r:6px;
+}
+/* ————— daylight ledger: parchment paper, dark ink, same amber ————— */
+[data-theme="light"]{
+  --bg:#F2ECDF; --panel:#FAF6ED; --panel-2:#EDE5D4; --line:#D6CAB4;
+  --ink:#2E2619; --ink-dim:#6C6051; --ink-faint:#998C78;
+  --amber:#B26E10; --amber-dim:#D9A44A; --blue:#2F6597; --red:#AE3A31; --green:#54732F;
+  --btn-primary-ink:#FFF8EC; --log-bg:#EFE9DB; --skel-mid:#E2D8C4;
+  --td-line:rgba(90,78,60,.25); --row-sel:rgba(178,110,16,.08); --row-hover:rgba(46,38,25,.04);
+  --bar-border:rgba(178,110,16,.45); --glow:rgba(178,110,16,.06);
+}
+*{box-sizing:border-box} html,body{margin:0;padding:0}
+body{background:var(--bg);color:var(--ink);font:14px/1.55 var(--body);
+  background-image:radial-gradient(ellipse 80% 50% at 50% -10%,var(--glow),transparent)}
+body,.panel,.stat,button.btn,input,select,textarea,pre.log{
+  transition:background-color .25s ease,color .25s ease,border-color .25s ease}
+::selection{background:var(--amber-dim);color:var(--ink)}
+a{color:var(--blue);text-decoration:none} a:hover{text-decoration:underline}
+h1,h2,h3{font-family:var(--disp);font-weight:600;letter-spacing:.01em}
+.mono{font-family:var(--mono)}
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px 80px}
+
+/* header */
+header{border-bottom:1px solid var(--line);padding:18px 0 14px;margin-bottom:0}
+.hrow{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap}
+.wordmark{font-family:var(--disp);font-size:22px;font-weight:600}
+.wordmark em{font-style:normal;color:var(--amber)}
+.sub{color:var(--ink-dim);font-size:12.5px}
+.statuses{margin-left:auto;display:flex;gap:14px;font:12px var(--mono)}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ink-faint);margin-right:6px;vertical-align:1px}
+.dot.ok{background:var(--green)} .dot.bad{background:var(--red)}
+
+/* tabs */
+nav{display:flex;gap:2px;margin:14px 0 26px;border-bottom:1px solid var(--line);overflow-x:auto}
+nav button{appearance:none;background:none;border:0;border-bottom:2px solid transparent;color:var(--ink-dim);
+  font:500 13px var(--body);letter-spacing:.06em;text-transform:uppercase;padding:10px 14px;cursor:pointer;white-space:nowrap}
+nav button:hover{color:var(--ink)}
+nav button.on{color:var(--amber);border-bottom-color:var(--amber)}
+section{display:none} section.on{display:block;animation:rise .25s ease}
+@keyframes rise{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+
+/* panels + primitives */
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:18px 20px;margin-bottom:18px}
+.panel h2{margin:0 0 4px;font-size:17px}
+.panel .hint{color:var(--ink-dim);font-size:12.5px;margin:0 0 14px}
+.grid{display:grid;gap:18px}
+.g2{grid-template-columns:1fr 1fr}.g3{grid-template-columns:repeat(3,1fr)}.g4{grid-template-columns:repeat(4,1fr)}
+@media(max-width:860px){.g2,.g3,.g4{grid-template-columns:1fr}}
+.stat{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:14px 16px}
+.stat .k{font:11px var(--mono);color:var(--ink-dim);text-transform:uppercase;letter-spacing:.1em}
+.stat .v{font-family:var(--disp);font-size:26px;margin-top:4px}
+.stat .v small{font-size:13px;color:var(--ink-dim);font-family:var(--body)}
+button.btn,input,select,textarea{font:13px var(--body);color:var(--ink);background:var(--panel-2);
+  border:1px solid var(--line);border-radius:var(--r);padding:8px 10px}
+input:focus,select:focus,textarea:focus{outline:1px solid var(--amber-dim);border-color:var(--amber-dim)}
+button.btn{cursor:pointer;font-weight:500;transition:border-color .15s}
+button.btn:hover{border-color:var(--amber)}
+button.btn.primary{background:var(--amber);color:var(--btn-primary-ink);border-color:var(--amber);font-weight:600}
+button.btn.primary:hover{filter:brightness(1.07)}
+button.btn.danger{color:var(--red);border-color:var(--red)}
+button.btn.danger:hover{background:var(--red);color:var(--ink)}
+button.btn:disabled{opacity:.45;cursor:default}
+label.f{display:block;font:11px var(--mono);color:var(--ink-dim);text-transform:uppercase;letter-spacing:.08em;margin:10px 0 4px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.chk{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--ink-dim);cursor:pointer;user-select:none}
+.chk input{accent-color:var(--amber);width:14px;height:14px;padding:0}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{font:11px var(--mono);color:var(--ink-dim);text-transform:uppercase;letter-spacing:.08em;text-align:left;
+  padding:8px 10px;border-bottom:1px solid var(--line)}
+td{padding:9px 10px;border-bottom:1px solid var(--td-line);vertical-align:top}
+tr.sel td{background:var(--row-sel)}
+tbody tr:hover td{background:var(--row-hover)}
+.pill{display:inline-block;font:11px var(--mono);padding:2px 8px;border-radius:10px;border:1px solid var(--line);color:var(--ink-dim)}
+.pill.run{color:var(--amber);border-color:var(--amber-dim)}
+.pill.done{color:var(--green);border-color:var(--green)}
+.pill.failed,.pill.cancelled{color:var(--red);border-color:var(--red)}
+.pill.live{color:var(--blue);border-color:var(--blue)}
+.empty{color:var(--ink-faint);font-size:13px;padding:26px 10px;text-align:center;font-style:italic}
+
+/* spine-bar ledger (signature element) */
+.spines{display:flex;flex-direction:column;gap:7px;margin-top:8px}
+.spine{display:grid;grid-template-columns:92px 1fr 84px;gap:10px;align-items:center}
+.spine .lbl{font:12px var(--mono);color:var(--ink-dim);text-align:right}
+.spine .bar{height:16px;border-radius:3px;background:linear-gradient(180deg,rgba(255,255,255,.10),transparent),var(--amber-dim);
+  border:1px solid var(--bar-border);min-width:2px;transition:width .6s cubic-bezier(.2,.7,.2,1)}
+.spine:nth-child(2n) .bar{filter:hue-rotate(-6deg) brightness(1.08)}
+.spine .n{font:12px var(--mono);color:var(--ink)}
+
+/* tape-reel spinner */
+.reel{width:18px;height:18px;display:inline-block;vertical-align:-4px;margin-right:8px}
+.reel circle{fill:none;stroke:var(--amber);stroke-width:2.5;stroke-linecap:round}
+.reel .a{stroke-dasharray:10 40;animation:spin 1.1s linear infinite;transform-origin:center}
+.reel .b{stroke:var(--ink-faint);stroke-dasharray:4 20;animation:spin 1.6s linear infinite reverse;transform-origin:center}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* shimmer bar + skeletons */
+.shimmer{height:3px;border-radius:2px;background:linear-gradient(90deg,var(--amber-dim),var(--amber),var(--amber-dim));
+  background-size:200% 100%;animation:sweep 1.4s linear infinite;margin:6px 0 10px}
+@keyframes sweep{to{background-position:-200% 0}}
+.skel{height:13px;border-radius:3px;background:linear-gradient(90deg,var(--panel-2),var(--skel-mid),var(--panel-2));
+  background-size:200% 100%;animation:sweep 1.4s linear infinite;margin:11px 0}
+@media(prefers-reduced-motion:reduce){
+  .reel .a,.reel .b,.shimmer,.skel{animation:none}
+  section.on{animation:none} .spine .bar{transition:none}
+}
+
+/* logs, drawers, toasts */
+pre.log{background:var(--log-bg);border:1px solid var(--line);border-radius:var(--r);padding:12px 14px;
+  font:12px/1.5 var(--mono);color:var(--ink-dim);max-height:420px;overflow:auto;white-space:pre-wrap;word-break:break-word}
+.drawer{background:var(--panel-2);border:1px solid var(--line);border-radius:var(--r);padding:14px 16px;margin-top:10px}
+.src{background:var(--panel-2);border:1px solid var(--line);border-left:3px solid var(--amber-dim);
+  border-radius:var(--r);padding:10px 12px;margin:8px 0;font-size:13px}
+.src .lab{font:12px var(--mono);color:var(--amber)}
+.src .txt{color:var(--ink-dim);margin-top:6px;white-space:pre-wrap}
+#toast{position:fixed;bottom:22px;right:22px;display:flex;flex-direction:column;gap:8px;z-index:9}
+.tst{background:var(--panel-2);border:1px solid var(--line);border-left:3px solid var(--amber);border-radius:var(--r);
+  padding:10px 14px;font-size:13px;max-width:380px;animation:rise .2s ease}
+.tst.err{border-left-color:var(--red)}
+.answer{white-space:pre-wrap}
+.dropzone{border:1.5px dashed var(--line);border-radius:var(--r);padding:26px;text-align:center;color:var(--ink-dim);cursor:pointer}
+.dropzone.hot{border-color:var(--amber);color:var(--amber)}
+.note{border-left:3px solid var(--blue);background:rgba(127,166,201,.07);padding:8px 12px;border-radius:0 var(--r) var(--r) 0;
+  font-size:12.5px;color:var(--ink-dim);margin-top:12px}
+
+/* ————— session-9 polish ————— */
+/* horizontal scroll when tables/rows outrun their panel (Docs + Vault tabs) */
+.tscroll{overflow-x:auto;overflow-y:hidden;max-width:100%}
+.tscroll table{min-width:640px}
+/* rendered-markdown answer (Preview mode: md + LaTeX) */
+.answer.md{white-space:normal}
+.answer.md h1,.answer.md h2,.answer.md h3{font-family:var(--disp);margin:.7em 0 .3em;line-height:1.25}
+.answer.md h1{font-size:20px}.answer.md h2{font-size:17px}.answer.md h3{font-size:15px}
+.answer.md p{margin:.5em 0}
+.answer.md ul,.answer.md ol{margin:.4em 0 .4em 1.3em}
+.answer.md code{background:var(--panel-2);border:1px solid var(--line);border-radius:4px;padding:1px 5px;font:12px var(--mono)}
+.answer.md pre{background:var(--log-bg);border:1px solid var(--line);border-radius:var(--r);padding:10px 12px;overflow:auto}
+.answer.md pre code{background:none;border:0;padding:0}
+.answer.md blockquote{border-left:3px solid var(--amber-dim);margin:.5em 0;padding:2px 0 2px 12px;color:var(--ink-dim)}
+.answer.md a{color:var(--blue)} .answer.md table{margin:.5em 0} .answer.md .katex{font-size:1.02em}
+/* Info / Guide tab */
+.diagram{margin-top:12px;overflow-x:auto}
+.diagram svg{display:block;margin:0 auto;max-width:100%;height:auto}
+.dgbtn.on{border-color:var(--amber);color:var(--amber)}
+.diagram-cap{color:var(--ink-dim);font-size:12px;margin-top:10px;line-height:1.7}
+.diagram-cap b{color:var(--amber);font-weight:500;font-family:var(--mono);font-size:11px}
+.infocards{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:6px}
+@media(max-width:760px){.infocards{grid-template-columns:1fr}}
+.infocard{background:var(--panel-2);border:1px solid var(--line);border-left:3px solid var(--amber-dim);border-radius:var(--r);padding:12px 14px}
+.infocard h3{margin:0 0 6px;font-size:14.5px}
+.infocard p{margin:0;color:var(--ink-dim);font-size:12.5px;line-height:1.55}
+.infocard code,#tab-info td code{font:11px var(--mono);background:var(--panel);border:1px solid var(--line);border-radius:3px;padding:0 4px;color:var(--ink)}
+#tab-info .formula{text-align:center;margin:16px 0;color:var(--ink)}
+#tab-info .katex{font-size:1.05em}
+#tab-info td:first-child{white-space:nowrap;color:var(--amber);font-family:var(--mono);font-size:12px}
+.wordmark .mark{fill:var(--amber);vertical-align:-2px;margin-right:7px}
+#theme-toggle{padding:4px 10px;font-size:12px;white-space:nowrap}
+.stat{transition:transform .15s ease,border-color .15s ease,background-color .25s ease}
+.stat:hover{transform:translateY(-2px);border-color:var(--amber-dim)}
+.spine .n .pct{color:var(--ink-faint);font-size:10px;margin-left:4px}
+.scorebar{height:3px;background:var(--panel-2);border:1px solid var(--line);border-radius:2px;margin-top:7px;overflow:hidden}
+.scorebar div{height:100%;background:linear-gradient(90deg,var(--amber-dim),var(--amber));border-radius:2px}
+*::-webkit-scrollbar{width:10px;height:10px}
+*::-webkit-scrollbar-track{background:transparent}
+*::-webkit-scrollbar-thumb{background:var(--line);border-radius:5px;border:2px solid var(--bg)}
+*::-webkit-scrollbar-thumb:hover{background:var(--amber-dim)}
+@media(prefers-reduced-motion:reduce){
+  body,.panel,.stat,button.btn,input,select,textarea,pre.log{transition:none}
+  .stat:hover{transform:none}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div class="hrow">
+    <div class="wordmark"><svg class="mark" viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><rect x="3" y="3" width="5" height="18" rx="1"/><rect x="10" y="3" width="5" height="18" rx="1" opacity=".55"/><rect x="17" y="6" width="4" height="15" rx="1" opacity=".3"/></svg>Corpus <em>Ledger</em></div>
+    <div class="sub">Personal RAG — management console · :8052</div>
+    <div class="statuses">
+      <span><span class="dot" id="dot-manage"></span>manage</span>
+      <span><span class="dot" id="dot-rag"></span>query api :8051</span>
+    </div>
+    <button class="btn" id="theme-toggle" aria-label="Toggle light/dark theme"></button>
+  </div>
+  <nav id="nav">
+    <button data-tab="ledger" class="on">Ledger</button>
+    <button data-tab="ingest">Ingest</button>
+    <button data-tab="docs">Documents</button>
+    <button data-tab="vault">Vault</button>
+    <button data-tab="jobs">Jobs</button>
+    <button data-tab="query">Query</button>
+    <button data-tab="info">Info</button>
+  </nav>
+</header>
+
+<!-- ============================= LEDGER ============================= -->
+<section id="tab-ledger" class="on">
+  <div class="grid g4" id="stats">
+    <div class="stat"><div class="k">Chunks (JSONL)</div><div class="v"><div class="skel" style="width:60%"></div></div></div>
+    <div class="stat"><div class="k">Documents</div><div class="v"><div class="skel" style="width:50%"></div></div></div>
+    <div class="stat"><div class="k">Chroma vectors</div><div class="v"><div class="skel" style="width:60%"></div></div></div>
+    <div class="stat"><div class="k">On disk</div><div class="v"><div class="skel" style="width:40%"></div></div></div>
+  </div>
+  <div class="grid g2">
+    <div class="panel">
+      <h2>Domains</h2>
+      <p class="hint">Chunk share per domain — the shelf, spine by spine.</p>
+      <div class="spines" id="spines"><div class="skel"></div><div class="skel" style="width:80%"></div><div class="skel" style="width:65%"></div></div>
+    </div>
+    <div class="panel">
+      <h2>Chunk files</h2>
+      <p class="hint">JSONL is the source of truth; indexes are derived.</p>
+      <table><tbody id="jsonl-rows"><tr><td><div class="skel"></div></td></tr></tbody></table>
+      <div class="note">After any index-changing job, <b>restart serve_api (:8051)</b> — it loads indexes once at startup and stays warm.</div>
+    </div>
+  </div>
+  <div class="panel">
+    <h2>Recent jobs</h2>
+    <table><tbody id="recent-jobs"><tr><td class="empty">No jobs yet this session.</td></tr></tbody></table>
+  </div>
+</section>
+
+<!-- ============================= INGEST ============================= -->
+<section id="tab-ingest">
+  <div class="grid g2">
+    <div class="panel">
+      <h2>Add documents</h2>
+      <p class="hint">Files land in the vault inbox — <span class="mono" id="inbox-path">…</span> — then get indexed by an inbox ingest job.</p>
+      <div class="dropzone" id="dropzone">Drop PDFs here, or click to choose files</div>
+      <input type="file" id="filepick" multiple style="display:none">
+      <div id="upload-busy" style="display:none;margin-top:10px"><svg class="reel" viewBox="0 0 24 24"><circle class="b" cx="12" cy="12" r="9"/><circle class="a" cx="12" cy="12" r="6"/></svg>Uploading…</div>
+      <table style="margin-top:12px"><tbody id="inbox-rows"><tr><td class="empty">Inbox is empty.</td></tr></tbody></table>
+      <div class="row" style="margin-top:10px">
+        <input id="inbox-domain" placeholder="domain (opt): swe / ml / nlp…" style="width:190px" title="Stamped on every chunk of this batch — feeds domain scope routing. Inbox files have no course folder, so they land 'general' otherwise.">
+        <input id="inbox-tags" placeholder="tags (opt): agentic, python" style="flex:1;min-width:150px" title="Comma-separated. Stamped on every chunk — searchable and boosted at retrieval when a tag appears in the query.">
+        <select id="inbox-chunking" style="width:170px" title="How OVERSIZED sections are split. heading = paragraph packing (default). fixed = strict sliding window — for scanned/OCR PDFs whose paragraph structure is noise.">
+          <option value="">chunking: heading</option><option value="fixed">chunking: fixed</option></select>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn primary" id="btn-ingest-inbox">Ingest inbox now</button>
+        <span class="hint" style="margin:0">server-side lane: dup-check → ingest (archives to <span class="mono">_ingested</span>) → append</span>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Quick actions</h2>
+      <p class="hint">One click, one queued job. Watch it on the Jobs tab.</p>
+      <div class="row" style="margin-bottom:8px"><button class="btn" data-quick="rebuild_bm25">Rebuild BM25</button>
+        <span class="hint" style="margin:0">sync sparse after ingest / delete / recalibrate</span></div>
+      <div class="row" style="margin-bottom:8px"><button class="btn" data-quick="recalibrate_dry">Recalibrate courses (dry-run)</button>
+        <span class="hint" style="margin:0">metadata-only; run wet from Custom job below</span></div>
+      <div class="row" style="margin-bottom:8px"><button class="btn" data-quick="eval">Run eval suite</button>
+        <span class="hint" style="margin:0">golden-query suite — full mode needs the LLM; retrieval-only runs offline</span></div>
+      <div class="row"><button class="btn" data-quick="ocr_vlm">OCR pass (VLM)…</button>
+        <span class="hint" style="margin:0">prefills the form below with <span class="mono">--ocr-engine vlm</span></span></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Custom job</h2>
+    <p class="hint">Full control over the same CLI the terminal uses. Jobs run one at a time.</p>
+    <label class="f">Kind</label>
+    <select id="job-kind">
+      <option value="ingest_pdfs">ingest-pdfs</option>
+      <option value="ingest_notebooks">ingest-notebooks</option>
+      <option value="ingest_code">ingest-code</option>
+      <option value="index_append">index --append</option>
+      <option value="index_rebuild">index (full rebuild)</option>
+      <option value="rebuild_bm25">rebuild_bm25</option>
+      <option value="recalibrate">recalibrate_courses</option>
+      <option value="eval">eval</option>
+    </select>
+
+    <div id="jf-ingest_pdfs" class="jform">
+      <div class="grid g2">
+        <div><label class="f">Include path (substring)</label><input id="p-include" placeholder="e.g. Current Courses, Inbox, GenAI"></div>
+        <div><label class="f">Exclude path</label><input id="p-exclude" placeholder="optional"></div>
+        <div><label class="f">Output JSONL</label><input id="p-output" placeholder="data/pdf_chunks.jsonl"></div>
+        <div><label class="f">Max pages / PDF</label><input id="p-maxpages" type="number" min="1" placeholder="all"></div>
+        <div><label class="f">Pages (subset)</label><input id="p-pages" placeholder="e.g. 1-50,60,70-80" title="Ingest only these 1-based pages (inclusive ranges + singletons). Trims front-matter/index/back-matter. Takes precedence over Max pages."></div>
+        <div><label class="f">OCR engine</label>
+          <select id="p-ocr"><option value="">auto (config)</option><option>tesseract</option><option>vlm</option><option>none</option></select></div>
+        <div><label class="f">Chunking</label>
+          <select id="p-chunking" title="How OVERSIZED sections are split. heading = paragraph packing that respects the text's structure (the long-standing default). fixed = strict sliding window with even sizes — for OCR'd or wall-of-text PDFs whose paragraph structure is noise. Small sections chunk identically either way.">
+            <option value="">heading (default)</option><option>fixed</option></select></div>
+        <div style="align-self:end" class="row">
+          <label class="chk"><input type="checkbox" id="p-onlybooks">only Books folders</label>
+          <label class="chk"><input type="checkbox" id="p-skipbooks">skip Books folders</label>
+          <label class="chk"><input type="checkbox" id="p-noimages" checked>--no-images</label>
+        </div>
+      </div>
+      <div class="note">"Tech Books" counts as a Books folder (token match) — use <b>only Books</b>, not skip, when targeting it.</div>
+    </div>
+
+    <div id="jf-ingest_notebooks" class="jform" style="display:none">
+      <div class="grid g2">
+        <div><label class="f">Output JSONL</label><input id="p-nb-output" placeholder="data/ipynb_chunks.jsonl"></div>
+        <div style="align-self:end" class="row">
+          <label class="chk"><input type="checkbox" id="p-nb-figs">save figures</label>
+          <label class="chk"><input type="checkbox" id="p-nb-noout">skip cell outputs</label>
+        </div>
+      </div>
+    </div>
+
+    <div id="jf-ingest_code" class="jform" style="display:none">
+      <div class="grid g2">
+        <div><label class="f">Include path (substring)</label><input id="p-code-include" placeholder="e.g. Capstone, Current Courses"></div>
+        <div><label class="f">Exclude path</label><input id="p-code-exclude" placeholder="optional"></div>
+        <div><label class="f">Output JSONL</label><input id="p-code-output" placeholder="data/code_chunks.jsonl"></div>
+        <div><label class="f">Extensions (subset)</label><input id="p-code-exts" placeholder=".js,.ts,.sql (blank = all mapped)"></div>
+      </div>
+      <div class="note">Covers the languages the notebook loader doesn't (.js/.ts/.sql/.go/.java/.c/.cpp/.rs/.sh/…). <b>.py/.R/.Rmd/.ipynb</b> stay on <b>ingest-notebooks</b>. Agent-project roots (Workspace1, Workspace2, …) are skipped unless an Include path names them.</div>
+    </div>
+
+    <div id="jf-index_append" class="jform" style="display:none">
+      <label class="f">Chunk file to append</label>
+      <select id="p-append-file"></select>
+      <div class="note">Idempotent upsert by doc_id — safe to re-run. Don't trust the terminal's hardcoded "Next:" hint; this dropdown lists what actually exists.</div>
+    </div>
+
+    <div id="jf-recalibrate" class="jform" style="display:none">
+      <label class="chk" style="margin-top:10px"><input type="checkbox" id="p-recal-dry" checked>dry run (report only)</label>
+      <div class="note">Wet run updates Chroma metadata in place — queue a BM25 rebuild after (the sparse pickle carries its own metadata copy).</div>
+    </div>
+
+    <div class="row" style="margin-top:14px">
+      <button class="btn primary" id="btn-queue">Queue job</button>
+      <span id="queue-msg" class="hint" style="margin:0"></span>
+    </div>
+  </div>
+</section>
+
+<!-- ============================= DOCUMENTS ============================= -->
+<section id="tab-docs">
+  <div class="panel">
+    <h2>Documents</h2>
+    <p class="hint">Everything the index knows, aggregated per source file. Deleting removes chunks from ChromaDB <b>and</b> the JSONLs (vault files untouched).</p>
+    <div class="row">
+      <input id="d-q" placeholder="search filename / path…" style="flex:1;min-width:200px">
+      <select id="d-domain"><option value="">all domains</option></select>
+      <select id="d-tag" title="Filter to documents carrying this #tag"><option value="">all tags</option></select>
+      <select id="d-jsonl"><option value="">all chunk files</option></select>
+      <button class="btn" id="d-go">Filter</button>
+    </div>
+    <div id="d-busy" style="display:none;margin-top:12px"><div class="skel"></div><div class="skel" style="width:85%"></div><div class="skel" style="width:70%"></div></div>
+    <div class="tscroll">
+    <table style="margin-top:12px">
+      <thead><tr><th style="width:26px"></th><th>File</th><th>Course</th><th>Domain</th><th style="text-align:right">Chunks</th><th>In</th></tr></thead>
+      <tbody id="d-rows"><tr><td colspan="6" class="empty">Use the filter to list documents.</td></tr></tbody>
+    </table>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <span class="hint" id="d-count" style="margin:0"></span>
+      <span style="flex:1"></span>
+      <button class="btn" id="d-more" style="display:none">Load more</button>
+      <button class="btn" id="d-retag" disabled title="Set domain, course and/or add/remove #tags on the selected documents. Metadata-only: doc_ids and embeddings unchanged; BM25 rebuild queued.">Retag selected…</button>
+      <button class="btn danger" id="d-del" disabled>Delete selected…</button>
+    </div>
+    <div class="drawer" id="d-preview" style="display:none"></div>
+  </div>
+</section>
+
+<!-- ============================= VAULT ============================= -->
+<section id="tab-vault">
+  <div class="grid g2">
+    <div class="panel">
+      <h2>Vault tree</h2>
+      <p class="hint">Browse from <span class="mono" id="v-root">…</span>. ✓ = indexed (chunk count shown). Tick indexed files, stage domain/tag edits on the right. <b>Vault files are never modified</b> — only index metadata.</p>
+      <div id="v-tree" style="font-size:12.5px;line-height:2;max-height:520px;overflow:auto"></div>
+    </div>
+    <div class="panel">
+      <h2>Staged metadata changes</h2>
+      <p class="hint">Draft edits live here until you Apply (writes JSONLs + ChromaDB, queues ONE BM25 rebuild) or Discard. doc_ids/embeddings never change.</p>
+      <div class="row">
+        <input id="v-domain" placeholder="domain (blank = keep)" style="width:150px">
+        <input id="v-add" placeholder="add tags: agentic, swe" style="flex:1;min-width:120px">
+        <input id="v-rem" placeholder="remove tags" style="flex:1;min-width:100px">
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn" id="v-stage" disabled>Stage for selected (0)</button>
+        <span style="flex:1"></span>
+        <button class="btn primary" id="v-apply" disabled>Apply all…</button>
+        <button class="btn" id="v-discard" disabled>Discard</button>
+      </div>
+      <table style="margin-top:10px"><tbody id="v-staged"><tr><td class="empty">Nothing staged.</td></tr></tbody></table>
+      <h2 style="margin-top:20px">Find anywhere in the vault</h2>
+      <p class="hint">Filename search across the whole vault — RAG-membership check + staging for books outside the tree root.</p>
+      <div class="row"><input id="v-q" placeholder="filename contains…" style="flex:1"><button class="btn" id="v-go">Search</button></div>
+      <div id="v-results" style="font-size:12.5px;line-height:2;max-height:260px;overflow:auto;margin-top:8px"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================= JOBS ============================= -->
+<section id="tab-jobs">
+  <div class="grid g2">
+    <div class="panel">
+      <h2>Queue</h2>
+      <p class="hint">One worker, strictly serial — ingest jobs can't trample each other.</p>
+      <table><tbody id="j-rows"><tr><td class="empty">No jobs yet. Queue one from the Ingest tab.</td></tr></tbody></table>
+    </div>
+    <div class="panel">
+      <h2 id="j-title">Log</h2>
+      <div id="j-live" style="display:none"><svg class="reel" viewBox="0 0 24 24"><circle class="b" cx="12" cy="12" r="9"/><circle class="a" cx="12" cy="12" r="6"/></svg><span class="hint">running — tailing output</span><div class="shimmer"></div></div>
+      <pre class="log" id="j-log">Select a job to tail its log.</pre>
+      <div class="row" style="margin-top:10px"><button class="btn danger" id="j-cancel" style="display:none">Cancel job</button></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================= QUERY ============================= -->
+<section id="tab-query">
+  <div class="panel">
+    <h2>Test console</h2>
+    <p class="hint">Talks straight to the warm query endpoint (:8051). <b>Ask</b> = full RAG answer (needs FreeLLMAPI). <b>Search only</b> = retrieval, no LLM.</p>
+    <textarea id="q-text" rows="2" style="width:100%" placeholder="What do I know about conjugate priors?"></textarea>
+    <div class="row" style="margin-top:10px">
+      <select id="q-preset"><option value="">preset: none</option><option>code</option><option>concept</option><option>synthesis</option></select>
+      <input id="q-topk" type="number" min="1" max="50" placeholder="rerank_k" style="width:86px" title="rerank_top_k — how many reranked chunks reach the LLM (blank = config default, 7)">
+      <input id="q-densek" type="number" min="1" max="200" placeholder="dense_k" style="width:84px" title="dense_top_k — vector/semantic lane pool size fed INTO RRF fusion (blank = 20). Bigger = wider semantic net.">
+      <input id="q-sparsek" type="number" min="1" max="200" placeholder="sparse_k" style="width:86px" title="sparse_top_k — BM25 keyword lane pool size fed INTO RRF fusion (blank = 20). Bigger = wider keyword net.">
+      <input id="q-maxtok" type="number" min="64" max="8192" step="64" placeholder="max tokens" style="width:100px" title="Cap the answer's output tokens — Ask only (blank = config default, 2500)">
+      <label class="chk" title="Query expansion: search with a hypothetical ANSWER instead of the raw question"><input type="checkbox" id="q-hyde" checked>HyDE</label>
+      <label class="chk" title="Question-matching lane: match the query against pre-generated hypothetical questions (only chunks covered by a build_hype.py run participate; fails soft otherwise)"><input type="checkbox" id="q-hype">HyPE</label>
+      <label class="chk" title="Fuse LIVE-vault hits (needs Obsidian open with the Omnisearch HTTP server)"><input type="checkbox" id="q-omni">Omnisearch (live vault)</label>
+      <span style="flex:1"></span>
+      <button class="btn" id="q-search">Search only</button>
+      <button class="btn primary" id="q-ask">Ask</button>
+    </div>
+    <div id="q-busy" style="display:none;margin-top:14px"><svg class="reel" viewBox="0 0 24 24"><circle class="b" cx="12" cy="12" r="9"/><circle class="a" cx="12" cy="12" r="6"/></svg><span class="hint" id="q-busy-msg">retrieving…</span></div>
+    <div id="q-out" style="margin-top:14px"></div>
+  </div>
+</section>
+
+<!-- ============================= INFO / GUIDE ============================= -->
+<section id="tab-info">
+  <div class="panel">
+    <h2>How this RAG works</h2>
+    <p class="hint">A hybrid-retrieval RAG over your Obsidian vault. Its <b>core</b> is two search lanes — <b>Dense</b> (semantic / vectors) and <b>Sparse</b> (keyword / BM25) — run together and <b>fused</b> with Reciprocal Rank Fusion; optional branches can widen or reshape the query and add extra lanes. The fused pool is <b>re-ranked</b> by a cross-encoder, then a cited answer is <b>grounded</b> in your own materials. Everything up to generation is local; only the final answer needs the LLM.</p>
+    <div class="row" style="margin:0 0 12px">
+      <button class="btn dgbtn on" data-dg="query">Query pipeline</button>
+      <button class="btn dgbtn" data-dg="ingest">Ingestion pipeline</button>
+    </div>
+    <div id="dg-query">
+    <div class="diagram">
+      <svg viewBox="0 0 960 752" width="960" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Query pipeline diagram">
+        <style>
+          .t{fill:var(--ink);font:600 12.5px var(--body,sans-serif);text-anchor:middle}
+          .t2{fill:var(--ink);font:600 11px var(--body,sans-serif);text-anchor:middle}
+          .tb{fill:var(--blue);font:600 11.5px var(--body,sans-serif);text-anchor:middle}
+          .ts{fill:var(--ink-dim);font:10px var(--mono,monospace);text-anchor:middle}
+          .to{fill:var(--ink-dim);font:9.5px var(--mono,monospace);text-anchor:middle}
+          .tol{fill:var(--ink-dim);font:9.5px var(--mono,monospace)}
+          .tor{fill:var(--amber);font:600 9.5px var(--mono,monospace);text-anchor:end}
+          .tk{fill:var(--amber);font:600 9.5px var(--mono,monospace);text-anchor:middle}
+          .tt{fill:var(--amber);font:600 10.5px var(--mono,monospace);text-anchor:middle;letter-spacing:.14em}
+          .num{fill:var(--amber);font:600 10px var(--mono,monospace);text-anchor:middle}
+          .main{fill:var(--panel-2);stroke:var(--amber-dim);stroke-width:1.4}
+          .core{fill:var(--panel-2);stroke:var(--amber);stroke-width:2}
+          .opt{fill:var(--panel);stroke:var(--ink-faint);stroke-width:1.2;stroke-dasharray:5 4}
+          .major{fill:var(--panel-2);stroke:var(--blue);stroke-width:1.5}
+          .fin{fill:var(--amber);stroke:var(--amber);stroke-width:1.3}
+          .chip{fill:var(--panel-2);stroke:var(--amber-dim);stroke-width:1}
+          .nc{fill:var(--panel-2);stroke:var(--amber-dim);stroke-width:1.2}
+          .w{stroke:var(--ink-faint);stroke-width:1.7;fill:none;marker-end:url(#ah)}
+          .wl{stroke:var(--ink-faint);stroke-width:1.7;fill:none}
+          .ow{stroke:var(--ink-faint);stroke-width:1.3;fill:none;stroke-dasharray:5 4;marker-end:url(#ah)}
+          .bw{stroke:var(--blue);stroke-width:1.5;fill:none;stroke-dasharray:6 4;marker-end:url(#ahb)}
+          .byp{stroke:var(--ink-faint);stroke-width:1.1;fill:none;stroke-dasharray:2 3.5;opacity:.75;marker-end:url(#ah)}
+        </style>
+        <defs>
+          <marker id="ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--ink-faint)"/></marker>
+          <marker id="ahb" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--blue)"/></marker>
+        </defs>
+
+        <!-- ===== wires first, boxes drawn on top ===== -->
+        <!-- question -> lane split -->
+        <path class="wl" d="M480 52 V72"/>
+        <path class="wl" d="M407 72 H553"/>
+        <path class="w" d="M407 72 V114"/><path class="w" d="M553 72 V114"/>
+        <!-- lanes -> fusion funnel -->
+        <path class="w" d="M407 207 V247"/><path class="w" d="M553 207 V247"/>
+        <!-- boost tray -> rerank -> expansion -> generation -> answer -->
+        <path class="w" d="M480 350 V379"/>
+        <path class="w" d="M480 459 V477"/>
+        <path class="w" d="M480 544 V563"/>
+        <path class="w" d="M480 643 V655"/>
+        <!-- the ORIGINAL question bypass: rerank + generation never see HyDE text -->
+        <path class="byp" d="M558 44 H948 V600 H596"/>
+        <path class="byp" d="M948 416 H624"/>
+        <text class="to" transform="rotate(90 934 300)" x="934" y="300" style="opacity:.85">original question — bypasses HyDE</text>
+        <!-- HyDE joins the spine ABOVE the split: expanded text feeds BOTH lanes -->
+        <path class="ow" d="M254 96 C330 92, 420 78, 472 64"/>
+        <text class="to" x="360" y="76">expanded search text</text>
+        <!-- extra optional lanes pour into the funnel -->
+        <path class="ow" d="M266 300 C318 298, 348 286, 384 268"/>
+        <!-- scope router: raw question in, filtered lanes out -->
+        <path class="bw" d="M558 28 C640 30, 690 52, 738 92"/>
+        <path class="bw" d="M790 202 V282 H564"/>
+
+        <!-- ===== center spine ===== -->
+        <rect class="main" x="402" y="16" width="156" height="36" rx="8" style="stroke:var(--amber);stroke-width:1.6"/>
+        <text class="t" x="480" y="38">Your question</text>
+        <rect class="chip" x="392" y="44" width="64" height="17" rx="8.5"/><text class="tk" x="424" y="56">preset</text>
+
+        <!-- 1 · the always-on hybrid core -->
+        <rect x="328" y="104" width="304" height="104" rx="12" fill="var(--amber)" opacity="0.08"/>
+        <text class="tt" x="480" y="96">HYBRID RETRIEVAL · ALWAYS-ON CORE</text>
+        <rect class="core" x="344" y="118" width="126" height="78" rx="7"/>
+        <text class="t" x="407" y="140">Dense</text>
+        <text class="ts" x="407" y="156">semantic · bge-small</text>
+        <text class="ts" x="407" y="170">ChromaDB vectors</text>
+        <rect class="core" x="490" y="118" width="126" height="78" rx="7"/>
+        <text class="t" x="553" y="140">Sparse</text>
+        <text class="ts" x="553" y="156">keyword · BM25</text>
+        <text class="ts" x="553" y="170">bm25s index</text>
+        <rect class="chip" x="361" y="188" width="92" height="17" rx="8.5"/><text class="tk" x="407" y="200">dense_top_k</text>
+        <rect class="chip" x="505" y="188" width="96" height="17" rx="8.5"/><text class="tk" x="553" y="200">sparse_top_k</text>
+
+        <!-- 2 · RRF funnel + metadata-boost tray -->
+        <polygon class="main" points="374,252 586,252 544,316 416,316" style="stroke-linejoin:round"/>
+        <text class="t" x="480" y="274">RRF fusion</text>
+        <text class="ts" x="480" y="291" style="fill:var(--amber)">score += 1 / (60 + rank)</text>
+        <text class="to" x="480" y="306">summed over all lanes</text>
+        <rect class="main" x="390" y="316" width="180" height="34" rx="7"/>
+        <text x="480" y="330" style="fill:var(--ink);font:600 10.5px var(--body,sans-serif);text-anchor:middle">+ metadata boost</text>
+        <text class="to" x="480" y="343">course · #tag · code nudges</text>
+
+        <!-- 3 · cross-encoder -->
+        <rect class="main" x="340" y="384" width="280" height="64" rx="8"/>
+        <text class="t" x="480" y="406">Cross-encoder rerank</text>
+        <text class="ts" x="480" y="422">reads (question, chunk) pairs together</text>
+        <text class="ts" x="480" y="436">far sharper than vector similarity</text>
+        <rect class="chip" x="430" y="440" width="100" height="17" rx="8.5"/><text class="tk" x="480" y="452">rerank_top_k</text>
+
+        <!-- 4 · E2 small-to-big (optional) -->
+        <rect class="opt" x="345" y="482" width="270" height="62" rx="8"/>
+        <text class="t2" x="480" y="502">Small-to-big expansion · optional</text>
+        <text class="to" x="480" y="518">swap chunks for their parent section</text>
+        <text class="to" x="480" y="532">on in the synthesis preset · per-call toggle</text>
+
+        <!-- 5 · generation -->
+        <rect class="main" x="368" y="568" width="224" height="64" rx="8"/>
+        <text class="t" x="480" y="588">Grounded generation</text>
+        <text class="ts" x="480" y="604">answers only from retrieved chunks</text>
+        <text class="ts" x="480" y="618">inline [chunk N] citations</text>
+        <rect class="chip" x="436" y="624" width="88" height="17" rx="8.5"/><text class="tk" x="480" y="636">max_tokens</text>
+
+        <!-- answer -->
+        <rect class="fin" x="400" y="660" width="160" height="38" rx="8"/>
+        <text x="480" y="684" style="fill:var(--btn-primary-ink);font:600 13px var(--body,sans-serif);text-anchor:middle">Cited answer</text>
+        <text class="to" x="480" y="714">confidence pill · sources · retrieval echo</text>
+
+        <!-- ===== left column ===== -->
+        <rect class="opt" x="30" y="56" width="224" height="92" rx="8"/>
+        <text class="t2" x="142" y="76">HyDE · optional</text>
+        <text class="to" x="142" y="94">rewrites the question into a</text>
+        <text class="to" x="142" y="108">hypothetical answer, so retrieval</text>
+        <text class="to" x="142" y="122">matches prose against prose</text>
+        <text class="tk" x="142" y="138">auto-skipped for code intent</text>
+
+        <rect class="opt" x="30" y="252" width="234" height="100" rx="8"/>
+        <text class="t2" x="147" y="272">Extra lanes · optional</text>
+        <circle cx="42" cy="290.5" r="2.5" fill="var(--amber)"/>
+        <text class="tol" x="50" y="294">HyPE · pre-asked questions</text>
+        <text class="tor" x="252" y="294">toggle</text>
+        <circle cx="42" cy="310.5" r="2.5" fill="var(--amber)"/>
+        <text class="tol" x="50" y="314">Code · own scripts &amp; notebooks</text>
+        <text class="tor" x="252" y="314">auto</text>
+        <circle cx="42" cy="330.5" r="2.5" fill="var(--amber)"/>
+        <text class="tol" x="50" y="334">Live vault · unindexed edits</text>
+        <text class="tor" x="252" y="334">toggle</text>
+
+        <!-- ===== right column ===== -->
+        <rect class="major" x="706" y="96" width="224" height="104" rx="8"/>
+        <text class="tb" x="818" y="118">Scope routing · automatic</text>
+        <text class="to" x="818" y="136">detects domain &amp; file-type wording</text>
+        <text class="to" x="818" y="150">in the RAW question (before HyDE)</text>
+        <text class="to" x="818" y="164">then opens filtered dense + sparse</text>
+        <text class="to" x="818" y="178">lanes — guaranteed candidate seats</text>
+
+        <!-- stage number coins -->
+        <circle class="nc" cx="328" cy="104" r="9"/><text class="num" x="328" y="107.5">1</text>
+        <circle class="nc" cx="374" cy="252" r="9"/><text class="num" x="374" y="255.5">2</text>
+        <circle class="nc" cx="340" cy="384" r="9"/><text class="num" x="340" y="387.5">3</text>
+        <circle class="nc" cx="345" cy="482" r="9"/><text class="num" x="345" y="485.5">4</text>
+        <circle class="nc" cx="368" cy="568" r="9"/><text class="num" x="368" y="571.5">5</text>
+
+        <!-- legend -->
+        <rect class="main" x="24" y="726" width="28" height="11" rx="3"/><text class="tol" x="60" y="735">always-on stage</text>
+        <rect class="opt" x="170" y="726" width="28" height="11" rx="3"/><text class="tol" x="206" y="735">optional · toggle / preset</text>
+        <rect class="major" x="370" y="726" width="28" height="11" rx="3"/><text class="tol" x="406" y="735">automatic router</text>
+        <path class="byp" d="M530 731 H558" style="marker-end:none"/><text class="tol" x="566" y="735">the original question</text>
+      </svg>
+    </div>
+    <div class="diagram-cap">
+      <span style="color:var(--ink)">Solid = always-on; dashed = optional (toggle, preset, or automatic); blue = the automatic scope router; dotted = the untouched original question.</span>
+      Every retrieval lane — the two core lanes, scope-filtered lanes, <b>HyPE</b> / <b>Code</b> / <b>Live-vault</b> —
+      lands in the <i>same</i> RRF pool, so adding a lane can only add candidates, never hide any.
+      <b>HyDE</b> reshapes what retrieval <i>searches for</i>, but the cross-encoder scores — and the generator
+      answers — your <b>original question</b>. <b>dense_top_k</b> / <b>sparse_top_k</b> size the candidate pool,
+      <b>rerank_top_k</b> decides how many chunks reach the LLM, <b>max_tokens</b> caps the answer.
+      <br><span style="color:var(--ink-faint)">The whole ingest side has its own diagram — flip the toggle above.</span>
+    </div>
+    </div><!-- /dg-query -->
+
+    <div id="dg-ingest" style="display:none">
+    <div class="diagram">
+      <svg viewBox="0 0 960 780" width="960" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Ingestion pipeline diagram">
+        <style>
+          .t{fill:var(--ink);font:600 12.5px var(--body,sans-serif);text-anchor:middle}
+          .t2{fill:var(--ink);font:600 11px var(--body,sans-serif);text-anchor:middle}
+          .tb{fill:var(--blue);font:600 11.5px var(--body,sans-serif);text-anchor:middle}
+          .ts{fill:var(--ink-dim);font:10px var(--mono,monospace);text-anchor:middle}
+          .to{fill:var(--ink-dim);font:9.5px var(--mono,monospace);text-anchor:middle}
+          .tol{fill:var(--ink-dim);font:9.5px var(--mono,monospace)}
+          .tk{fill:var(--amber);font:600 9.5px var(--mono,monospace);text-anchor:middle}
+          .tm{fill:var(--ink);font:600 12.5px var(--mono,monospace);text-anchor:middle}
+          .tt{fill:var(--amber);font:600 10.5px var(--mono,monospace);text-anchor:middle;letter-spacing:.14em}
+          .num{fill:var(--amber);font:600 10px var(--mono,monospace);text-anchor:middle}
+          .main{fill:var(--panel-2);stroke:var(--amber-dim);stroke-width:1.4}
+          .core{fill:var(--panel-2);stroke:var(--amber);stroke-width:2}
+          .opt{fill:var(--panel);stroke:var(--ink-faint);stroke-width:1.2;stroke-dasharray:5 4}
+          .major{fill:var(--panel-2);stroke:var(--blue);stroke-width:1.5}
+          .fin{fill:var(--amber);stroke:var(--amber);stroke-width:1.3}
+          .chip{fill:var(--panel-2);stroke:var(--amber-dim);stroke-width:1}
+          .nc{fill:var(--panel-2);stroke:var(--amber-dim);stroke-width:1.2}
+          .w{stroke:var(--ink-faint);stroke-width:1.7;fill:none;marker-end:url(#iah)}
+          .wl{stroke:var(--ink-faint);stroke-width:1.7;fill:none}
+          .ow{stroke:var(--ink-faint);stroke-width:1.3;fill:none;stroke-dasharray:5 4;marker-end:url(#iah)}
+          .bw{stroke:var(--blue);stroke-width:1.5;fill:none;stroke-dasharray:6 4;marker-end:url(#iahb)}
+        </style>
+        <defs>
+          <marker id="iah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--ink-faint)"/></marker>
+          <marker id="iahb" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--blue)"/></marker>
+        </defs>
+
+        <!-- ===== wires first ===== -->
+        <!-- files -> loader split rail -->
+        <path class="wl" d="M480 50 V134"/>
+        <path class="wl" d="M231 134 H729"/>
+        <path class="w" d="M231 134 V164"/><path class="w" d="M397 134 V164"/>
+        <path class="w" d="M563 134 V164"/><path class="w" d="M729 134 V164"/>
+        <!-- loaders -> JSONL -->
+        <path class="wl" d="M231 297 V318"/><path class="wl" d="M397 297 V318"/>
+        <path class="wl" d="M563 297 V318"/><path class="wl" d="M729 297 V318"/>
+        <path class="wl" d="M231 318 H729"/>
+        <path class="w" d="M480 318 V338"/>
+        <!-- JSONL -> append -> derived split -> restart -->
+        <path class="w" d="M480 426 V446"/>
+        <path class="wl" d="M480 526 V534"/>
+        <path class="wl" d="M408 534 H552"/>
+        <path class="w" d="M408 534 V564"/><path class="w" d="M552 534 V564"/>
+        <path class="wl" d="M408 642 V668"/><path class="wl" d="M552 642 V668"/>
+        <path class="wl" d="M408 668 H552"/>
+        <path class="w" d="M480 668 V686"/>
+        <!-- discovery guards feed the split -->
+        <path class="ow" d="M706 80 C620 78, 560 70, 488 66"/>
+        <!-- OCR branch into the PDF loader -->
+        <path class="bw" d="M142 138 C146 190, 240 230, 318 226"/>
+        <!-- inbox auto-pipeline queues the same jobs -->
+        <path class="bw" d="M264 420 C296 432, 318 462, 336 486"/>
+        <!-- post-ingest ops act on the corpus -->
+        <path class="ow" d="M706 408 H668 V602 H624"/>
+
+        <!-- ===== spine ===== -->
+        <rect class="main" x="396" y="14" width="168" height="36" rx="8" style="stroke:var(--amber);stroke-width:1.6"/>
+        <text class="t" x="480" y="36">Your vault files</text>
+        <text class="tol" x="572" y="32">vault = read-only;</text>
+        <text class="tol" x="572" y="45">inbox = the only write</text>
+
+        <!-- 1 · loaders, one per format -->
+        <rect x="148" y="154" width="664" height="154" rx="12" fill="var(--amber)" opacity="0.08"/>
+        <text class="tt" x="480" y="148">LOADERS · ONE PER FORMAT</text>
+        <rect class="core" x="156" y="168" width="150" height="118" rx="7"/>
+        <text class="t" x="231" y="190">Markdown</text>
+        <text class="to" x="231" y="208">.md notes · daily notes</text>
+        <text class="to" x="231" y="222">heading tree → context</text>
+        <text class="to" x="231" y="236">headers · E2 parents</text>
+        <rect class="chip" x="200" y="278" width="62" height="17" rx="8.5"/><text class="tk" x="231" y="290">chunking</text>
+        <rect class="core" x="322" y="168" width="150" height="118" rx="7"/>
+        <text class="t" x="397" y="190">PDF</text>
+        <text class="to" x="397" y="208">PyMuPDF text · figures</text>
+        <text class="to" x="397" y="222">born-digital or scanned</text>
+        <text class="to" x="397" y="236">scanned pages → OCR</text>
+        <rect class="chip" x="338" y="278" width="118" height="17" rx="8.5"/><text class="tk" x="397" y="290">--pages · chunking</text>
+        <rect class="core" x="488" y="168" width="150" height="118" rx="7"/>
+        <text class="t" x="563" y="190">Notebooks</text>
+        <text class="to" x="563" y="208">.ipynb .py .R .Rmd</text>
+        <text class="to" x="563" y="222">md + code cells</text>
+        <text class="to" x="563" y="236">outputs &amp; figures opt.</text>
+        <rect class="chip" x="515" y="278" width="96" height="17" rx="8.5"/><text class="tk" x="563" y="290">--save-figures</text>
+        <rect class="core" x="654" y="168" width="150" height="118" rx="7"/>
+        <text class="t" x="729" y="190">Code</text>
+        <text class="to" x="729" y="208">.js .ts .sql .go .rs …</text>
+        <text class="to" x="729" y="222">structure-aware split</text>
+        <text class="to" x="729" y="236">agent-root guards</text>
+        <rect class="chip" x="704" y="278" width="50" height="17" rx="8.5"/><text class="tk" x="729" y="290">--exts</text>
+
+        <!-- 2 · the source of truth -->
+        <rect class="core" x="300" y="342" width="360" height="84" rx="9"/>
+        <text class="tm" x="480" y="366">data\*_chunks.jsonl</text>
+        <text class="ts" x="480" y="383" style="fill:var(--amber)">the source of truth — indexes derive from it</text>
+        <text class="to" x="480" y="398">doc_id = sha256(source_file :: text[:500])[:16]</text>
+        <text class="to" x="480" y="412">course · domain · #tags · pages · language · has_code</text>
+
+        <!-- 3 · append -->
+        <rect class="main" x="340" y="450" width="280" height="76" rx="8"/>
+        <text class="t" x="480" y="470">index --append · idempotent</text>
+        <text class="ts" x="480" y="486">embeds only NEW doc_ids (bge-small · CPU)</text>
+        <text class="ts" x="480" y="500">then auto-rebuilds the sparse index</text>
+        <text class="to" x="480" y="515">MemoryError? rebuild_bm25.py = low-RAM recovery</text>
+
+        <!-- 4 · derived indexes -->
+        <rect x="328" y="554" width="304" height="100" rx="12" fill="var(--amber)" opacity="0.08"/>
+        <text class="tt" x="480" y="548">DERIVED INDEXES · REBUILDABLE</text>
+        <rect class="main" x="342" y="568" width="132" height="74" rx="7"/>
+        <text class="t" x="408" y="590">ChromaDB</text>
+        <text class="ts" x="408" y="606">dense vectors</text>
+        <text class="ts" x="408" y="620">chroma_db on G:</text>
+        <rect class="main" x="486" y="568" width="132" height="74" rx="7"/>
+        <text class="t" x="552" y="590">bm25s</text>
+        <text class="ts" x="552" y="606">sparse keywords</text>
+        <text class="ts" x="552" y="620">bm25_index.pkl</text>
+
+        <!-- 5 · restart -->
+        <rect class="fin" x="386" y="690" width="188" height="38" rx="8"/>
+        <text x="480" y="714" style="fill:var(--btn-primary-ink);font:600 13px var(--body,sans-serif);text-anchor:middle">Restart the query API</text>
+        <text class="to" x="480" y="746">:8051 loads indexes once and stays warm</text>
+
+        <!-- ===== left column ===== -->
+        <rect class="major" x="30" y="26" width="224" height="112" rx="8"/>
+        <text class="tb" x="142" y="46">Scanned-page OCR · auto</text>
+        <text class="to" x="142" y="64">page has no text layer? → OCR</text>
+        <text class="to" x="142" y="78">tesseract · CPU, fast</text>
+        <text class="to" x="142" y="92">VLM DeepSeek-OCR :8100 · GPU</text>
+        <text class="to" x="142" y="106">auto | tesseract | vlm | none</text>
+
+        <rect class="major" x="30" y="340" width="234" height="136" rx="8"/>
+        <text class="tb" x="147" y="360">Inbox auto-pipeline</text>
+        <text class="tol" x="44" y="380">1  drop PDFs → vault inbox</text>
+        <text class="tol" x="44" y="396">2  dup-check vs the manifest</text>
+        <text class="tol" x="44" y="412">3  ingest → archive to _ingested</text>
+        <text class="tol" x="44" y="428">4  append + sparse rebuild</text>
+        <text class="tol" x="44" y="444">5  restart :8051 (reminder)</text>
+        <text class="to" x="147" y="464">serial · idempotent · fails loud</text>
+
+        <!-- ===== right column ===== -->
+        <rect class="opt" x="706" y="26" width="224" height="112" rx="8"/>
+        <text class="t2" x="818" y="46">Discovery guards</text>
+        <text class="to" x="818" y="64">skip-roots: agent trees stay out</text>
+        <text class="to" x="818" y="78">Books folders: only / skip</text>
+        <text class="to" x="818" y="92">include / exclude path substrings</text>
+        <text class="to" x="818" y="106">--pages subsets · dedup skip-list</text>
+
+        <rect class="opt" x="706" y="340" width="224" height="130" rx="8"/>
+        <text class="t2" x="818" y="360">After ingest · optional</text>
+        <circle cx="718" cy="376.5" r="2.5" fill="var(--amber)"/>
+        <text class="tol" x="726" y="380">HyPE · 1 LLM call per chunk</text>
+        <circle cx="718" cy="394.5" r="2.5" fill="var(--amber)"/>
+        <text class="tol" x="726" y="398">retag · metadata-only, fast</text>
+        <circle cx="718" cy="412.5" r="2.5" fill="var(--amber)"/>
+        <text class="tol" x="726" y="416">delete · paged + JSONL edit</text>
+        <circle cx="718" cy="430.5" r="2.5" fill="var(--amber)"/>
+        <text class="tol" x="726" y="434">recalibrate · course metadata</text>
+        <text class="to" x="818" y="456">run from the console tabs</text>
+
+        <!-- stage number coins -->
+        <circle class="nc" cx="148" cy="154" r="9"/><text class="num" x="148" y="157.5">1</text>
+        <circle class="nc" cx="300" cy="342" r="9"/><text class="num" x="300" y="345.5">2</text>
+        <circle class="nc" cx="340" cy="450" r="9"/><text class="num" x="340" y="453.5">3</text>
+        <circle class="nc" cx="328" cy="554" r="9"/><text class="num" x="328" y="557.5">4</text>
+        <circle class="nc" cx="386" cy="690" r="9"/><text class="num" x="386" y="693.5">5</text>
+
+        <!-- legend -->
+        <rect class="main" x="24" y="756" width="28" height="11" rx="3"/><text class="tol" x="60" y="765">always-on stage</text>
+        <rect class="opt" x="170" y="756" width="28" height="11" rx="3"/><text class="tol" x="206" y="765">optional · flags / toggles</text>
+        <rect class="major" x="370" y="756" width="28" height="11" rx="3"/><text class="tol" x="406" y="765">automatic</text>
+      </svg>
+    </div>
+    <div class="diagram-cap">
+      <span style="color:var(--ink)">Solid = always-on; dashed = optional flags; blue = automatic.</span>
+      Four loaders, <i>one JSONL contract</i>: whatever the format, every chunk lands in <b>data\*_chunks.jsonl</b>
+      with the same doc_id rule and metadata — that is the corpus. The indexes are <b>derived</b>: lose either and it
+      rebuilds from the JSONLs. <b>index --append</b> embeds only new doc_ids, so re-running anything is safe;
+      <b>text</b> edits mint new doc_ids (swap playbook), <b>metadata</b> edits go through retag with no re-embed.
+      The <b>chunking</b> picker (heading | fixed) only changes how oversized sections split — small sections are
+      identical either way. The query API keeps indexes warm — <b>restart :8051 after any index change</b>.
+    </div>
+    </div><!-- /dg-ingest -->
+  </div>
+
+  <div class="panel">
+    <h2>What each tab does</h2>
+    <div class="infocards">
+      <div class="infocard"><h3>Ledger</h3><p>The at-a-glance dashboard: total chunks &amp; documents, ChromaDB vector count, disk usage, the per-domain chunk share (the “shelf”), which JSONL files hold what, and the most recent jobs. Read-only.</p></div>
+      <div class="infocard"><h3>Ingest</h3><p>Add material. Drop PDFs into the vault inbox and <code>Ingest inbox now</code> (dup-checked, archived, appended), or use <b>Custom job</b> for full control: <code>ingest-pdfs</code> (with <code>--pages</code> subsets + OCR engine), <code>ingest-notebooks</code>, <code>ingest-code</code> (.js/.ts/.sql/…), append, rebuild. One serial worker; watch it on Jobs.</p></div>
+      <div class="infocard"><h3>Documents</h3><p>Everything the index knows, aggregated per source file. Filter by name, domain, <b>#tag</b>, or chunk file; preview the first chunks; <b>retag</b> (metadata-only, no re-embed) or <b>delete</b> from the index (vault files untouched).</p></div>
+      <div class="infocard"><h3>Vault</h3><p>Browse the real vault tree with ✓ in-RAG badges + chunk counts, stage domain/tag edits on indexed files and Apply as one batch, and search filenames across the whole vault (including books outside the browse root). Never writes to your vault.</p></div>
+      <div class="infocard"><h3>Jobs</h3><p>The serial job queue and live logs. Tail any job’s output, cancel a running one, and <b>retry</b> a failed one — every job is idempotent, so a retry never duplicates committed work. A zero-result ingest fails (not a silent “done”).</p></div>
+      <div class="infocard"><h3>Query</h3><p>Talk straight to the warm query API (:8051). <b>Search only</b> = retrieval (no LLM, works offline of the generator); <b>Ask</b> = full grounded answer. All the hyperparameters below live here, plus copy / <code>.md</code> export and the md+LaTeX <b>Preview</b> toggle.</p></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>The Query knobs — what each one changes</h2>
+    <p class="hint">Everything is per-call and leaves the warm defaults untouched. The retrieval echo under each answer shows what actually ran. General rule: <b>tune retrieval on <i>Search only</i></b> (free, local, shows scores) and spend one <b>Ask</b> once the right chunks are surfacing.</p>
+    <table>
+      <thead><tr><th>Knob</th><th>What it controls</th><th>Enable / raise ⟶ vs ⟵ disable / lower</th></tr></thead>
+      <tbody>
+        <tr><td>preset</td><td>A named bundle of the knobs below. <code>code</code> = wide + no HyDE + code-boosted; <code>concept</code> = tight + HyDE; <code>synthesis</code> = wide + HyDE + parent/neighbor context.</td><td>Pick <code>code</code> for “my implementation of X”, <code>concept</code> for a definition, <code>synthesis</code> to connect topics. Blank = auto (code-intent queries self-apply <code>code</code>).</td></tr>
+        <tr><td>rerank_k</td><td><code>rerank_top_k</code> — how many reranked chunks reach the LLM.</td><td>Raise (10–15) for richer, multi-source answers; lower (3–5) for a tight, focused answer. Default 7.</td></tr>
+        <tr><td>dense_k</td><td><code>dense_top_k</code> — vector/semantic candidate pool into fusion.</td><td>Raise for paraphrase/conceptual questions (wider semantic net); the reranker still trims. Default 20.</td></tr>
+        <tr><td>sparse_k</td><td><code>sparse_top_k</code> — BM25 keyword candidate pool into fusion.</td><td>Raise for exact terms, code identifiers, names, error strings. Default 20.</td></tr>
+        <tr><td>max tokens</td><td>Caps the answer’s output length (Ask only).</td><td>Small (200–400) for a quick fact; large (1500+) for a full synthesis. Default 2500.</td></tr>
+        <tr><td>HyDE</td><td>Searches with a hypothetical <i>answer</i> instead of the raw question — helps conceptual recall.</td><td>ON for concepts/paraphrase. <b>OFF for code / exact-term / “my script”</b> queries (the prose hypothetical drags in lecture notes). The <code>code</code> preset turns it off for you.</td></tr>
+        <tr><td>HyPE</td><td>Adds a lane matching your query against pre-generated hypothetical <i>questions</i> per chunk.</td><td>ON when your wording differs from how the material is written. Safe to try — fails soft if a chunk wasn’t HyPE-indexed. Default off.</td></tr>
+        <tr><td>Omnisearch</td><td>Fuses live-vault hits from Obsidian (notes not yet ingested).</td><td>ON for “this week / today / just wrote”. Needs Obsidian open with the Omnisearch HTTP server; else zero live hits, no error.</td></tr>
+      </tbody>
+    </table>
+    <p class="hint" style="margin-top:10px">Not exposed as buttons but carried by the <code>synthesis</code> preset: <b>parent_context</b> (swap a note chunk for its full section) and <b>neighbor_context</b> (add a PDF’s adjacent pages) — use when citations are on-topic but fragmentary.</p>
+  </div>
+
+  <div class="panel">
+    <h2>The fusion math (RRF)</h2>
+    <p class="hint">Each lane returns its own ranked list. A document at rank <i>r</i> in a lane contributes \( 1/(k+r) \); a doc’s fused score is the sum across every lane it appears in. Then the cross-encoder reranks the top of that pool.</p>
+    <div class="formula">$$ \text{score}(d) \;=\; \sum_{\ell \,\in\, \text{lanes}} \frac{1}{k + r_\ell(d)}, \qquad k = 60 $$</div>
+    <p class="hint"><b>Why \(k=60\)?</b> It’s the smoothing constant from the original RRF paper (Cormack et al., 2009) and the de-facto default. With \(k=60\), rank 0 ⟶ \(1/60\!\approx\!0.0167\) and rank 1 ⟶ \(1/61\!\approx\!0.0164\): the first ~dozen ranks contribute almost equally, so no single lane’s exact ordering dominates. A <i>small</i> k sharpens (the #1 hit in each lane wins); a <i>large</i> k flattens (rank barely matters). 60 is the tested middle ground — kept as-is.</p>
+    <p class="hint"><b>Why no per-lane weights?</b> Weighted RRF (\( \sum w_\ell/(k+r_\ell) \)) is a legitimate but marginal tweak <i>here</i>: a cross-encoder reranker sits downstream and re-scores the fused pool, so as long as the right chunks are <i>in</i> the pool (governed by <code>dense_top_k</code> / <code>sparse_top_k</code>), the reranker decides the final order. Weights would mostly re-add a tuning burden for gains within noise — so the honest levers are the per-lane pool sizes + <code>rerank_top_k</code> above, not fusion weights.</p>
+  </div>
+</section>
+</div>
+<div id="toast"></div>
+
+<script>
+"use strict";
+const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+const state={ragApi:"http://127.0.0.1:8051",jsonls:[],docsOffset:0,docsQuery:{},selDocs:new Set(),job:null,jobOffset:0,timers:{}};
+const fmt=n=>typeof n==="number"?n.toLocaleString("en-US"):n;
+const gb=b=>b>1<<30?(b/(1<<30)).toFixed(2)+" GB":(b/(1<<20)).toFixed(1)+" MB";
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+function toast(msg,err){const t=document.createElement("div");t.className="tst"+(err?" err":"");t.textContent=msg;
+  $("#toast").append(t);setTimeout(()=>t.remove(),err?7000:4200)}
+async function api(path,opts){const r=await fetch(path,opts);const j=await r.json().catch(()=>({}));
+  if(!r.ok||j.ok===false)throw new Error(j.error||j.detail||r.status);return j}
+
+/* ---------- tabs ---------- */
+$("#nav").addEventListener("click",e=>{const b=e.target.closest("button");if(!b)return;
+  $$("#nav button").forEach(x=>x.classList.toggle("on",x===b));
+  $$("section").forEach(s=>s.classList.toggle("on",s.id==="tab-"+b.dataset.tab));
+  clearInterval(state.timers.tab);
+  if(b.dataset.tab==="ledger"){loadOverview();state.timers.tab=setInterval(loadOverview,10000)}
+  if(b.dataset.tab==="ingest")loadInbox();
+  if(b.dataset.tab==="jobs"){loadJobs();state.timers.tab=setInterval(loadJobs,2000)}
+  if(b.dataset.tab==="vault"&&!state.vaultLoaded){state.vaultLoaded=true;loadVaultRoot()}
+  if(b.dataset.tab==="info")renderInfoMath();
+});
+/* Render the Info tab's LaTeX once KaTeX is available (deferred CDN load). */
+function renderInfoMath(){
+  if(state.infoRendered)return;
+  if(!window.renderMathInElement){setTimeout(renderInfoMath,300);return;}
+  try{renderMathInElement($("#tab-info"),{delimiters:[
+    {left:"$$",right:"$$",display:true},{left:"\\[",right:"\\]",display:true},
+    {left:"\\(",right:"\\)",display:false}],throwOnError:false});
+    state.infoRendered=true;}catch(e){}
+}
+
+/* ---------- ledger ---------- */
+async function loadOverview(){
+  try{
+    const o=await api("/api/overview");
+    state.ragApi=o.rag_api.url; state.jsonls=o.jsonl_files;
+    $("#dot-manage").className="dot ok";
+    $("#dot-rag").className="dot "+(o.rag_api.ready?"ok":"bad");
+    $("#stats").innerHTML=`
+      <div class="stat"><div class="k">Chunks (JSONL)</div><div class="v">${fmt(o.chunks)}</div></div>
+      <div class="stat"><div class="k">Documents</div><div class="v">${fmt(o.files)}</div></div>
+      <div class="stat"><div class="k">Chroma vectors</div><div class="v">${fmt(o.chroma_count)}</div></div>
+      <div class="stat"><div class="k">On disk</div><div class="v">${gb(o.disk.chroma_db+o.disk.bm25_index+o.disk.jsonl_total)}<br><small>chroma ${gb(o.disk.chroma_db)} · bm25 ${gb(o.disk.bm25_index)}</small></div></div>`;
+    const doms=Object.entries(o.by_domain), max=Math.max(...doms.map(d=>d[1]),1);
+    const domTotal=doms.reduce((a,d)=>a+d[1],0)||1;
+    $("#spines").innerHTML=doms.map(([d,n])=>{
+      const pct=100*n/domTotal;
+      return `<div class="spine"><div class="lbl">${esc(d)}</div>
+        <div><div class="bar" style="width:${Math.max(2,100*n/max)}%"></div></div>
+        <div class="n">${fmt(n)}<span class="pct">${pct>=9.5?pct.toFixed(0):pct.toFixed(1)}%</span></div></div>`;
+    }).join("")||`<div class="empty">No chunks found.</div>`;
+    $("#jsonl-rows").innerHTML=Object.entries(o.by_jsonl).map(([f,n])=>
+      `<tr><td class="mono">${esc(f)}</td><td style="text-align:right" class="mono">${fmt(n)}</td></tr>`).join("");
+    $("#recent-jobs").innerHTML=o.recent_jobs.length?o.recent_jobs.map(j=>
+      `<tr><td class="mono">${esc(j.kind)}</td><td><span class="pill ${j.status==="running"?"run":j.status}">${j.status}</span></td>
+       <td class="mono" style="color:var(--ink-faint)">${esc(j.argv).slice(0,80)}</td></tr>`).join("")
+      :`<tr><td class="empty">No jobs yet this session.</td></tr>`;
+  }catch(e){$("#dot-manage").className="dot bad";toast("overview: "+e.message,1)}
+}
+
+/* ---------- ingest: upload + inbox ---------- */
+const dz=$("#dropzone");
+dz.onclick=()=>$("#filepick").click();
+dz.ondragover=e=>{e.preventDefault();dz.classList.add("hot")};
+dz.ondragleave=()=>dz.classList.remove("hot");
+dz.ondrop=e=>{e.preventDefault();dz.classList.remove("hot");upload(e.dataTransfer.files)};
+$("#filepick").onchange=e=>upload(e.target.files);
+async function upload(files){
+  if(!files.length)return;
+  const fd=new FormData();[...files].forEach(f=>fd.append("files",f));
+  $("#upload-busy").style.display="block";
+  try{const r=await api("/api/upload",{method:"POST",body:fd});
+    toast(`Saved ${r.saved.length} file(s) to the inbox`);loadInbox()}
+  catch(e){toast("upload: "+e.message,1)}
+  $("#upload-busy").style.display="none";$("#filepick").value="";
+}
+async function loadInbox(){
+  try{const r=await api("/api/inbox");
+    $("#inbox-path").textContent=r.inbox;
+    $("#inbox-rows").innerHTML=r.files.length?r.files.map(f=>
+      `<tr><td>${esc(f.name)}</td><td style="text-align:right" class="mono">${gb(f.bytes)}</td></tr>`).join("")
+      :`<tr><td class="empty">Inbox is empty.</td></tr>`;
+  }catch(e){/* settings tab may load before config; quiet */}
+}
+$("#btn-ingest-inbox").onclick=async()=>{
+  /* Server-side lane (/api/ingest_inbox) owns the job params — the old
+     UI-hardcoded only_books:true matched 0 inbox files and "succeeded". */
+  const go=async(force)=>{
+    const domain=$("#inbox-domain").value.trim()||undefined;
+    const tags=$("#inbox-tags").value.split(",").map(t=>t.trim()).filter(Boolean);
+    const chunking=$("#inbox-chunking").value||undefined;
+    const res=await fetch("/api/ingest_inbox",{method:"POST",
+      headers:{"Content-Type":"application/json"},body:JSON.stringify({force,domain,tags,chunking})});
+    const r=await res.json().catch(()=>({}));
+    if(res.ok&&r.ok){
+      toast(`Queued: ingest ${r.files.length} PDF(s) → append (rebuilds BM25). Restart :8051 after.`);
+      return}
+    if(res.status===409&&r.conflicts){
+      const list=r.conflicts.map(c=>`• ${c.file}\n   already indexed as: ${c.existing_source}`).join("\n");
+      if(confirm(`Possible duplicates — these inbox files match documents already in the corpus:\n\n${list}\n\nOK = ingest anyway (will duplicate chunks if they are the same files)\nCancel = skip; remove them from the inbox first.`))
+        return go(true);
+      toast("Ingest cancelled — inbox left untouched.",1);return}
+    toast(r.error||("HTTP "+res.status),1)};
+  try{await go(false)}catch(e){toast(e.message,1)}
+};
+
+/* ---------- ingest: quick actions + custom job ---------- */
+$$("#tab-ingest [data-quick]").forEach(b=>b.onclick=async()=>{
+  const q=b.dataset.quick;
+  if(q==="ocr_vlm"){$("#job-kind").value="ingest_pdfs";$("#job-kind").dispatchEvent(new Event("change"));
+    $("#p-ocr").value="vlm";$("#p-include").focus();toast("Form prefilled — set an include path (one book!) and queue.");return}
+  const map={rebuild_bm25:{kind:"rebuild_bm25",params:{}},
+             recalibrate_dry:{kind:"recalibrate",params:{dry_run:true}},
+             eval:{kind:"eval",params:{}}};
+  try{await api("/api/jobs",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(map[q])});
+    toast("Job queued — see Jobs tab")}catch(e){toast(e.message,1)}
+});
+$("#job-kind").onchange=()=>{const k=$("#job-kind").value;
+  $$(".jform").forEach(f=>f.style.display="none");
+  const f=$("#jf-"+k);if(f)f.style.display="block";
+  if(k==="index_append")$("#p-append-file").innerHTML=state.jsonls.map(j=>`<option>data/${esc(j)}</option>`).join("");
+};
+$("#btn-queue").onclick=async()=>{
+  const k=$("#job-kind").value;let params={};
+  if(k==="ingest_pdfs")params={include_path:$("#p-include").value||undefined,exclude_path:$("#p-exclude").value||undefined,
+    output:$("#p-output").value||undefined,max_pages:$("#p-maxpages").value||undefined,
+    pages:$("#p-pages").value.trim()||undefined,
+    ocr_engine:$("#p-ocr").value||undefined,chunking:$("#p-chunking").value||undefined,
+    only_books:$("#p-onlybooks").checked||undefined,
+    skip_books:$("#p-skipbooks").checked||undefined,no_images:$("#p-noimages").checked||undefined};
+  if(k==="ingest_notebooks")params={output:$("#p-nb-output").value||undefined,
+    save_figures:$("#p-nb-figs").checked||undefined,no_outputs:$("#p-nb-noout").checked||undefined};
+  if(k==="ingest_code")params={output:$("#p-code-output").value||undefined,
+    include_path:$("#p-code-include").value||undefined,exclude_path:$("#p-code-exclude").value||undefined,
+    exts:$("#p-code-exts").value.trim()||undefined};
+  if(k==="index_append")params={file:$("#p-append-file").value};
+  if(k==="recalibrate")params={dry_run:$("#p-recal-dry").checked};
+  try{const r=await api("/api/jobs",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({kind:k,params})});
+    $("#queue-msg").textContent="queued "+r.job.id;toast("Job "+r.job.id+" queued")}
+  catch(e){toast(e.message,1)}
+};
+
+/* ---------- documents ---------- */
+async function loadFacets(){try{const f=await api("/api/facets");
+  $("#d-domain").innerHTML=`<option value="">all domains</option>`+Object.keys(f.domains).map(d=>`<option>${esc(d)}</option>`).join("");
+  $("#d-jsonl").innerHTML=`<option value="">all chunk files</option>`+f.jsonls.map(j=>`<option>${esc(j)}</option>`).join("");
+  const tags=Object.entries(f.tags||{});
+  $("#d-tag").innerHTML=`<option value="">all tags</option>`+tags.map(([t,n])=>`<option value="${esc(t)}">#${esc(t)} (${n})</option>`).join("");
+}catch(e){}}
+async function loadDocs(reset=true){
+  if(reset){state.docsOffset=0;state.selDocs.clear();$("#d-del").disabled=true;$("#d-preview").style.display="none"}
+  state.docsQuery={q:$("#d-q").value,domain:$("#d-domain").value,tag:$("#d-tag").value,jsonl:$("#d-jsonl").value};
+  $("#d-busy").style.display="block";
+  try{
+    const p=new URLSearchParams({...state.docsQuery,limit:50,offset:state.docsOffset});
+    const r=await api("/api/documents?"+p);
+    const rows=r.rows.map(d=>`
+      <tr data-sf="${esc(d.source_file)}" class="${state.selDocs.has(d.source_file)?"sel":""}">
+        <td><input type="checkbox" class="d-chk" ${state.selDocs.has(d.source_file)?"checked":""}></td>
+        <td>${esc(d.filename)}<br><span class="mono" style="font-size:11px;color:var(--ink-faint)">${esc(d.source_file)}</span></td>
+        <td>${esc(d.course||"—")}</td><td><span class="pill">${esc(d.domain||"unknown")}</span>${
+          (d.tags||[]).map(t=>` <span class="pill" style="font-size:10px">#${esc(t)}</span>`).join("")
+        }</td>
+        <td style="text-align:right" class="mono">${fmt(d.chunks)}</td>
+        <td class="mono" style="font-size:11px;color:var(--ink-faint)">${d.jsonls.map(esc).join("<br>")}</td></tr>`).join("");
+    if(reset)$("#d-rows").innerHTML=rows||`<tr><td colspan="6" class="empty">Nothing matches.</td></tr>`;
+    else $("#d-rows").insertAdjacentHTML("beforeend",rows);
+    $("#d-count").textContent=fmt(r.total)+" document(s)";
+    $("#d-more").style.display=(state.docsOffset+50<r.total)?"inline-block":"none";
+  }catch(e){toast("documents: "+e.message,1)}
+  $("#d-busy").style.display="none";
+}
+$("#d-go").onclick=()=>loadDocs(true);
+$("#d-q").addEventListener("keydown",e=>{if(e.key==="Enter")loadDocs(true)});
+["#d-domain","#d-tag","#d-jsonl"].forEach(s=>$(s).addEventListener("change",()=>loadDocs(true)));
+$("#d-more").onclick=()=>{state.docsOffset+=50;loadDocs(false)};
+$("#d-rows").addEventListener("click",async e=>{
+  const tr=e.target.closest("tr");if(!tr||!tr.dataset.sf)return;
+  const sf=tr.dataset.sf;
+  if(e.target.classList.contains("d-chk")){
+    e.target.checked?state.selDocs.add(sf):state.selDocs.delete(sf);
+    tr.classList.toggle("sel",e.target.checked);
+    $("#d-del").disabled=!state.selDocs.size;
+    $("#d-retag").disabled=!state.selDocs.size;
+    $("#d-del").textContent=state.selDocs.size?`Delete selected (${state.selDocs.size})…`:"Delete selected…";
+    return;
+  }
+  const pv=$("#d-preview");pv.style.display="block";
+  pv.innerHTML=`<div class="skel"></div><div class="skel" style="width:80%"></div>`;
+  try{const r=await api("/api/documents/preview?"+new URLSearchParams({source_file:sf}));
+    pv.innerHTML=`<b>${esc(r.meta.filename)}</b> <span class="hint">· ${fmt(r.meta.chunks)} chunks · first ${r.chunks.length} shown</span>`+
+      r.chunks.map(t=>`<div class="src"><div class="txt">${esc(t)}</div></div>`).join("");
+  }catch(e){pv.innerHTML=`<span style="color:var(--red)">${esc(e.message)}</span>`}
+});
+$("#d-retag").onclick=async()=>{
+  const n=state.selDocs.size;if(!n)return;
+  const domain=prompt(`Retag ${n} document(s).\n\nDomain (blank = keep current). Known: stats, ml, nlp, viz, biz, ts, db, math, swe, prog, general:`);
+  if(domain===null)return;
+  const course=prompt(`Course (blank = keep current). Full name as it appears in the Documents course column, e.g. "Databases & Data Engineering":`);
+  if(course===null)return;
+  const addT=prompt("Tags to ADD (comma-separated, blank = none):");
+  if(addT===null)return;
+  const remT=prompt("Tags to REMOVE (comma-separated, blank = none):");
+  if(remT===null)return;
+  const body={source_files:[...state.selDocs],rebuild:true,
+    domain:domain.trim()||undefined,
+    course:course.trim()||undefined,
+    add_tags:addT.split(",").map(t=>t.trim()).filter(Boolean),
+    remove_tags:remT.split(",").map(t=>t.trim()).filter(Boolean)};
+  if(!body.domain&&!body.course&&!body.add_tags.length&&!body.remove_tags.length){toast("nothing to change",1);return}
+  try{const r=await api("/api/documents/retag",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(body)});
+    toast(`Retagged ${fmt(r.rows_changed)} chunks (${fmt(r.chroma_updated)} in Chroma) · rebuild ${r.rebuild_job||"skipped"} · restart :8051 after`);
+    loadDocs(true);
+  }catch(e){toast(e.message,1)}
+};
+$("#d-del").onclick=async()=>{
+  const n=state.selDocs.size;
+  if(!confirm(`Remove ${n} document(s) from the index?\n\nChunks are deleted from ChromaDB and the JSONL files, then a BM25 rebuild is queued. The files in your vault are NOT touched.`))return;
+  $("#d-del").disabled=true;$("#d-del").innerHTML=`<svg class="reel" viewBox="0 0 24 24"><circle class="b" cx="12" cy="12" r="9"/><circle class="a" cx="12" cy="12" r="6"/></svg>deleting…`;
+  try{const r=await api("/api/documents/delete",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({source_files:[...state.selDocs],rebuild:true})});
+    toast(`Deleted ${fmt(r.chroma_deleted)} chunks · BM25 rebuild queued (${r.rebuild_job}) · restart :8051 after`);
+    loadDocs(true);loadOverview();
+  }catch(e){toast(e.message,1)}
+  $("#d-del").textContent="Delete selected…";
+};
+
+/* ---------- jobs ---------- */
+async function loadJobs(){
+  try{const r=await api("/api/jobs");
+    $("#j-rows").innerHTML=r.jobs.length?r.jobs.map(j=>`
+      <tr data-jid="${j.id}" class="${state.job===j.id?"sel":""}">
+        <td class="mono">${j.id}</td><td class="mono">${esc(j.kind)}</td>
+        <td><span class="pill ${j.status==="running"?"run":j.status}">${j.status}</span>${
+          (j.status==="failed"||j.status==="cancelled")
+            ?` <button class="btn" data-retry="${j.id}" style="padding:1px 8px;font-size:11px" title="Re-queue with the same params — jobs are idempotent (upsert / derived rebuild), so a retry never duplicates work already committed">retry</button>`:""
+        }</td>
+        <td class="mono" style="color:var(--ink-faint);font-size:11px">${esc(j.argv).slice(0,60)}</td></tr>`).join("")
+      :`<tr><td class="empty">No jobs yet. Queue one from the Ingest tab.</td></tr>`;
+    if(state.job){const j=r.jobs.find(x=>x.id===state.job);
+      if(j){$("#j-live").style.display=j.status==="running"?"block":"none";
+        $("#j-cancel").style.display=(j.status==="running"||j.status==="queued")?"inline-block":"none"}}
+  }catch(e){}
+}
+$("#j-rows").addEventListener("click",async e=>{
+  const rb=e.target.closest("[data-retry]");
+  if(rb){e.stopPropagation();
+    try{const r=await api(`/api/jobs/${rb.dataset.retry}/retry`,{method:"POST"});
+      toast(`Retry queued as ${r.job.id}`);loadJobs()}catch(err){toast(err.message,1)}
+    return}
+  const tr=e.target.closest("tr");if(!tr||!tr.dataset.jid)return;
+  state.job=tr.dataset.jid;state.jobOffset=0;$("#j-log").textContent="";
+  $("#j-title").textContent="Log — "+state.job;
+  clearInterval(state.timers.log);tailLog();state.timers.log=setInterval(tailLog,1000);loadJobs()});
+async function tailLog(){
+  if(!state.job)return;
+  try{const r=await api(`/api/jobs/${state.job}/log?offset=${state.jobOffset}`);
+    if(r.data){state.jobOffset=r.offset;const el=$("#j-log");
+      const stick=el.scrollTop+el.clientHeight>=el.scrollHeight-24;
+      el.textContent+=r.data;if(stick)el.scrollTop=el.scrollHeight}
+    if(r.status!=="running"&&r.status!=="queued"){$("#j-live").style.display="none";clearInterval(state.timers.log)}
+    else $("#j-live").style.display="block";
+  }catch(e){clearInterval(state.timers.log)}
+}
+$("#j-cancel").onclick=async()=>{try{await api(`/api/jobs/${state.job}/cancel`,{method:"POST"});toast("Cancel sent")}catch(e){toast(e.message,1)}};
+
+/* ---------- vault tree ---------- */
+state.vaultSel=new Map();state.vaultStaged=[];
+function vFileRow(f){
+  const badge=f.in_rag
+    ?`<span class="pill" style="color:var(--green,#7c5);border-color:currentColor">✓ ${fmt(f.chunks)}</span>${f.domain?` <span class="pill">${esc(f.domain)}</span>`:""}${(f.tags||[]).map(t=>` <span class="pill" style="font-size:10px">#${esc(t)}</span>`).join("")}`
+    :`<span class="pill" style="opacity:.45">not indexed</span>`;
+  const chk=f.in_rag?`<input type="checkbox" class="v-chk" data-sf="${esc(f.source_file)}" data-name="${esc(f.name)}" ${state.vaultSel.has(f.source_file)?"checked":""}> `:`<span style="display:inline-block;width:20px"></span>`;
+  return `<div style="padding-left:4px;white-space:nowrap">${chk}<span title="${esc(f.path)}">${esc(f.name)}</span> ${badge}</div>`;
+}
+function vRenderLevel(d){
+  return d.dirs.map(x=>`<div class="v-dir" data-path="${esc(x.path)}" style="cursor:pointer;white-space:nowrap"><span class="v-tw">▸</span> <b>${esc(x.name)}</b></div><div class="v-kids" style="display:none;padding-left:18px;border-left:1px solid var(--line,#333)"></div>`).join("")
+   + d.files.map(vFileRow).join("");
+}
+async function loadVaultRoot(){
+  try{const d=await api("/api/vault/tree");
+    $("#v-root").textContent=d.root;
+    $("#v-tree").innerHTML=vRenderLevel(d)||`<span class="empty">Empty.</span>`;
+  }catch(e){$("#v-tree").innerHTML=`<span style="color:var(--red)">${esc(e.message)}</span>`}
+}
+$("#v-tree").addEventListener("click",async e=>{
+  const chk=e.target.closest(".v-chk");
+  if(chk){chk.checked?state.vaultSel.set(chk.dataset.sf,chk.dataset.name):state.vaultSel.delete(chk.dataset.sf);vSync();return}
+  const dir=e.target.closest(".v-dir");if(!dir)return;
+  const kids=dir.nextElementSibling,tw=dir.querySelector(".v-tw");
+  if(kids.style.display==="none"){
+    kids.style.display="block";tw.textContent="▾";
+    if(!kids.dataset.loaded){kids.innerHTML=`<div class="skel" style="width:60%"></div>`;
+      try{const d=await api("/api/vault/tree?"+new URLSearchParams({path:dir.dataset.path}));
+        kids.innerHTML=vRenderLevel(d)||`<span class="empty" style="font-size:11px">empty</span>`;kids.dataset.loaded=1;
+      }catch(err){kids.innerHTML=`<span style="color:var(--red)">${esc(err.message)}</span>`}}
+  }else{kids.style.display="none";tw.textContent="▸"}
+});
+$("#v-results").addEventListener("click",e=>{
+  const chk=e.target.closest(".v-chk");
+  if(chk){chk.checked?state.vaultSel.set(chk.dataset.sf,chk.dataset.name):state.vaultSel.delete(chk.dataset.sf);vSync()}
+});
+function vSync(){
+  $("#v-stage").disabled=!state.vaultSel.size;
+  $("#v-stage").textContent=`Stage for selected (${state.vaultSel.size})`;
+  const st=state.vaultStaged;
+  $("#v-apply").disabled=$("#v-discard").disabled=!st.length;
+  $("#v-staged").innerHTML=st.length?st.map((s,i)=>`
+    <tr><td style="font-size:12px">${s.source_files.length} file(s): ${esc(s.names.slice(0,2).join(", "))}${s.names.length>2?"…":""}<br>
+      <span class="hint" style="margin:0">${s.domain?`domain→${esc(s.domain)} `:""}${s.add_tags.length?`+${s.add_tags.map(esc).join(",")} `:""}${s.remove_tags.length?`−${s.remove_tags.map(esc).join(",")}`:""}</span></td>
+    <td style="text-align:right"><button class="btn" data-unstage="${i}" style="padding:1px 8px;font-size:11px">✕</button></td></tr>`).join("")
+    :`<tr><td class="empty">Nothing staged.</td></tr>`;
+}
+$("#v-staged").addEventListener("click",e=>{const b=e.target.closest("[data-unstage]");
+  if(b){state.vaultStaged.splice(+b.dataset.unstage,1);vSync()}});
+$("#v-stage").onclick=()=>{
+  const domain=$("#v-domain").value.trim()||undefined;
+  const add=$("#v-add").value.split(",").map(t=>t.trim()).filter(Boolean);
+  const rem=$("#v-rem").value.split(",").map(t=>t.trim()).filter(Boolean);
+  if(!domain&&!add.length&&!rem.length){toast("set a domain or tags first",1);return}
+  state.vaultStaged.push({source_files:[...state.vaultSel.keys()],names:[...state.vaultSel.values()],
+    domain,add_tags:add,remove_tags:rem});
+  state.vaultSel.clear();$$(".v-chk").forEach(c=>c.checked=false);
+  $("#v-domain").value=$("#v-add").value=$("#v-rem").value="";vSync();
+};
+$("#v-discard").onclick=()=>{state.vaultStaged=[];vSync();toast("draft discarded")};
+$("#v-apply").onclick=async()=>{
+  const st=state.vaultStaged;if(!st.length)return;
+  const nf=st.reduce((a,s)=>a+s.source_files.length,0);
+  if(!confirm(`Apply ${st.length} staged change(s) to ${nf} file(s)?\n\nJSONLs + ChromaDB metadata are updated (text/embeddings untouched), then ONE BM25 rebuild is queued. Restart :8051 when it finishes.`))return;
+  let rows=0;
+  try{
+    for(let i=0;i<st.length;i++){
+      const s=st[i];
+      const r=await api("/api/documents/retag",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({source_files:s.source_files,domain:s.domain,add_tags:s.add_tags,
+          remove_tags:s.remove_tags,rebuild:i===st.length-1})});
+      rows+=r.rows_changed;
+    }
+    toast(`Applied: ${fmt(rows)} chunks retagged · rebuild queued · restart :8051 after`);
+    state.vaultStaged=[];vSync();loadVaultRoot();
+  }catch(e){toast(e.message,1)}
+};
+$("#v-go").onclick=async()=>{
+  try{const r=await api("/api/vault/search?"+new URLSearchParams({q:$("#v-q").value}));
+    $("#v-results").innerHTML=r.rows.map(vFileRow).join("")||`<span class="empty">No matches.</span>`;
+    if(r.truncated)$("#v-results").insertAdjacentHTML("beforeend",`<div class="hint">…truncated, narrow the search</div>`);
+  }catch(e){toast(e.message,1)}
+};
+$("#v-q").addEventListener("keydown",e=>{if(e.key==="Enter")$("#v-go").click()});
+
+/* ---------- query console ---------- */
+/* Render the answer body as raw text or (Preview) markdown + LaTeX. Degrades
+   to raw text if the marked/KaTeX CDNs didn't load (offline). */
+function renderAnswerBody(el,text){
+  const preview=(localStorage.getItem("answer-mode")||"raw")==="preview" && !!window.marked;
+  el.classList.toggle("md",preview);
+  if(preview){
+    el.innerHTML=marked.parse(text||"");
+    if(window.renderMathInElement){try{renderMathInElement(el,{delimiters:[
+      {left:"$$",right:"$$",display:true},{left:"\\[",right:"\\]",display:true},
+      {left:"$",right:"$",display:false},{left:"\\(",right:"\\)",display:false}],
+      throwOnError:false});}catch(e){}}
+  }else{el.textContent=text||"";}
+}
+/* answer + sources as portable markdown (renders in Obsidian) */
+function resultToMarkdown(r){
+  let md=`# ${r.q||"RAG answer"}\n\n`;
+  if(r.answer)md+=r.answer.trim()+"\n\n";
+  md+=`_confidence: ${r.confidence||"?"}${r.echo?"  ·  "+r.echo:""}_\n\n## Sources\n`;
+  (r.sources||[]).forEach(s=>{
+    md+=`${s.n??s.rank??""}. ${s.label||s.source_label||""}${s.cited?" *(cited)*":""}`+
+        `${s.live?" *(live)*":""}${s.score!=null?` — score ${(+s.score).toFixed(3)}`:""}\n`;
+    if(s.text)md+="   > "+String(s.text).replace(/\n+/g,"\n   > ")+"\n";
+  });
+  return md;
+}
+function slug(s){return (s||"rag-answer").toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"").slice(0,50)||"rag-answer";}
+
+function renderResult(){
+  const r=state.lastQ;if(!r){$("#q-out").innerHTML="";return;}
+  const rows=r.sources||[];
+  /* rerank scores can be negative (cross-encoder logits) — normalize to THIS
+     set's min..max so the bars always read left-to-right. */
+  const sc=rows.map(s=>typeof s.score==="number"?s.score:null).filter(v=>v!=null);
+  const lo=Math.min(...sc),hi=Math.max(...sc);
+  const norm=v=>hi>lo?(v-lo)/(hi-lo):1;
+  const srcs=rows.map(s=>`
+    <div class="src"><span class="lab">[${s.n??s.number??s.rank??""}] ${esc(s.label||s.source_label||"")}</span>
+      ${s.live?'<span class="pill live">live</span>':""}
+      ${s.cited?'<span class="pill done">cited</span>':""}
+      ${s.score!=null?`<span class="pill">${(+s.score).toFixed(3)}</span>`:""}
+      ${s.score!=null&&sc.length>1?`<div class="scorebar"><div style="width:${Math.max(4,100*norm(+s.score)).toFixed(1)}%"></div></div>`:""}
+      ${s.text?`<div class="txt">${esc(s.text)}</div>`:""}</div>`).join("");
+  const confCls={HIGH:"done",MEDIUM:"run",LOW:"failed",UNKNOWN:"failed",ERROR:"failed",RETRIEVE_ONLY:"live"}[r.confidence]||"";
+  const preview=(localStorage.getItem("answer-mode")||"raw")==="preview";
+  const bar=r.answer?`<div class="row" style="gap:8px;margin-bottom:10px">
+      <button class="btn" id="q-copy" title="Copy the answer + sources as markdown">⧉ Copy</button>
+      <button class="btn" id="q-dl" title="Download the answer + sources as a .md file">↓ .md</button>
+      <span style="flex:1"></span>
+      <label class="chk" title="Render as Obsidian-style markdown + LaTeX (read view), vs raw text"><input type="checkbox" id="q-preview" ${preview?"checked":""}>Preview (md + LaTeX)</label>
+    </div>`:"";
+  $("#q-out").innerHTML=(r.answer?`<div class="panel" style="margin-bottom:12px">${bar}<div class="answer" id="q-answer"></div>
+      <div class="hint" style="margin-top:10px">confidence: <span class="pill ${confCls}">${esc(r.confidence||"?")}</span>${r.echo?` · ${esc(r.echo)}`:""}</div></div>`:"")+
+    (srcs?`<h3 style="margin:6px 0">Sources</h3>${srcs}`:`<div class="empty">No sources returned.</div>`);
+  if(r.answer){
+    renderAnswerBody($("#q-answer"),r.answer);
+    $("#q-copy").onclick=()=>navigator.clipboard.writeText(resultToMarkdown(r))
+      .then(()=>toast("Answer + sources copied as markdown")).catch(()=>toast("Clipboard blocked",1));
+    $("#q-dl").onclick=()=>{const blob=new Blob([resultToMarkdown(r)],{type:"text/markdown;charset=utf-8"});
+      const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=slug(r.q)+".md";
+      document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),2000);toast("Downloaded "+a.download);};
+    $("#q-preview").onchange=e=>{localStorage.setItem("answer-mode",e.target.checked?"preview":"raw");renderAnswerBody($("#q-answer"),r.answer);};
+  }
+}
+
+async function runQuery(retrieveOnly){
+  const q=$("#q-text").value.trim();if(!q)return toast("Type a question first",1);
+  const body={q,include_text:900,hyde:$("#q-hyde").checked,hype:$("#q-hype").checked,
+    omnisearch:$("#q-omni").checked};
+  const preset=$("#q-preset").value;if(preset)body.preset=preset;
+  const tk=$("#q-topk").value;if(tk)body.top_k=+tk;
+  const dk=$("#q-densek").value;if(dk)body.dense_top_k=+dk;
+  const sk=$("#q-sparsek").value;if(sk)body.sparse_top_k=+sk;
+  const mt=$("#q-maxtok").value;if(mt&&!retrieveOnly)body.max_tokens=+mt;
+  $("#q-busy").style.display="block";$("#q-busy-msg").textContent=retrieveOnly?"retrieving…":"retrieving + generating…";
+  $("#q-out").innerHTML="";state.lastQ=null;
+  try{
+    const url=state.ragApi+(retrieveOnly?"/search":"/query");
+    const r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    if(!r.ok)throw new Error("query API "+r.status+" — is serve_api running on :8051?");
+    const j=await r.json();
+    const rt=j.retrieval||{};
+    const echo=j.retrieval?[
+      rt.preset?`preset ${esc(rt.preset)}`:"",
+      `rerank ${rt.rerank_top_k??"—"}`,
+      (rt.dense_top_k||rt.sparse_top_k)?`dense ${rt.dense_top_k} · sparse ${rt.sparse_top_k}`:"",
+      `hyde ${rt.hyde_used?"on":"off"}`,`hype ${rt.hype?"on":"off"}`,
+      rt.live_hits?`${rt.live_hits} live hit(s)`:"",
+    ].filter(Boolean).join(" · "):"";
+    state.lastQ={q,answer:j.answer,confidence:j.confidence,echo,sources:j.sources||j.results||[]};
+    renderResult();
+  }catch(e){$("#q-out").innerHTML=`<div class="empty" style="color:var(--red)">${esc(e.message)}</div>`}
+  $("#q-busy").style.display="none";
+}
+$("#q-ask").onclick=()=>runQuery(false);
+$("#q-search").onclick=()=>runQuery(true);
+
+/* ---------- theme (P1: light/dark toggle, persisted) ---------- */
+const themeBtn=$("#theme-toggle");
+function applyTheme(t){
+  document.documentElement.dataset.theme=t;
+  localStorage.setItem("ledger-theme",t);
+  themeBtn.textContent=t==="light"?"☾ dark":"☀ light";
+  themeBtn.title="Switch to the "+(t==="light"?"dark":"light")+" theme";
+}
+themeBtn.onclick=()=>applyTheme(document.documentElement.dataset.theme==="light"?"dark":"light");
+applyTheme(document.documentElement.dataset.theme||"dark");
+
+/* ---------- info: query vs ingestion diagram toggle ---------- */
+$$(".dgbtn").forEach(b=>b.onclick=()=>{
+  $$(".dgbtn").forEach(x=>x.classList.toggle("on",x===b));
+  $("#dg-query").style.display=b.dataset.dg==="query"?"":"none";
+  $("#dg-ingest").style.display=b.dataset.dg==="ingest"?"":"none";
+});
+
+/* ---------- boot ---------- */
+(async()=>{
+  try{const s=await api("/api/settings");state.ragApi=s.rag_api;state.jsonls=s.jsonl_files}catch(e){}
+  loadOverview();loadFacets();loadInbox();
+  state.timers.tab=setInterval(loadOverview,10000);
+})();
+</script>
+</body>
+</html>

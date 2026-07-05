@@ -1,0 +1,31 @@
+# Personal RAG — pinned to the known-working environment (Python 3.11).
+# Core pipeline
+chromadb==1.5.9
+bm25s==0.3.9
+sentence-transformers==5.5.1
+numpy==2.4.6
+PyYAML==6.0.3
+python-dotenv==1.2.2
+
+# Generation backends (OpenAI SDK also covers OpenAI-compatible local proxies)
+openai==2.24.0
+anthropic==0.87.0
+
+# Serving
+fastapi==0.133.1
+uvicorn==0.41.0
+pydantic==2.13.4
+streamlit==1.58.0
+
+# PDF ingestion
+pymupdf==1.27.2.3
+pymupdf4llm==1.27.2.3
+
+# Management console + Omnisearch client (new)
+requests==2.32.5
+python-multipart==0.0.20
+
+# OCR note: pymupdf4llm auto-selects its OCR adaptor from what's INSTALLED.
+# Do NOT install rapidocr-onnxruntime — its presence makes pymupdf4llm pick a
+# broken adaptor and knocks out the working Tesseract path. Tesseract needs no
+# pip package: install the system binary and set TESSDATA_PREFIX (see handoffs).
