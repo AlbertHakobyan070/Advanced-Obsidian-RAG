@@ -39,6 +39,11 @@ scope routing, a dedicated code lane, cross-encoder reranking, grounded generati
 with a citation-audit pass, a management console, an agent-facing API, and a
 reproducible evaluation suite.
 
+## How a document ingestion takes place
+
+<img width="1017" height="787" alt="SCR-20260706-eygn" src="https://github.com/user-attachments/assets/2b05a9b2-a494-4041-8ce8-23bff68a3ae6" />
+
+
 ## How a query flows
 
 <img width="1146" height="1034" alt="SCR-20260706-eutn" src="https://github.com/user-attachments/assets/2c2881e0-2764-44b2-a879-f3618a841e52" />
