@@ -41,6 +41,7 @@ reproducible evaluation suite.
 
 ## How a query flows
 
+```Mermaid
 flowchart TD
     Q["Question"] --> R{Intent routing}
 
@@ -64,7 +65,7 @@ flowchart TD
     RR --> EX["Optional small-to-big\ncontext expansion"]
     EX --> G["Grounded generation\nanswer + [n] citations + confidence"]
     G --> V["Optional second-pass\ncitation verification"]
-
+```
 Every stage is swappable from `config.yaml`. Solid path = always on; the rest are
 optional lanes that open only when the query calls for them.
 
