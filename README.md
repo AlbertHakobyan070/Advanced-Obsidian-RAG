@@ -41,25 +41,29 @@ reproducible evaluation suite.
 
 ## How a query flows
 
-```mermaid
-flowchart TD
+```flowchart TD
     Q["Question"] --> R{Intent routing}
-    R -->|prose| H["HyDE query expansion<br/>(LLM drafts a hypothetical answer to embed)"]
+
+    R -->|prose| H["HyDE query expansion\n(LLM drafts a hypothetical answer to embed)"]
     R -->|code intent| C0["Skip HyDE · widen pool · open code lane"]
+
     H --> HY["Hybrid retrieval"]
     C0 --> HY
-    HY --> D["Dense · ChromaDB<br/>bge-small-en-v1.5"]
-    HY --> S["Sparse · bm25s"]
-    HY --> SL["Scope lanes<br/>domain / path / file-type filters"]
-    HY --> CL["Code lane<br/>.ipynb / .py / .R / .sql / …"]
-    D --> RRF["Reciprocal Rank Fusion (k=60)<br/>+ metadata boosts"]
+
+    HY --> D["Dense\nChromaDB\nbge-small-en-v1.5"]
+    HY --> S["Sparse\nbm25s"]
+    HY --> SL["Scope lanes\ndomain / path / file-type filters"]
+    HY --> CL["Code lane\n.ipynb / .py / .R / .sql / ..."]
+
+    D --> RRF["Reciprocal Rank Fusion (k=60)\n+ metadata boosts"]
     S --> RRF
     SL --> RRF
     CL --> RRF
-    RRF --> RR["Cross-encoder rerank<br/>ms-marco-MiniLM → top-k"]
-    RR --> EX["Optional small-to-big<br/>context expansion"]
-    EX --> G["Grounded generation<br/>answer + [n] citations + confidence"]
-    G --> V["Optional second-pass<br/>citation verification"]
+
+    RRF --> RR["Cross-encoder rerank\nms-marco-MiniLM -> top-k"]
+    RR --> EX["Optional small-to-big\ncontext expansion"]
+    EX --> G["Grounded generation\nanswer + [n] citations + confidence"]
+    G --> V["Optional second-pass\ncitation verification"]
 ```
 
 Every stage is swappable from `config.yaml`. Solid path = always on; the rest are
