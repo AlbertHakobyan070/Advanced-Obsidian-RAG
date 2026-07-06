@@ -41,32 +41,8 @@ reproducible evaluation suite.
 
 ## How a query flows
 
-```mermaid
-flowchart TD
+<img width="1146" height="1034" alt="SCR-20260706-eutn" src="https://github.com/user-attachments/assets/2c2881e0-2764-44b2-a879-f3618a841e52" />
 
-    Q["Question"] --> R{"Intent routing"}
-
-    R -->|Prose| H["HyDE query expansion (LLM drafts a hypothetical answer for embedding)"]
-    R -->|Code| C["Skip HyDE, widen retrieval pool, open code lane"]
-
-    H --> HY["Hybrid retrieval"]
-    C --> HY
-
-    HY --> D["Dense retrieval using ChromaDB with bge-small-en-v1.5"]
-    HY --> S["Sparse retrieval using bm25s"]
-    HY --> F["Scope filters: domain, path, file type"]
-    HY --> L["Code retrieval: ipynb, py, R, sql"]
-
-    D --> RRF["Reciprocal Rank Fusion with metadata boosts"]
-    S --> RRF
-    F --> RRF
-    L --> RRF
-
-    RRF --> RR["Cross-encoder rerank using ms-marco-MiniLM"]
-    RR --> EX["Optional small-to-big context expansion"]
-    EX --> G["Grounded answer with citations and confidence"]
-    G --> V["Optional citation verification"]
-```
 
 Every stage is swappable from `config.yaml`. Solid path = always on; the rest are
 optional lanes that open only when the query calls for them.
