@@ -41,7 +41,7 @@ reproducible evaluation suite.
 
 ## How a query flows
 
-```flowchart TD
+flowchart TD
     Q["Question"] --> R{Intent routing}
 
     R -->|prose| H["HyDE query expansion\n(LLM drafts a hypothetical answer to embed)"]
@@ -64,7 +64,6 @@ reproducible evaluation suite.
     RR --> EX["Optional small-to-big\ncontext expansion"]
     EX --> G["Grounded generation\nanswer + [n] citations + confidence"]
     G --> V["Optional second-pass\ncitation verification"]
-```
 
 Every stage is swappable from `config.yaml`. Solid path = always on; the rest are
 optional lanes that open only when the query calls for them.
