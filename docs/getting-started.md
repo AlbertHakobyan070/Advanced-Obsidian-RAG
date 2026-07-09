@@ -3,23 +3,27 @@
 ## Requirements
 
 - **Python 3.11**
-- ~4 GB of disk for prebuilt indexes (or build your own from source notes)
-- A generation endpoint — **any** OpenAI-compatible API. That can be a cloud provider,
-  a free-tier proxy, or a fully local model server. Retrieval works with no LLM at all.
+- Disk space proportional to your corpus (the on-disk vector + sparse
+  indexes scale with it)
+- A generation endpoint — **any** OpenAI-compatible API. That can be a cloud
+  provider, a free-tier proxy, or a fully local model server. Retrieval works
+  with no LLM at all.
 
-CPU is enough: embeddings (bge-small) and the cross-encoder reranker both run on CPU.
+CPU is enough: embeddings (bge-small) and the cross-encoder reranker both
+run on CPU.
 
 ## Install
 
 ```bash
 pip install -r requirements.txt
 cp .env.example .env      # add your generation key, or point at a local server
+cp config.example.yaml config.yaml   # then edit parser.vault_path
 ```
 
 ## Configure
 
-All tunables live in `config.yaml` (copy `config.example.yaml` if you're starting
-fresh). The two things to set first:
+All tunables live in `config.yaml` (copy `config.example.yaml` if you're
+starting fresh). The two things to set first:
 
 ```yaml
 parser:
@@ -30,13 +34,21 @@ generation:
   model: "your-model-id"
 ```
 
-Secrets stay in `.env` (gitignored); everything else is in `config.yaml`, which the
-system can also rewrite in place (comment-preserving) when you change defaults live.
+Secrets stay in `.env` (gitignored); everything else is in `config.yaml`,
+which the system can also rewrite in place (comment-preserving) when you
+change defaults live.
 
 !!! tip "Fully local"
-    To run with no cloud dependency at all — local embeddings plus a local model server
-    for generation — follow `RUN_LOCAL.md`. Point `generation.base_url` at your local
-    server and you're done.
+    To run with no cloud dependency at all — local embeddings plus a local
+    model server for generation — follow `RUN_LOCAL.md`. Point
+    `generation.base_url` at your local server and you're done.
+
+## (Optional) Populate the course taxonomy
+
+If you want the parser to recognise your course names in folder paths and
+headings, populate `parser.course_taxonomy` in `config.yaml`. The pipeline
+ships with sensible generic defaults; you add the entries for your
+institution or corpus (see the commented examples in `config.example.yaml`).
 
 ## Build the indexes
 
@@ -48,8 +60,8 @@ python -m src.ingestion.obsidian_parser "path/to/vault" -o data/chunks.jsonl
 python main.py index
 ```
 
-Add other source families and append them (each writes its own JSONL, and `index
---append` rebuilds the sparse half automatically):
+Add other source families and append them (each writes its own JSONL, and
+`index --append` rebuilds the sparse half automatically):
 
 ```bash
 python main.py ingest-pdfs                        # -> data/pdf_chunks.jsonl
@@ -62,13 +74,14 @@ python main.py index --append data/code_chunks.jsonl
 ```
 
 !!! note "Chunking strategy"
-    Pass `--chunking heading` (default) for structured documents or `--chunking fixed`
-    for OCR walls of text. See [Architecture](architecture.md#ingestion).
+    Pass `--chunking heading` (default) for structured documents or
+    `--chunking fixed` for OCR walls of text. See
+    [Architecture](architecture.md#ingestion).
 
 ## Ask your first question
 
 ```bash
-python main.py query "How did I implement knowledge distillation in my capstone?"
+python main.py query "Explain the central limit theorem from my notes"
 python main.py chat        # interactive REPL
 ```
 
@@ -82,10 +95,11 @@ python -m uvicorn serve_api:app --host 127.0.0.1 --port 8051
 python -m uvicorn manage_api:app --host 127.0.0.1 --port 8052
 ```
 
-Then open **http://127.0.0.1:8052** for the console, or POST to **:8051** from code.
-Next: [Usage](usage.md).
+Then open **http://127.0.0.1:8052** for the console, or POST to **:8051**
+from code. Next: [Usage](usage.md).
 
 ## Prefer containers?
 
-Skip the local Python setup entirely and run everything — both services plus a
-generation backend — with Docker Compose. See [Docker deployment](deployment-docker.md).
+Skip the local Python setup entirely and run everything — both services plus
+a generation backend — with Docker Compose. See
+[Docker deployment](deployment-docker.md).

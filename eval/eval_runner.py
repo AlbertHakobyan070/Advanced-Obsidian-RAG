@@ -9,8 +9,10 @@ Metrics (no human labels needed, all automatic):
   confidence_dist     — distribution of HIGH/MEDIUM/LOW
   answered_rate       — fraction where the model didn't punt ("notes don't cover")
 
-This gives you the interview line: "X% keyword recall and Y% citation support
-across a 30-question eval spanning 9 knowledge domains."
+This gives you a fast, repeatable signal of pipeline quality against your
+golden set — useful for catching regressions and tracking changes. The
+shipped `eval/golden_queries.yaml` is a small illustrative example; replace
+it with your own golden set for serious regression work.
 
     from eval.eval_runner import run_eval
     run_eval(cfg)
@@ -62,11 +64,12 @@ def run_eval(
     out_path: str = "eval/results.json",
     retrieval_only: bool = False,
 ) -> dict[str, Any]:
-    """retrieval_only=True skips generation entirely (no LLM needed): keyword
+    """
+    retrieval_only=True skips generation entirely (no LLM needed): keyword
     recall is measured over the top-k CHUNK TEXTS instead of the answer, and
-    the citation/confidence/answered metrics are omitted. This is what the
-    historical eval/*.retrieval.json baselines were, now a first-class mode —
-    it makes the 80+-question suite runnable in minutes, offline."""
+    the citation/confidence/answered metrics are omitted. This makes the
+    suite runnable in minutes, offline - ideal for CI smoke tests.
+    """
     golden_file = cfg.project_root / golden_path
     with open(golden_file, "r", encoding="utf-8") as f:
         suite = yaml.safe_load(f)

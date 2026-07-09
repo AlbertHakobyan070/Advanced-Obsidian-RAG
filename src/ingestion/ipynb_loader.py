@@ -19,13 +19,14 @@ WHY THIS EXISTS
   so the existing embedder/indexer need zero changes. doc_id uses the same
   deterministic scheme, so `index --append` upserts are idempotent.
 
-ARMENIAN HANDLING (per-cell, not per-file)
+NON_LATIN SCRIPT GATING (per-cell, not per-file)
   Code cells are kept (they're Latin/English — Python/R keywords, identifiers).
-  Markdown prose and text outputs are script-detected PER CELL: a dominantly
-  Armenian cell has its body replaced with a short placeholder rather than
-  embedding garbage vectors (bge-small is English-only) or dropping the whole
-  notebook. A file is skipped ENTIRELY only when it has no substantial code AND
-  its prose is Armenian (a pure Armenian write-up — low value here).
+  Markdown prose and text outputs are script-detected PER CELL: a cell whose
+  dominant script is in pdf.skip_scripts (or notebooks.skip_scripts) has its
+  body replaced with a short placeholder rather than embedding noisy vectors
+  (English-only embedding models can't meaningfully represent them) or
+  dropping the whole notebook. A file is skipped ENTIRELY only when it has
+  no substantial code AND its prose is in a skip-listed script.
 
 FIGURES (Tier 1, opt-in via --save-figures, default OFF)
   Notebook image outputs (PNG base64) are decoded to
@@ -60,10 +61,11 @@ from src.ingestion.obsidian_parser import (
     FOLDER_COURSE_MAP,
     DOMAIN_MAP,
     COURSE_MAP,
+    COURSE_CODE_REGEX,
     split_large_chunk,
     build_context_header,
 )
-# Reuse the script gate from pdf_loader so "skip Armenian" behaves identically.
+# Reuse the script gate from pdf_loader so "skip non-Latin script" behaves identically.
 from src.ingestion.pdf_loader import detect_script, should_skip_script
 from src.utils.config_loader import Config
 from src.utils.logger import get_logger
@@ -71,9 +73,9 @@ from src.utils.logger import get_logger
 log = get_logger(__name__)
 
 SUPPORTED_EXTS = {".ipynb", ".py", ".r", ".rmd"}
-ARMENIAN_PLACEHOLDER = "[Armenian text omitted]"
+NON_LATIN_PLACEHOLDER = "[Non-Latin text omitted]"
 # A cell/output shorter than this isn't worth script-detecting (e.g. a number,
-# a one-word print) — too little signal, and never the source of Armenian noise.
+# a one-word print) — too little signal, and never the source of non-Latin noise.
 _MIN_SCRIPT_SAMPLE = 12
 
 # Hard chunk boundary between ast-split code segments. load_file() splits the
@@ -155,7 +157,7 @@ class NBChunk:
         return {"doc_id": self.doc_id, "text": self.text, "metadata": self.metadata}
 
 
-def _placeholder_if_armenian(text: str, skip_scripts: set[str]) -> tuple[str, bool]:
+def _placeholder_if_non_latin(text: str, skip_scripts: set[str]) -> tuple[str, bool]:
     """Return (text_or_placeholder, was_placeholdered).
 
     Replaces a dominantly skip-listed-script block with a placeholder so we keep
@@ -164,7 +166,7 @@ def _placeholder_if_armenian(text: str, skip_scripts: set[str]) -> tuple[str, bo
     if not skip_scripts or len(text.strip()) < _MIN_SCRIPT_SAMPLE:
         return text, False
     if should_skip_script(detect_script(text), skip_scripts):
-        return ARMENIAN_PLACEHOLDER, True
+        return NON_LATIN_PLACEHOLDER, True
     return text, False
 
 
@@ -190,7 +192,7 @@ class NotebookLoader:
         self.overlap = overlap
         self.include_outputs = include_outputs
         self.max_output_chars = max_output_chars
-        self.skip_scripts = set(skip_scripts if skip_scripts is not None else ["armenian"])
+        self.skip_scripts = set(skip_scripts if skip_scripts is not None else [])
         self.save_figures = save_figures
         self.figures_dir = Path(figures_dir) if figures_dir else Path("data/notebook_figures")
         self.exts = exts if exts is not None else set(SUPPORTED_EXTS)
@@ -228,7 +230,7 @@ class NotebookLoader:
             overlap=cfg.get("notebooks.overlap_size", cfg.get("parser.overlap_size", 150)),
             include_outputs=cfg.get("notebooks.include_outputs", True),
             max_output_chars=cfg.get("notebooks.max_output_chars", 2000),
-            skip_scripts=cfg.get("notebooks.skip_scripts", cfg.get("pdf.skip_scripts", ["armenian"])),
+            skip_scripts=cfg.get("notebooks.skip_scripts", cfg.get("pdf.skip_scripts", [])),
             save_figures=cfg.get("notebooks.save_figures", False),
             figures_dir=figs,
             exts={e.lower() for e in exts} if exts else None,
@@ -262,18 +264,22 @@ class NotebookLoader:
 
     def _detect_course(self, filepath: Path) -> dict:
         parts = list(filepath.relative_to(self.vault_path).parts)
+        fcm = FOLDER_COURSE_MAP()
+        dmap = DOMAIN_MAP()
+        cmap = COURSE_MAP()
+        code_re = COURSE_CODE_REGEX()
         for part in parts:
-            name = FOLDER_COURSE_MAP.get(part.lower().strip())
+            name = fcm.get(part.lower().strip())
             if name:
                 return {"course_code": name, "course_name": name,
-                        "domain": DOMAIN_MAP.get(name, "general")}
+                        "domain": dmap.get(name, "general")}
         for part in parts:
-            m = re.search(r"(CS|DS|ENGS|BSDS|ECON)\s*\d{2,3}", part, re.IGNORECASE)
+            m = re.search(code_re, part, re.IGNORECASE)
             if m:
                 code = re.sub(r"\s+", " ", re.sub(r"(\D)(\d)", r"\1 \2", m.group(0).upper())).strip()
-                name = COURSE_MAP.get(code, code)
+                name = cmap.get(code, code)
                 return {"course_code": code, "course_name": name,
-                        "domain": DOMAIN_MAP.get(name, "general")}
+                        "domain": dmap.get(name, "general")}
         return {"course_code": "unknown", "course_name": "unknown", "domain": "general"}
 
     # ---- shared helpers ----
@@ -306,7 +312,7 @@ class NotebookLoader:
     def _outputs_to_md(self, cell: dict, nb_stem: str, fig_counter: list[int],
                        fig_paths: list[str]) -> str:
         """Render text outputs; optionally save image outputs to disk. Drops
-        inline base64 from the text. Caps length. Placeholders Armenian text."""
+        inline base64 from the text. Caps length. Placeholders non-Latin text."""
         if not self.include_outputs:
             return ""
         pieces = []
@@ -335,10 +341,10 @@ class NotebookLoader:
         text = "\n".join(p for p in pieces if p and p.strip())
         if not text:
             return ""
-        text, was_ph = _placeholder_if_armenian(text, self.skip_scripts)
+        text, was_ph = _placeholder_if_non_latin(text, self.skip_scripts)
         if was_ph:
             self.stats["cells_placeholdered"] += 1
-            return f"\n_Output:_ {ARMENIAN_PLACEHOLDER}\n"
+            return f"\n_Output:_ {NON_LATIN_PLACEHOLDER}\n"
         if len(text) > self.max_output_chars:
             text = text[: self.max_output_chars] + "\n... [output truncated]"
         return f"\n_Output:_\n```\n{text}\n```\n"
@@ -362,7 +368,7 @@ class NotebookLoader:
             src = self._src(cell)
             if ctype == "markdown":
                 if src.strip():
-                    body, was_ph = _placeholder_if_armenian(src.rstrip(), self.skip_scripts)
+                    body, was_ph = _placeholder_if_non_latin(src.rstrip(), self.skip_scripts)
                     if was_ph:
                         self.stats["cells_placeholdered"] += 1
                     out_lines.append(body)
@@ -475,8 +481,8 @@ class NotebookLoader:
         # placeholdering); it's handled normally and may simply yield 0 chunks if
         # below min_chunk. We can't judge by detect_script(md) directly because
         # the placeholder text itself is Latin.
-        if self.skip_scripts and not has_code and ARMENIAN_PLACEHOLDER in md:
-            residual = md.replace(ARMENIAN_PLACEHOLDER, "")
+        if self.skip_scripts and not has_code and NON_LATIN_PLACEHOLDER in md:
+            residual = md.replace(NON_LATIN_PLACEHOLDER, "")
             residual = re.sub(r"[#>*`\-_=\s]+", "", residual)
             if len(residual) < 50:
                 log.info("%s: skipped (no code + skip-listed prose only)", rel_path)

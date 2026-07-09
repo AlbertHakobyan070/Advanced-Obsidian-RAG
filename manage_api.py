@@ -1,5 +1,5 @@
 """
-manage_api.py — Corpus management console (backend) for Personal RAG.
+manage_api.py — Corpus management console (backend) for the RAG pipeline.
 
 Everything serve_api.py deliberately is NOT: ingest, index, OCR passes,
 document search/inspection, deletion, uploads — driven from a browser at
@@ -8,17 +8,17 @@ http://127.0.0.1:8052 (webui/index.html), with live job logs.
 Design rules (they encode this project's hard-won gotchas — don't undo them):
 
   * NO pipeline in-process. Heavy work runs as SUBPROCESSES of the existing
-    entry points (main.py / rebuild_bm25.py / recalibrate_courses.py), one at
-    a time, from a queue. ChromaDB is effectively single-writer and two
+    entry points (main.py / rebuild_bm25.py / recalibrate_courses.py), one
+    at a time, from a queue. ChromaDB is effectively single-writer and two
     concurrent ingests would fight over the JSONLs, so the worker is serial
     by construction. The query endpoint (:8051) stays untouched and warm.
   * Every ChromaDB scan/delete is PAGED in 5000-row batches ("too many SQL
-    variables" at ~168K chunks otherwise).
+    variables" at large corpora otherwise).
   * JSONL is the source of truth. Deleting from Chroma alone resurrects
     chunks at the next BM25 rebuild — so deletion here removes the rows from
     the JSONL files too, then queues a rebuild.
-  * JSONL lines split on "\\n" ONLY (never .splitlines(): some Other/ chunk
-    text contains U+2028/U+2029/\\x85 which would shred records).
+  * JSONL lines split on "\n" ONLY (never .splitlines(): some Other/ chunk
+    text contains U+2028/U+2029/\x85 which would shred records).
 
 Run (inside the venv, from project root):
     python -m uvicorn manage_api:app --host 127.0.0.1 --port 8052
@@ -874,7 +874,7 @@ def jobs_cancel(jid: str) -> dict:
 
 def _inbox() -> Path:
     vault = Path(CFG.get("pdf.vault_path") or CFG.get("parser.vault_path"))
-    inbox = vault / CFG.get("webui.inbox_dir", "00 – AUA_DS/Other/Inbox")
+    inbox = vault / CFG.get("webui.inbox_dir", "Inbox")
     inbox.mkdir(parents=True, exist_ok=True)
     return inbox
 
@@ -1027,11 +1027,11 @@ def vault_tree(path: str = "") -> dict:
     """
     One folder level of the vault, with per-file in-RAG status. `path` is
     vault-relative posix; '' = the configured browse root (webui.vault_tree_root,
-    default '00 – AUA_DS' per the user's spec — the rest of the vault is reachable
+    default '<vault-root>' per the spec — the rest of the vault is reachable
     via /api/vault/search below). Read-only: never writes to the vault.
     """
     vault = _vault_root()
-    root_rel = str(CFG.get("webui.vault_tree_root", "00 – AUA_DS"))
+    root_rel = str(CFG.get("webui.vault_tree_root", ""))
     base = (vault / (path or root_rel)).resolve()
     if not str(base).lower().startswith(str(vault.resolve()).lower()):
         return JSONResponse({"error": "path escapes the vault"}, status_code=400)
@@ -1083,7 +1083,7 @@ def settings() -> dict:
     return {
         "rag_api": RAG_API,
         "vault_path": str(CFG.get("pdf.vault_path") or CFG.get("parser.vault_path")),
-        "inbox_dir": CFG.get("webui.inbox_dir", "00 – AUA_DS/Other/Inbox"),
+        "inbox_dir": CFG.get("webui.inbox_dir", "Inbox"),
         "jsonl_files": [p.name for p in chunk_files()],
         "ocr_engines": ["auto", "tesseract", "vlm", "none"],
     }
@@ -1093,8 +1093,9 @@ def settings() -> dict:
 def api_schema() -> dict:
     """
     Machine-readable capability map of the MANAGEMENT console, so an agent
-    (an agent / Claude Code) can drive corpus operations over JSON the same way
-    it drives the query API (:8051) — no browser, no page snapshots.
+    (a coding agent with HTTP + file tools) can drive corpus operations
+    over JSON the same way it drives the query API (:8051) — no browser,
+    no page snapshots.
 
     Every operation carries a `permission` tier the calling agent MUST honor:
       * read       — safe, no confirmation needed (stats, search, status, logs)

@@ -1,384 +1,61 @@
 # ============================================================
-#  Golden query eval suite — Personal RAG
-#  94 questions: the original 30 conceptual seeds, plus exam-like
-#  questions modeled on ACTUAL exam/PSS/quiz samples found in the
-#  vault (DS206 SQL midterms, RL midterm samples + tree-MDP worked
-#  examples, MA quizzes, NLP PSS/HWs, Armenian History midterm Q&As),
-#  plus own-code / problem-situation queries against the user's real
-#  assignments and projects.
+#  Golden-query suite — ILLUSTRATIVE EXAMPLE
+# ============================================================
+#  This is a small example set showing the SUITE SHAPE — six queries
+#  covering the three core shapes the runner scores:
 #
-#  Each query has:
-#    question        — what the user asks
-#    domain          — expected domain tag (for retrieval hit-rate)
-#    expect_keywords — terms a correct answer should contain (recall proxy)
-#    expect_course   — (optional) course the top source should come from
+#    - conceptual   : a clean concept question, expects keyword recall
+#    - exam-like    : a question that would appear in a textbook chapter
+#                     review or a course final (still no exam leakage)
+#    - code         : a code-shape query (use the "code" preset)
 #
-#  Run:  python main.py eval                      (full, needs the LLM)
-#        python main.py eval --retrieval-only     (minutes, offline)
+#  Six queries is enough to demonstrate the runner and to seed a CI
+#  smoke test of the pipeline. For a real regression, REPLACE this
+#  file with 30-100 queries written from YOUR corpus, with
+#  `expect_keywords` and (optionally) `domain` / `expect_course`
+#  filled in from the actual retrieved material.
+#
+#  Fields:
+#    question        : the query
+#    preset          : (optional) "code" | "concept" | "synthesis"
+#    expect_keywords : terms that should appear in the top-k retrieval pool
+#                      (used for keyword_recall; checkable against your sources)
+#    domain          : (optional) the `domain` metadata value you expect in top-k
+#    expect_course   : (optional) the canonical course_name you expect on the
+#                      #1 source's metadata (requires parser.course_taxonomy
+#                      in config.yaml to be populated for your corpus)
+#
+#  Run with:
+#    python main.py eval --retrieval-only        # offline, no LLM, ~minutes
+#    python main.py eval                          # full run, needs generation endpoint
 # ============================================================
 
 queries:
-  # ---- NLP ----
-  - question: "What is knowledge distillation and how does it transfer knowledge from a teacher to a student model?"
-    domain: nlp
-    expect_keywords: ["teacher", "student", "soft", "distillation"]
-    expect_course: "Capstone"
-  - question: "How does a BiLSTM process sequences differently from a unidirectional LSTM?"
-    domain: nlp
-    expect_keywords: ["forward", "backward", "bidirectional"]
-  - question: "What is the role of mBERT in multilingual NLP tasks?"
-    domain: nlp
-    expect_keywords: ["multilingual", "transformer", "embedding"]
-  - question: "Explain the attention mechanism in transformers."
-    domain: nlp
-    expect_keywords: ["attention", "query", "key", "value"]
 
-  # ---- ML ----
-  - question: "What is cross-entropy loss and when is it used?"
+  # ── CONCEPTUAL ───────────────────────────────────────────────
+  - question: "Explain the difference between precision and recall with a worked example."
+    expect_keywords: ["precision", "recall", "true positive", "false positive"]
     domain: ml
-    expect_keywords: ["cross-entropy", "classification", "probability"]
-  - question: "Explain the bias-variance tradeoff."
-    domain: ml
-    expect_keywords: ["bias", "variance", "overfitting"]
-  - question: "What is regularization and how do L1 and L2 differ?"
-    domain: ml
-    expect_keywords: ["regularization", "L1", "L2", "penalty"]
-  - question: "How does gradient descent update model parameters?"
-    domain: ml
-    expect_keywords: ["gradient", "learning rate", "minimize"]
 
-  # ---- Reinforcement Learning ----
-  - question: "What is the difference between value-based and policy-based RL methods?"
-    domain: ml
-    expect_keywords: ["value", "policy", "reward"]
-  - question: "Explain the Bellman equation."
-    domain: ml
-    expect_keywords: ["Bellman", "value", "state"]
-
-  # ---- Statistics ----
-  - question: "What is a p-value and how is it interpreted?"
+  - question: "What is the central limit theorem and why does it matter in practice?"
+    expect_keywords: ["central limit", "sampling distribution", "mean", "variance"]
     domain: stats
-    expect_keywords: ["p-value", "null hypothesis", "significance"]
-  - question: "Explain the central limit theorem."
-    domain: stats
-    expect_keywords: ["central limit", "normal", "sample mean"]
-  - question: "What is the difference between Type I and Type II errors?"
-    domain: stats
-    expect_keywords: ["Type I", "Type II", "false positive"]
 
-  # ---- Time Series ----
-  - question: "What does ARIMA stand for and what does each component model?"
-    domain: ts
-    expect_keywords: ["autoregressive", "integrated", "moving average"]
-    expect_course: "Time Series & Forecasting"
-  - question: "What is stationarity and how do you test for it?"
-    domain: ts
-    expect_keywords: ["stationarity", "Dickey-Fuller", "mean", "variance"]
-  - question: "Explain seasonal decomposition of a time series."
-    domain: ts
-    expect_keywords: ["seasonal", "trend", "residual"]
-
-  # ---- Business Intelligence ----
-  - question: "What is a star schema in data warehousing?"
-    domain: biz
-    expect_keywords: ["fact table", "dimension", "schema"]
-  - question: "What is the difference between a measure and a dimension in Power BI?"
-    domain: biz
-    expect_keywords: ["measure", "dimension", "aggregation"]
-
-  # ---- Data Visualization ----
-  - question: "What are the principles of effective data visualization?"
-    domain: viz
-    expect_keywords: ["clarity", "encoding", "perception"]
-  - question: "When should you use a box plot versus a histogram?"
-    domain: viz
-    expect_keywords: ["distribution", "quartile", "outlier"]
-
-  # ---- Databases ----
-  - question: "What is database normalization and what problems does it solve?"
-    domain: db
-    expect_keywords: ["normalization", "redundancy", "normal form"]
-  - question: "Explain the difference between INNER JOIN and LEFT JOIN."
-    domain: db
-    expect_keywords: ["inner join", "left join", "matching"]
-  - question: "What is an index and how does it speed up queries?"
-    domain: db
-    expect_keywords: ["index", "lookup", "query"]
-
-  # ---- Math ----
-  - question: "What is the gradient of a multivariable function?"
-    domain: math
-    expect_keywords: ["gradient", "partial derivative", "vector"]
-  - question: "Explain eigenvalues and eigenvectors."
-    domain: math
-    expect_keywords: ["eigenvalue", "eigenvector", "matrix"]
-  - question: "What is the Newton-Raphson method for root finding?"
-    domain: math
-    expect_keywords: ["Newton", "iteration", "root", "derivative"]
-
-  # ---- Cross-domain / synthesis ----
-  - question: "How does the chain rule from calculus relate to backpropagation in neural networks?"
-    domain: math
-    expect_keywords: ["chain rule", "backpropagation", "gradient"]
-  - question: "How are eigenvalues used in PCA for dimensionality reduction?"
-    domain: ml
-    expect_keywords: ["eigenvalue", "PCA", "variance", "component"]
-  - question: "Why is cross-entropy preferred over MSE for classification?"
-    domain: ml
-    expect_keywords: ["cross-entropy", "MSE", "gradient", "classification"]
-  - question: "How does differencing in ARIMA relate to achieving stationarity?"
-    domain: ts
-    expect_keywords: ["differencing", "stationarity", "trend"]
-
-  # ============================================================
-  #  EXAM-LIKE — SQL / BI (modeled on DS206 midterms + assignments)
-  # ============================================================
-  - question: "Write a T-SQL query using ROW_NUMBER() OVER (PARTITION BY ...) to find the highest-paid employee in each store."
-    domain: biz
-    expect_keywords: ["ROW_NUMBER", "PARTITION", "salary"]
-    expect_course: "Business Intelligence & Analytics"
-  - question: "How do I find employees on the third level of the management hierarchy using self-joins?"
-    domain: biz
-    expect_keywords: ["manager", "join", "staff"]
-  - question: "What is a slowly changing dimension, and how do SCD types 1, 2 and 3 differ?"
-    domain: biz
-    expect_keywords: ["dimension", "type 2", "historical"]
-  - question: "How is an SCD type 2 dimension table updated with a MERGE statement?"
-    domain: biz
-    expect_keywords: ["MERGE", "type 2"]
-  - question: "Star schema versus snowflake schema — when should each be used?"
-    domain: biz
-    expect_keywords: ["star", "snowflake", "dimension"]
-  - question: "What is a surrogate key and why do dimension tables use them?"
-    domain: biz
-    expect_keywords: ["surrogate", "key", "dimension"]
-  - question: "How do SQL triggers work, and what did I use triggers for?"
-    domain: biz
-    expect_keywords: ["trigger", "insert", "update"]
-  - question: "What is the difference between a stored procedure and a user-defined function in SQL?"
-    domain: biz            # answered by the 800+ SQL interview book (BI&A course, biz)
-    expect_keywords: ["procedure", "function", "return"]
-  - question: "How do views differ from tables, and what views did I create in my hotel database project?"
-    domain: db             # hotel project retagged to db (session 12); a miss here means
-                           # his own view .sql files lose to SQL-textbook prose — real signal
-    expect_keywords: ["view", "booking"]
-  - question: "How did my data warehouse design script lay out the fact and dimension tables?"
-    domain: biz
-    expect_keywords: ["fact", "dimension", "CREATE TABLE"]
-
-  # ============================================================
-  #  EXAM-LIKE — Reinforcement Learning (midterm samples + tree MDP)
-  # ============================================================
-  - question: "State the Bellman optimality equation for Q-values and explain each term."
-    domain: ml
-    expect_keywords: ["Bellman", "optimal", "discount"]
-  - question: "Work through value iteration on a small tree-structured MDP."
-    domain: ml
-    expect_keywords: ["value", "tree", "MDP"]
-    expect_course: "Reinforcement Learning"
-  - question: "What is the difference between on-policy and off-policy learning, using SARSA and Q-learning as examples?"
-    domain: ml
-    expect_keywords: ["SARSA", "Q-learning", "policy"]
-  - question: "Explain epsilon-greedy exploration and the exploration–exploitation tradeoff."
-    domain: ml
-    expect_keywords: ["epsilon", "exploration", "exploitation"]
-  - question: "What is the discount factor gamma and how does it affect returns?"
-    domain: ml
-    expect_keywords: ["discount", "gamma", "return"]
-  - question: "Which algorithm did I use to train HalfCheetah in my deep RL project?"
-    domain: ml
-    expect_keywords: ["HalfCheetah", "reward"]
-    expect_course: "Reinforcement Learning"
-  - question: "How does experience replay stabilize deep reinforcement learning?"
-    domain: ml
-    expect_keywords: ["replay", "buffer", "sample"]
-  - question: "Explain temporal-difference learning and the TD error."
-    domain: ml
-    expect_keywords: ["temporal difference", "error"]
-
-  # ============================================================
-  #  EXAM-LIKE — NLP (PSS/HW/final-project grounded)
-  # ============================================================
-  - question: "How does multi-head attention differ from single-head attention?"
-    domain: nlp
-    expect_keywords: ["multi-head", "attention"]
-  - question: "How does BPE tokenization work, and how did I train custom tokenizers for Armenian?"
-    domain: nlp
-    expect_keywords: ["BPE", "token", "Armenian"]
-    expect_course: "Natural Language Processing"
-  - question: "How did I initialize the embeddings of new tokens when grafting a modified tokenizer (goal 3)?"
-    domain: nlp
-    expect_keywords: ["graft", "embedding"]
-  - question: "How does LoRA fine-tuning work — what do the adapter matrices and rank control?"
-    domain: nlp
-    expect_keywords: ["LoRA", "rank", "adapter"]
-  - question: "How did I implement an LSTM from scratch — which gates does the cell compute?"
-    domain: nlp
-    expect_keywords: ["gate", "hidden", "cell"]
-  - question: "What is reverse-mode automatic differentiation, and how did the from-scratch autodiff engine implement backward()?"
-    domain: nlp
-    expect_keywords: ["backward", "gradient"]
-  - question: "What techniques make LLM inference faster?"
-    domain: nlp
-    expect_keywords: ["cache", "inference"]
-  - question: "How did my capstone restore punctuation of Armenian participial clauses as a sequence-labeling task?"
-    domain: nlp
-    expect_keywords: ["punctuation", "sequence labeling", "Armenian"]
-    expect_course: "Capstone"
-
-  # ============================================================
-  #  EXAM-LIKE — GenAI / PyTorch
-  # ============================================================
-  - question: "In PyTorch, what does autograd track, and when do you call zero_grad?"
-    domain: ml
-    expect_keywords: ["autograd", "gradient", "zero_grad"]
-  - question: "What is a DataLoader and why use batching and shuffling during training?"
-    domain: ml
-    expect_keywords: ["DataLoader", "batch", "shuffle"]
-  - question: "How do GANs train a generator against a discriminator?"
-    domain: ml
-    expect_keywords: ["generator", "discriminator", "adversarial"]
-  - question: "What does temperature control in LLM sampling?"
-    domain: nlp
-    expect_keywords: ["temperature", "sampling", "probability"]
-
-  # ============================================================
-  #  EXAM-LIKE — Marketing Analytics (quiz-grounded)
-  # ============================================================
-  - question: "How did I segment the travel-agency customers — which clustering method and which features?"
-    domain: biz
-    expect_keywords: ["cluster", "segment", "customer"]
-    expect_course: "Marketing Analytics"
-  - question: "How do you choose the number of clusters k in K-means (elbow method, silhouette)?"
-    domain: ml
-    expect_keywords: ["elbow", "silhouette", "cluster"]
-  - question: "What is RFM analysis in marketing?"
-    domain: biz
-    expect_keywords: ["recency", "frequency", "monetary"]
-  - question: "What does the pulse project's ETL schema define — which tables, and how are migrations applied?"
-    domain: biz
-    expect_keywords: ["schema", "table", "migration"]
-    expect_course: "Marketing Analytics"
-
-  # ============================================================
-  #  EXAM-LIKE — Time Series
-  # ============================================================
-  - question: "How do you read ACF and PACF plots to choose AR and MA orders?"
-    domain: ts
-    expect_keywords: ["ACF", "PACF", "lag"]
-  - question: "What is Holt-Winters exponential smoothing and when is it preferred over ARIMA?"
-    domain: ts
-    expect_keywords: ["exponential smoothing", "seasonal"]
-  - question: "Which error metrics are used to compare forecasting models?"
-    domain: ts
-    expect_keywords: ["MAE", "RMSE", "MAPE"]
-
-  # ============================================================
-  #  EXAM-LIKE — Statistics & Probability (incl. Bertsekas / BusStats)
-  # ============================================================
-  - question: "State Bayes' rule and apply it to a diagnostic-test example."
-    domain: stats
-    expect_keywords: ["Bayes", "prior", "posterior"]
-  - question: "What is conditional expectation and the law of total expectation?"
-    domain: stats
-    expect_keywords: ["conditional", "expectation"]
-  - question: "Derive the maximum likelihood estimator for the mean of a normal distribution."
-    domain: stats
-    expect_keywords: ["likelihood", "maximum"]
-  - question: "How do you construct a confidence interval for a mean when the variance is unknown?"
-    domain: stats
-    expect_keywords: ["confidence interval", "standard error"]
-  - question: "What are the assumptions of linear regression and how do you check the residuals?"
-    domain: stats
-    expect_keywords: ["residual", "assumption"]
-
-  # ============================================================
-  #  EXAM-LIKE — Numerical Methods & Calculus
-  # ============================================================
-  - question: "Compare bisection and Newton's method for root finding — convergence rates and pitfalls."
-    domain: math
-    expect_keywords: ["bisection", "Newton", "convergence"]
-    expect_course: "Numerical Methods"
-  - question: "How does LU decomposition solve a linear system?"
-    domain: math
-    expect_keywords: ["decomposition", "triangular"]
-  - question: "Explain Lagrange multipliers for constrained optimization."
-    domain: math
-    expect_keywords: ["Lagrange", "constraint", "gradient"]
-  - question: "How does the second-derivative (Hessian) test classify critical points?"
-    domain: math
-    expect_keywords: ["Hessian", "critical", "saddle"]
-
-  # ============================================================
-  #  EXAM-LIKE — Data Structures / Intro AI
-  # ============================================================
-  - question: "Compare the time complexity of quicksort and mergesort."
+  - question: "Describe how a hash table handles collisions, and compare open addressing with separate chaining."
+    expect_keywords: ["collision", "open addressing", "chaining", "hash"]
     domain: prog
-    expect_keywords: ["quicksort", "mergesort"]
-  - question: "How do hash tables handle collisions?"
-    domain: prog
-    expect_keywords: ["hash", "collision"]
-  - question: "How does minimax with alpha-beta pruning choose a move, and how did my chess AI use it?"
-    domain: ml             # chess.py lives under Intro to AI -> domain ml
-    expect_keywords: ["minimax", "alpha", "beta"]
-    expect_course: "Intro to AI"
-  - question: "How do BFS and DFS differ and when is each preferred?"
-    domain: prog
-    expect_keywords: ["BFS", "DFS", "queue"]
 
-  # ============================================================
-  #  EXAM-LIKE — Armenian History (midterm Q&As are in the corpus)
-  # ============================================================
-  - question: "What do my Armenian History midterm answers say about the Armenian Genocide?"
-    domain: general
-    expect_keywords: ["Armenian", "1915"]
-    expect_course: "Armenian History"
-  - question: "Summarize a key theme from my Armenian History quiz preparation notes."
-    domain: general
-    expect_keywords: ["Armenia"]
-    expect_course: "Armenian History"
+  # ── EXAM-LIKE (textbook review questions) ────────────────────
+  - question: "State Bayes' rule and apply it to a diagnostic-test example with a numerical prior."
+    expect_keywords: ["bayes", "prior", "likelihood", "posterior"]
+    domain: stats
 
-  # ============================================================
-  #  CODING / ML PROBLEM SITUATIONS — own-code queries
-  # ============================================================
-  - question: "How did I compute a running total per department with window functions in my BI assignment?"
-    domain: biz
-    expect_keywords: ["running_total", "PARTITION"]
-    expect_course: "Business Intelligence & Analytics"
-  - question: "How does the BookingwithPayment stored procedure work in my hotel database project?"
-    domain: db             # hotel project retagged to db + course (session 12)
-    expect_keywords: ["procedure", "booking", "payment"]
-    expect_course: "Databases & Data Engineering"
-  - question: "How did my Telegram bot for the NLP homework receive and answer messages?"
-    domain: nlp
-    expect_keywords: ["bot", "message"]
-  - question: "How did I train tokenizers in goal 2 of the NLP final project, and how were they evaluated?"
-    domain: nlp
-    expect_keywords: ["tokenizer", "train"]
-  - question: "In my HalfCheetah notebook, how is training structured — environment, updates, evaluation?"
+  - question: "Compare gradient descent, stochastic gradient descent, and mini-batch SGD. When is each preferred?"
+    expect_keywords: ["gradient", "stochastic", "mini-batch", "convergence"]
     domain: ml
-    expect_keywords: ["HalfCheetah", "train"]
-  - question: "How did my chess AI evaluate board positions?"
-    domain: ml             # Intro to AI course -> domain ml
-    expect_keywords: ["board", "piece"]
-    expect_course: "Intro to AI"
-  - question: "How did I implement the autoencoder in the NLP PSS — encoder/decoder architecture and loss?"
-    domain: nlp
-    expect_keywords: ["encoder", "decoder", "loss"]
-  - question: "Which optimization methods did the NLP PSS2 tutorial implement and compare?"
-    domain: nlp
-    expect_keywords: ["momentum", "Adam", "learning rate"]
-  - question: "How did my Intro-to-PyTorch notebook define and train a neural network?"
-    domain: ml
-    expect_keywords: ["nn.Module", "optimizer", "train"]
-  - question: "How does my capstone's knowledge-distillation setup pass teacher predictions to the student?"
-    domain: nlp
-    expect_keywords: ["teacher", "student", "distillation"]
-    expect_course: "Capstone"
-  - question: "How did I run LoRA fine-tuning on the H100 in goal 4 — which libraries and settings?"
-    domain: nlp
-    expect_keywords: ["LoRA", "fine-tun"]
-  - question: "What happens in my RL homework's report-generation script?"
-    domain: ml
-    expect_keywords: ["report", "reward"]
-    expect_course: "Reinforcement Learning"
+
+  # ── CODE ─────────────────────────────────────────────────────
+  - question: "Show me a clean Python implementation of a binary search over a sorted array with iterative and recursive variants."
+    preset: code
+    expect_keywords: ["def", "binary", "search", "mid"]
+    domain: prog

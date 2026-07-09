@@ -490,7 +490,7 @@ def schema() -> dict:
         "example_cmd": (
             'curl.exe -s -X POST http://127.0.0.1:8051/search -H '
             '"Content-Type: application/json" -d '
-            '"{\\"q\\": \\"how did I tune mBERT in my capstone\\", '
+            '"{\\"q\\": \\"show me my python script for backoff retries\\", '
             '\\"top_k\\": 8}"'
         ),
     }
