@@ -14,7 +14,7 @@ are built once and reused. Build the pipeline once, call query() many times.
 
     from src.pipeline import RAGPipeline
     rag = RAGPipeline.from_config(cfg)
-    answer = rag.query("Explain knowledge distillation in my capstone")
+    answer = rag.query("Explain knowledge distillation from my notes")
 """
 from __future__ import annotations
 

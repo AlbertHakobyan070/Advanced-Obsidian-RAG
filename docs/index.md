@@ -1,39 +1,43 @@
 # Advanced Obsidian RAG
 
-**Grounded, cited question-answering over a large personal Obsidian vault.**
+**Grounded, cited question-answering over a personal knowledge base of
+markdown notes, textbooks, lecture PDFs, and notebooks.**
 
-Ask a question in plain language and get an answer assembled *only* from your own
-notes, textbooks, homework, and notebooks — with inline `[n]` citations and a
-per-answer confidence line. When the vault is silent on something, the system says so
-rather than inventing an answer.
+Ask a question in plain language and get an answer assembled *only* from your
+own materials — with inline `[n]` citations and a per-answer confidence line.
+When your materials are silent on something, the system says so rather than
+inventing an answer.
 
 !!! quote "At a glance"
-    - **~170,000 retrieval chunks** across **4,400+ documents** — markdown notes, 280+
-      textbooks, lecture PDFs, passed homework, Jupyter/R notebooks, scripts, and OCR'd
-      scanned books.
-    - **24+ courses**, **9 knowledge domains**, served from **~4 GB** of prebuilt
-      indexes on a laptop.
-    - **Free / local by default** — CPU embeddings, on-disk vector + sparse indexes, and
-      any OpenAI-compatible endpoint for generation.
+    - **A full retrieval-augmented pipeline** over markdown notes, PDFs,
+      textbooks, scanned books (OCR), Jupyter/R notebooks, and scripts.
+    - **Free / local by default** — CPU embeddings, on-disk vector + sparse
+      indexes, and any OpenAI-compatible endpoint for generation.
+    - **Citation-audited answers** — every claim is traceable to a source you
+      already trust, with a per-answer confidence line.
 
 ## Why a purpose-built pipeline
 
-A general chatbot answers from the open web. It can't tell you what *your* course
-emphasised, how *your* homework solved a problem, or which page of *your* textbook
-carries a proof. This system indexes a personal knowledge vault and answers strictly
-from it, so every claim traces back to a source you already trust.
+A general chatbot answers from the open web. This system indexes *your*
+documents and answers strictly from them, so every claim traces back to a
+source you already trust, and a wrong-but-confident answer is impossible.
 
 It is a full retrieval pipeline rather than a thin wrapper:
 
-- **Hybrid retrieval** — dense embeddings + BM25, fused by Reciprocal Rank Fusion.
-- **Query expansion** — HyDE (and optional HyPE) to bridge the vocabulary gap between a
-  short question and long-form notes.
-- **Intent-aware scope routing** — soft-routes queries toward the right domain, path, or
-  file type without ever being able to empty the result set.
-- **A dedicated code lane** so your own scripts and notebooks surface for code questions.
+- **Hybrid retrieval** — dense embeddings + BM25, fused by Reciprocal Rank
+  Fusion.
+- **Query expansion** — HyDE (and optional HyPE) to bridge the vocabulary
+  gap between a short question and long-form notes.
+- **Intent-aware scope routing** — soft-routes queries toward the right
+  domain, content type, or path without ever being able to empty the
+  result set.
+- **A dedicated code lane** so scripts and notebooks surface for code
+  questions.
 - **Cross-encoder reranking** for precision at the top.
-- **Citation-audited generation** — answers cite their sources and can self-verify.
-- **A management console + agent API** and a **reproducible evaluation suite**.
+- **Citation-audited generation** — answers cite their sources and can
+  self-verify.
+- **A management console + agent API** and a **reproducible evaluation
+  suite**.
 
 ## Where to go next
 
@@ -61,6 +65,7 @@ It is a full retrieval pipeline rather than a thin wrapper:
 
 -   :material-docker: **[Docker deployment](deployment-docker.md)**
 
-    Run both services plus a generation backend on another machine in two commands.
+    Run both services plus a generation backend on another machine in two
+    commands.
 
 </div>

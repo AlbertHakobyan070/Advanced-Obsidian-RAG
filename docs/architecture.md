@@ -35,7 +35,7 @@ normalises its inputs into the same chunk schema (text + metadata: `source_file`
 
 | Loader | Handles |
 |---|---|
-| `obsidian_parser` | Markdown notes; heading-aware sectioning; course/domain tagging; wikilink capture. |
+| `obsidian_parser` | Markdown notes; heading-aware sectioning; course / domain tagging (configurable taxonomy); wikilink capture. |
 | `pdf_loader` | Lecture PDFs and textbooks; OCR-capable for scanned pages. |
 | `ipynb_loader` | Jupyter and R notebooks (`.ipynb`, `.R`, `.Rmd`, `.py`). |
 | `code_loader` | Other source languages (`.js/.ts/.sql/.go/.java/.c/.cpp/.rs/.sh/…`) into a dedicated code lane. |
@@ -70,22 +70,24 @@ normalises its inputs into the same chunk schema (text + metadata: `source_file`
 
 Queries that name a domain or content type are routed toward where they point:
 
-- `retrieval.domain_signals` maps aliases (e.g. "BI", "DataViz", "pytorch") to `domain`
-  metadata values.
-- `retrieval.content_signals` maps phrases ("homework", "lecture files", "tech books",
+- `retrieval.domain_signals` maps aliases (e.g. "BI", "DataViz", "pytorch") to
+  `domain` metadata values.
+- `retrieval.content_signals` maps phrases (e.g. "lecture files", "tech books",
   "cheat sheet") to path substrings or file types.
 
-A detected scope adds **filtered dense + sparse lanes** to the fusion. Routing is
-**soft**: in-scope chunks are guaranteed seats in the candidate pool, but the reranker
-still makes the final call — so a wrong hint degrades gracefully instead of returning
-nothing. Both dictionaries are config-only; extend them without touching code.
+A detected scope adds **filtered dense + sparse lanes** to the fusion. Routing
+is **soft**: in-scope chunks are guaranteed seats in the candidate pool, but
+the reranker still makes the final call — so a wrong hint degrades gracefully
+instead of returning nothing. Both dictionaries are config-only; extend them
+without touching code.
 
 ## The code lane
 
-Code and notebook chunks are a small slice of the corpus. For a query like *"show me a
-complex ggplot from my code"*, a prose-oriented pipeline writes a prose HyDE draft that
-lands near lecture notes, and BM25's code hits get outvoted in fusion by textbook pages
-that merely repeat the keyword — so the reranker never even sees the user's own code.
+Code and notebook chunks are a small slice of the corpus. For a query like
+*"show me a complex ggplot from my code"*, a prose-oriented pipeline writes a
+prose HyDE draft that lands near lecture notes, and BM25's code hits get
+outvoted in fusion by textbook pages that merely repeat the keyword — so the
+reranker never even sees the user's own code.
 
 The fix, triggered by a configurable code-intent signal list:
 

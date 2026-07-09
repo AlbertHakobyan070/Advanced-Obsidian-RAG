@@ -32,11 +32,11 @@ Consequences you operate by:
 
 ## Metadata changes: retag, don't re-embed
 
-Fixing a course label, domain, or tag is a metadata update. It rewrites the record's
-metadata in both the vector store and the sparse index and never touches embeddings —
-fast and safe. Do it from the console's Documents tab or the retag endpoint; the sparse
-index carries its own metadata copy, so **rebuild the sparse index after any metadata
-change or deletion**.
+Fixing a course label, domain, or tag is a metadata update. It rewrites the
+record's metadata in both the vector store and the sparse index and never
+touches embeddings — fast and safe. Do it from the console's Documents tab or
+the retag endpoint; the sparse index carries its own metadata copy, so
+**rebuild the sparse index after any metadata change or deletion**.
 
 ## Text changes: the swap playbook
 
@@ -69,7 +69,7 @@ do this — follow the same pattern for any new one.
 | Script | Purpose |
 |---|---|
 | `rebuild_bm25.py` | Rebuild only the sparse index after metadata changes / deletions. |
-| `recalibrate_courses.py` | Re-tag course metadata in place without re-embedding. |
+| `recalibrate_courses.py` | Re-tag course metadata in place without re-embedding (uses the parser's course-taxonomy helpers). |
 | `delete_doc.py` | Preview-then-confirm removal of documents from the index. |
 | `dedup_jsonl.py` | Drop duplicate `doc_id`s from a chunk file. |
 | `build_hype.py` | Build hypothetical-prompt embeddings (HyPE) for a scoped set. |

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark light">
-<title>Corpus Ledger — Personal RAG</title>
+<title>Corpus Ledger — RAG Management Console</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='3' y='3' width='5' height='18' rx='1' fill='%23E8A33D'/%3E%3Crect x='10' y='3' width='5' height='18' rx='1' fill='%238A6423'/%3E%3Crect x='17' y='6' width='4' height='15' rx='1' fill='%23A99F8F'/%3E%3C/svg%3E">
 <script>/* theme is applied BEFORE first paint to avoid a flash of the wrong palette */
 document.documentElement.dataset.theme=localStorage.getItem("ledger-theme")||"dark";</script>
@@ -202,7 +202,7 @@ pre.log{background:var(--log-bg);border:1px solid var(--line);border-radius:var(
 <header>
   <div class="hrow">
     <div class="wordmark"><svg class="mark" viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><rect x="3" y="3" width="5" height="18" rx="1"/><rect x="10" y="3" width="5" height="18" rx="1" opacity=".55"/><rect x="17" y="6" width="4" height="15" rx="1" opacity=".3"/></svg>Corpus <em>Ledger</em></div>
-    <div class="sub">Personal RAG — management console · :8052</div>
+    <div class="sub">RAG management console · :8052</div>
     <div class="statuses">
       <span><span class="dot" id="dot-manage"></span>manage</span>
       <span><span class="dot" id="dot-rag"></span>query api :8051</span>
@@ -258,7 +258,7 @@ pre.log{background:var(--log-bg);border:1px solid var(--line);border-radius:var(
       <div id="upload-busy" style="display:none;margin-top:10px"><svg class="reel" viewBox="0 0 24 24"><circle class="b" cx="12" cy="12" r="9"/><circle class="a" cx="12" cy="12" r="6"/></svg>Uploading…</div>
       <table style="margin-top:12px"><tbody id="inbox-rows"><tr><td class="empty">Inbox is empty.</td></tr></tbody></table>
       <div class="row" style="margin-top:10px">
-        <input id="inbox-domain" placeholder="domain (opt): swe / ml / nlp…" style="width:190px" title="Stamped on every chunk of this batch — feeds domain scope routing. Inbox files have no course folder, so they land 'general' otherwise.">
+        <input id="inbox-domain" placeholder="domain (opt): ml / stats / nlp…" style="width:190px" title="Stamped on every chunk of this batch — feeds domain scope routing. Inbox files have no path-derived metadata, so they default to 'general' otherwise.">
         <input id="inbox-tags" placeholder="tags (opt): agentic, python" style="flex:1;min-width:150px" title="Comma-separated. Stamped on every chunk — searchable and boosted at retrieval when a tag appears in the query.">
         <select id="inbox-chunking" style="width:170px" title="How OVERSIZED sections are split. heading = paragraph packing (default). fixed = strict sliding window — for scanned/OCR PDFs whose paragraph structure is noise.">
           <option value="">chunking: heading</option><option value="fixed">chunking: fixed</option></select>
@@ -299,7 +299,7 @@ pre.log{background:var(--log-bg);border:1px solid var(--line);border-radius:var(
 
     <div id="jf-ingest_pdfs" class="jform">
       <div class="grid g2">
-        <div><label class="f">Include path (substring)</label><input id="p-include" placeholder="e.g. Current Courses, Inbox, GenAI"></div>
+        <div><label class="f">Include path (substring)</label><input id="p-include" placeholder="e.g. lectures, books, Inbox"></div>
         <div><label class="f">Exclude path</label><input id="p-exclude" placeholder="optional"></div>
         <div><label class="f">Output JSONL</label><input id="p-output" placeholder="data/pdf_chunks.jsonl"></div>
         <div><label class="f">Max pages / PDF</label><input id="p-maxpages" type="number" min="1" placeholder="all"></div>
@@ -330,12 +330,12 @@ pre.log{background:var(--log-bg);border:1px solid var(--line);border-radius:var(
 
     <div id="jf-ingest_code" class="jform" style="display:none">
       <div class="grid g2">
-        <div><label class="f">Include path (substring)</label><input id="p-code-include" placeholder="e.g. Capstone, Current Courses"></div>
+        <div><label class="f">Include path (substring)</label><input id="p-code-include" placeholder="e.g. src, projects"></div>
         <div><label class="f">Exclude path</label><input id="p-code-exclude" placeholder="optional"></div>
         <div><label class="f">Output JSONL</label><input id="p-code-output" placeholder="data/code_chunks.jsonl"></div>
         <div><label class="f">Extensions (subset)</label><input id="p-code-exts" placeholder=".js,.ts,.sql (blank = all mapped)"></div>
       </div>
-      <div class="note">Covers the languages the notebook loader doesn't (.js/.ts/.sql/.go/.java/.c/.cpp/.rs/.sh/…). <b>.py/.R/.Rmd/.ipynb</b> stay on <b>ingest-notebooks</b>. Agent-project roots (Workspace1, Workspace2, …) are skipped unless an Include path names them.</div>
+      <div class="note">Covers the languages the notebook loader doesn't (.js/.ts/.sql/.go/.java/.c/.cpp/.rs/.sh/…). <b>.py/.R/.Rmd/.ipynb</b> stay on <b>ingest-notebooks</b>. Large agent-project roots are skipped unless an Include path names them.</div>
     </div>
 
     <div id="jf-index_append" class="jform" style="display:none">
@@ -438,8 +438,8 @@ pre.log{background:var(--log-bg);border:1px solid var(--line);border-radius:var(
 <section id="tab-query">
   <div class="panel">
     <h2>Test console</h2>
-    <p class="hint">Talks straight to the warm query endpoint (:8051). <b>Ask</b> = full RAG answer (needs FreeLLMAPI). <b>Search only</b> = retrieval, no LLM.</p>
-    <textarea id="q-text" rows="2" style="width:100%" placeholder="What do I know about conjugate priors?"></textarea>
+    <p class="hint">Talks straight to the warm query endpoint (:8051). <b>Ask</b> = full RAG answer (needs a generation endpoint). <b>Search only</b> = retrieval, no LLM.</p>
+    <textarea id="q-text" rows="2" style="width:100%" placeholder="What do my notes say about the central limit theorem?"></textarea>
     <div class="row" style="margin-top:10px">
       <select id="q-preset"><option value="">preset: none</option><option>code</option><option>concept</option><option>synthesis</option></select>
       <input id="q-topk" type="number" min="1" max="50" placeholder="rerank_k" style="width:86px" title="rerank_top_k — how many reranked chunks reach the LLM (blank = config default, 7)">
@@ -462,7 +462,7 @@ pre.log{background:var(--log-bg);border:1px solid var(--line);border-radius:var(
 <section id="tab-info">
   <div class="panel">
     <h2>How this RAG works</h2>
-    <p class="hint">A hybrid-retrieval RAG over your Obsidian vault. Its <b>core</b> is two search lanes — <b>Dense</b> (semantic / vectors) and <b>Sparse</b> (keyword / BM25) — run together and <b>fused</b> with Reciprocal Rank Fusion; optional branches can widen or reshape the query and add extra lanes. The fused pool is <b>re-ranked</b> by a cross-encoder, then a cited answer is <b>grounded</b> in your own materials. Everything up to generation is local; only the final answer needs the LLM.</p>
+    <p class="hint">A hybrid-retrieval RAG over your personal knowledge base. Its <b>core</b> is two search lanes — <b>Dense</b> (semantic / vectors) and <b>Sparse</b> (keyword / BM25) — run together and <b>fused</b> with Reciprocal Rank Fusion; optional branches can widen or reshape the query and add extra lanes. The fused pool is <b>re-ranked</b> by a cross-encoder, then a cited answer is <b>grounded</b> in your own materials. Everything up to generation is local; only the final answer needs the LLM.</p>
     <div class="row" style="margin:0 0 12px">
       <button class="btn dgbtn on" data-dg="query">Query pipeline</button>
       <button class="btn dgbtn" data-dg="ingest">Ingestion pipeline</button>
@@ -691,7 +691,7 @@ pre.log{background:var(--log-bg);border:1px solid var(--line);border-radius:var(
 
         <!-- ===== spine ===== -->
         <rect class="main" x="396" y="14" width="168" height="36" rx="8" style="stroke:var(--amber);stroke-width:1.6"/>
-        <text class="t" x="480" y="36">Your vault files</text>
+        <text class="t" x="480" y="36">Your source files</text>
         <text class="tol" x="572" y="32">vault = read-only;</text>
         <text class="tol" x="572" y="45">inbox = the only write</text>
 
@@ -1059,7 +1059,7 @@ $("#d-retag").onclick=async()=>{
   const n=state.selDocs.size;if(!n)return;
   const domain=prompt(`Retag ${n} document(s).\n\nDomain (blank = keep current). Known: stats, ml, nlp, viz, biz, ts, db, math, swe, prog, general:`);
   if(domain===null)return;
-  const course=prompt(`Course (blank = keep current). Full name as it appears in the Documents course column, e.g. "Databases & Data Engineering":`);
+  const course=prompt(`Course (blank = keep current). Full name as it appears in the Documents course column, e.g. "Machine Learning":`);
   if(course===null)return;
   const addT=prompt("Tags to ADD (comma-separated, blank = none):");
   if(addT===null)return;

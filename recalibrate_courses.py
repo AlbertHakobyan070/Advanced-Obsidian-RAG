@@ -3,11 +3,12 @@ recalibrate_courses.py — Re-tag course metadata on already-indexed chunks
 WITHOUT re-embedding or re-extracting anything.
 
 WHY
-  The course tags on PDF/notebook chunks were computed before FOLDER_COURSE_MAP
-  learned the folder-name variants (NLP/RL/MA/GenAI abbreviations, the messy
-  01-Passed leaf folders, etc.). That left ~79% of notebook chunks tagged
-  "unknown", which silently disables the retriever's metadata_boost and domain
-  routing for them.
+  The course tags on PDF/notebook chunks were computed before the active
+  course taxonomy learned a particular set of folder-name variants. That can
+  leave a non-trivial share of notebook chunks tagged "unknown", which
+  silently disables the retriever's metadata_boost and domain routing for
+  them. This script re-runs the parser's course detection against the stored
+  path, using the current taxonomy, and writes the result back in place.
 
 WHAT THIS DOES (fast, metadata-only)
   For each path-detected chunk file (pdf_chunks, lecture_chunks, other_chunks,

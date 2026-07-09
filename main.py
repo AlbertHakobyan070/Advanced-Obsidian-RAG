@@ -257,7 +257,7 @@ def cmd_serve(args):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="a personal RAG over his Obsidian vault.")
+    p = argparse.ArgumentParser(description="a local RAG over your personal knowledge base (markdown notes, PDFs, notebooks, code).")
     p.add_argument("--config", default=None, help="Path to config.yaml")
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -274,10 +274,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Process everything EXCEPT Books/ folders (for the lecture-notes pass; "
                           "guarantees already-ingested books aren't re-processed)")
     pdf.add_argument("--include-path", default=None, metavar="SUBSTR",
-                     help="Only process PDFs whose path contains SUBSTR, e.g. \"Current Courses\"")
+                     help="Only process PDFs whose path contains SUBSTR (e.g. a folder name)")
     pdf.add_argument("--exclude-path", default=None, metavar="SUBSTR",
-                     help="Skip PDFs whose path contains SUBSTR, e.g. \"Current Courses\" "
-                          "to avoid re-processing the lecture pass")
+                     help="Skip PDFs whose path contains SUBSTR")
     pdf.add_argument("--output", default=None, metavar="JSONL",
                      help="Write chunks here instead of data/pdf_chunks.jsonl "
                           "(e.g. data/lecture_chunks.jsonl)")
@@ -306,8 +305,8 @@ def build_parser() -> argparse.ArgumentParser:
                           "folder beside it (inbox lane: keeps re-runs from "
                           "re-processing or clobbering previous batches)")
     pdf.add_argument("--force-domain", default=None, metavar="DOMAIN",
-                     help="Stamp every chunk's domain (inbox uploads have no "
-                          "course path, so they land 'general' otherwise)")
+                     help="Stamp every chunk's domain (e.g. for inbox uploads "
+                          "that carry no path-based course metadata).")
     pdf.add_argument("--chunking", default=None, choices=("heading", "fixed"),
                      help="How oversized sections are split: 'heading' = "
                           "paragraph packing (default), 'fixed' = strict "

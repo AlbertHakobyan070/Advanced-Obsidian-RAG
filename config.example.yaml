@@ -13,6 +13,39 @@ parser:
   chunking: heading              # heading | fixed (how OVERSIZED sections split)
   skip_dirs: [".obsidian", ".trash", ".git", "__path_fix_backups", "__MACOSX"]
 
+  # ------------------------------------------------------------------
+  # Course taxonomy — optional, but required if you want the parser to
+  # stamp a `course_name` and `domain` on each chunk from folder paths
+  # and note headings. The parser ships with sensible GENERIC defaults
+  # (no institution-specific entries); populate these to teach the parser
+  # your own course codes, folder names, and short-name forms.
+  # ------------------------------------------------------------------
+  # course_taxonomy:
+  #   course_code_regex: '(CS|DS|ENGS|BSDS|ECON)\s*\d{2,3}'   # tweak for your institution
+  #   course_heading_patterns:
+  #     - '^#{1,3}\s+(CS|DS|ENGS|BSDS|ECON)\s*\d{2,3}'        # course codes
+  #     - '^#{1,3}\s+Lecture\s+\d+'                            # "# Lecture 5"
+  #   course_map:                                              # code -> canonical name
+  #     "CS 251": "Machine Learning"
+  #     "DS 110": "Statistics"
+  #   domain_map:                                              # canonical name -> domain
+  #     "Machine Learning": "ml"
+  #     "Statistics": "stats"
+  #   folder_course_map:                                       # folder name (lowercase) -> canonical name
+  #     "machine learning": "Machine Learning"
+  #   course_keywords:                                         # substring -> canonical name (most-specific first)
+  #     - ["machine learning", "Machine Learning"]
+  #     - ["statistic", "Statistics"]
+  #   skip_heading_patterns:                                   # headings that look course-ish but aren't
+  #     - "^todo\b"
+  #     - "^day\s+planner"
+  #   abbreviations:                                           # short-name form -> canonical name
+  #     - ["^nlp\b", "Natural Language Processing"]
+  #     - ["^ml\b", "Machine Learning"]
+  #   daily_note_dirs:                                         # folder names that identify a daily-note folder
+  #     - "daily notes"
+  #     - "journal"
+
 paths:
   chunks_file: "data/chunks.jsonl"
   chroma_dir: "data/chroma_db"
@@ -45,7 +78,7 @@ retrieval:
   rerank_mode: cross_encoder                # cross_encoder | none
   cross_encoder_model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
   use_hyde: true
-  # If a query mentions a course/domain, bias retrieval toward it
+  # If a query names a domain, bias retrieval toward it
   metadata_boost: true
 
   # HyDE bypass for code-intent queries. If the query contains any of these
@@ -94,59 +127,35 @@ retrieval:
 
   # domain metadata value -> query keywords/aliases that point at it.
   # Keys MUST be values the `domain` metadata field actually holds
-  # (stats, ml, nlp, viz, biz, ts, db, math, swe, prog).
-  domain_signals:
-    stats: [statistics, statistical, stats, probability, bayesian, bayes,
-            hypothesis testing, conjugate prior, confidence interval]
-    ml:    [machine learning, ml, deep learning, dl, neural network,
-            neural networks, sklearn, scikit-learn, pytorch, tensorflow,
-            reinforcement learning, rl, genai, generative ai, llm,
-            gradient descent, hugging face]
-    nlp:   [nlp, natural language processing, natural language, transformer,
-            transformers, bert, mbert, tokenizer, tokenization, embedding,
-            embeddings, spacy, nltk, stanza, sentencepiece]
-    viz:   [visualization, visualizations, dataviz, data viz,
-            data visualization, ggplot, matplotlib, seaborn, plotly,
-            tableau, power bi]
-    biz:   [business intelligence, bi, business analytics,
-            marketing analytics, marketing, dax, power bi, tableau]
-    ts:    [time series, forecasting, arima, sarima, seasonality]
-    db:    [database, databases, sql, postgresql, postgres, mysql, mongodb,
-            data engineering, sqlalchemy]
-    math:  [calculus, linear algebra, numerical methods, math, mathematics,
-            eigenvalue, eigenvalues]
-    swe:   [software architecture, software engineering, devops, docker,
-            kubernetes, fastapi, web development, design pattern,
-            design patterns, microservices]
-    prog:  [data structures, algorithms, python development]
+  # (see the values you stamp with --force-domain or set in
+  # parser.course_taxonomy.domain_map). All example keys below are
+  # common domains — adapt them to your own corpus.
+  domain_signals: {}    # fill in, e.g.:  ml:    [machine learning, ml, neural network, pytorch]
+                        #                  stats: [statistics, statistical, probability, bayesian]
+                        #                  nlp:   [nlp, natural language processing, transformer, bert]
+                        #                  viz:   [visualization, ggplot, matplotlib, tableau]
+                        #                  biz:   [business intelligence, marketing analytics, dax]
+                        #                  ts:    [time series, forecasting, arima, sarima]
+                        #                  db:    [database, sql, postgresql, data engineering]
+                        #                  math:  [calculus, linear algebra, numerical methods]
+                        #                  swe:   [software engineering, devops, docker, fastapi]
+                        #                  prog:  [data structures, algorithms, python development]
 
   # content label -> {signals: query keywords, path_contains: source_file
   # substrings (case-insensitive), file_types: file_type metadata values}.
-  # Content aspects OR together; domain AND content must both hold
-  # ("my homework from NLP" = homework path AND nlp domain).
+  # Content aspects OR together; if a domain_signal also matches, both
+  # must hold ("lectures in statistics" = lectures content AND stats domain).
   content_signals:
-    homework:    {signals: [homework, hw, assignment, assignments, problem set],
-                  path_contains: [homework, hw, assignment]}
     lectures:    {signals: [lecture, lectures, slides, lecture notes],
                   path_contains: [lecture, slides]}
-    tech_books:  {signals: [tech book, tech books],
-                  path_contains: [tech books]}
     books:       {signals: [textbook, textbooks, book, books],
                   path_contains: [books]}
     cheatsheets: {signals: [cheat sheet, cheat sheets, cheatsheet, cheatsheets],
                   path_contains: [cheat sheet, cheatsheet]}
     notebooks:   {signals: [notebook, notebooks, jupyter],
                   file_types: [ipynb]}
-    capstone:    {signals: [capstone, thesis],
-                  path_contains: [capstone]}
-    coursera:    {signals: [coursera],
-                  path_contains: [coursera]}
-    daily_notes: {signals: [daily note, daily notes, study notes],
-                  file_types: [daily_note]}
-    current:     {signals: [current course, current courses, this semester],
-                  path_contains: [current courses]}
-    passed:      {signals: [passed course, passed courses, passed coursework],
-                  path_contains: [passed]}
+    work:        {signals: [work, exercise, exercises, problem set],
+                  path_contains: [work, exercises]}
 
 # ------------------------------------------------------------------
   # Live-vault lane via Obsidian's Omnisearch plugin (community plugin).
@@ -180,11 +189,14 @@ retrieval:
     fresh:     {rerank_top_k: 8,  omnisearch: true}
 
 
-  # --- local provider block (KoboldCPP serving Gemma-4-E4B-it-Q8) ---
+  # --- local provider block (KoboldCPP / Ollama / vLLM) ---
+  # Set `model` to whatever your /v1/models endpoint reports. Examples:
+  #   "gemma-2-9b-it-Q8_0", "qwen2.5-7b-instruct-q8_0",
+  #   "llama-3.1-8b-instruct-q8_0", or a custom fine-tune name.
   local:
     base_url: "http://localhost:5001/v1"
-    api_key: "koboldcpp"                    # dummy; KoboldCPP ignores it
-    model: "gemma-4-E4B-it-Q8_k"            # whatever /v1/models reports
+    api_key: "koboldcpp"                    # dummy; most local servers ignore it
+    model: "<your-local-model-id>"          # whatever /v1/models reports
     # NOTE: KoboldCPP context length is set at LAUNCH (--contextsize),
     #       NOT per request. Launch with --contextsize 8192 or higher.
 
@@ -201,14 +213,14 @@ pdf:
   overlap_size: 150
   skip_scanned_threshold: 50                # chars/page below which a page = scanned
   skip_list_file: null                      # optional JSON array of vault-relative paths to skip
-  skip_scripts: ["armenian"]
+  skip_scripts: []                          # ISO 15924 script codes to placeholder (e.g. ["Armn"], ["Cyrl"], ["Hebr"])
   script_sample_pages: 3
   skip_folders: []
   extract_images: true
   figures_dir: data/figures
   image_min_frac: 0.08
   ocr_enabled: true
-  ocr_language: "eng"                       # add "+hye" for Armenian if tessdata present
+  ocr_language: "eng"                       # add "+hye" for Armenian (ISO 639-2) or "+rus" for Russian if tessdata is present
   # OCR engine for scanned pages:
   #   auto      -> historical behavior (Tesseract-first probe)   [default]
   #   tesseract -> pin the classic path
@@ -240,7 +252,7 @@ notebooks:
   overlap_size: 150
   include_outputs: true                          # append text cell outputs
   max_output_chars: 2000                         # cap per-cell output length
-  skip_scripts: ["armenian"]                     # per-cell: placeholder Armenian prose/output
+  skip_scripts: []                              # ISO 15924 script codes to placeholder per-cell (e.g. ["Armn"], ["Cyrl"])
   save_figures: false                            # true = decode image outputs to figures_dir
   figures_dir: data/notebook_figures
 
@@ -250,7 +262,7 @@ webui:
   port: 8052                                 # 8051 = query API, 8501 = Streamlit
   rag_api: "http://127.0.0.1:8051"           # the query endpoint the console talks to
   # Browser uploads land INSIDE the vault here (created if missing), so the
-  # normal ingest passes pick them up with --include-path "Inbox":
-  inbox_dir: "00 – AUA_DS/Other/Inbox"
+  # normal ingest passes pick them up. Adapt the path to your vault layout.
+  inbox_dir: "Inbox"
   jobs_dir: "logs/jobs"                      # one log file per job
   manifest_cache: "data/.manifest_cache.json"

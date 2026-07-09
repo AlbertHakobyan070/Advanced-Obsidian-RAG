@@ -1,14 +1,14 @@
 """
-app.py — Streamlit interface for Personal RAG.
+app.py — Streamlit interface for the RAG pipeline.
 
     streamlit run app.py      (or: python main.py serve)
 
 Shows the answer, a confidence badge, expandable source excerpts with citation
 audit marks, and a sidebar with pipeline config + timing. Built to be the thing
-you actually open before an interview to drill your own notes.
+you actually open before a meeting / exam to drill your own materials.
 
 Sidebar retrieval controls: pick a preset (auto/code/concept/synthesis) and/or
-override top-k per query — the warm pipeline never restarts. "Save as default"
+override top-k per query - the warm pipeline never restarts. "Save as default"
 writes the value back to config.yaml (comment-preserving) so it survives
 restarts too.
 """
@@ -21,7 +21,7 @@ import streamlit as st
 from src.pipeline import RAGPipeline
 from src.utils.config_loader import load_config, persist_config_values
 
-st.set_page_config(page_title="Personal RAG", page_icon="📚", layout="wide")
+st.set_page_config(page_title="RAG Pipeline", page_icon="📚", layout="wide")
 
 
 @st.cache_resource(show_spinner="Loading pipeline…")
@@ -76,8 +76,8 @@ def main():
         st.caption("Answers are grounded in your own lecture notes. "
                    "Citations are audited by a second model pass.")
 
-    st.title("📚 Personal RAG")
-    st.caption("Ask anything from your Obsidian vault — grounded, cited answers from your own notes.")
+    st.title("📚 RAG Pipeline")
+    st.caption("Ask anything from your personal knowledge base — grounded, cited answers from your own materials.")
 
     if "history" not in st.session_state:
         st.session_state.history = []

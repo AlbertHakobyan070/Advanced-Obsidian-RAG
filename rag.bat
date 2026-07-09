@@ -1,40 +1,50 @@
 @echo off
 REM ===========================================================================
-REM rag.bat - launcher for Personal RAG
-REM   Activates the project venv, cd's to the project, then runs a command.
+REM rag.bat - Windows launcher template for the RAG pipeline (Windows only).
 REM
-REM   rag serve              -> start the warm HTTP endpoint on :8051 (for agents)
-REM   rag console            -> start the management console on :8052 (browser admin)
-REM   rag ocr                -> start the DeepSeek-OCR vision server on :8100
-REM   rag web                -> start the Streamlit web app (browser UI)
-REM   rag query "..."        -> one-shot CLI query (cold, human use)
-REM   rag chat               -> interactive warm CLI loop
-REM   rag <anything>         -> forwarded to: python main.py <anything>
+REM   This is a CONVENIENCE WRAPPER around the standard Python commands. The
+REM   README and MANUAL.md show the exact `python -m uvicorn ...` and
+REM   `python main.py ...` commands - those work on every platform with no
+REM   wrapper at all. This .bat just reduces typing once you've set up the
+REM   paths below.
 REM
-REM   Each server BLOCKS its window - run serve / console / ocr in SEPARATE
-REM   terminals. On 16GB RAM, only start the ones you actually need right now.
+REM   QUICK START:
+REM     1. Edit the VENV and PROJECT lines below to match your install.
+REM     2. From a project root that contains this file, type `rag serve`,
+REM        `rag console`, `rag query "..."`, etc. (the .bat picks up the
+REM        working directory automatically if PROJECT is left blank).
+REM
+REM   COMMANDS (each BLOCKS its window; run each in a SEPARATE terminal):
+REM     rag serve              -> start the warm HTTP endpoint on :8051
+REM     rag console            -> start the management console on :8052 (browser)
+REM     rag web                -> start the Streamlit web app (browser UI)
+REM     rag query "..."        -> one-shot CLI query (cold, human use)
+REM     rag chat               -> interactive warm CLI loop
+REM     rag <anything>         -> forwarded to: python main.py <anything>
+REM
+REM   On 16 GB RAM, only start the ones you actually need right now.
 REM ===========================================================================
 setlocal
 
-set "VENV=%LOCALAPPDATA%\rag\venv"
-set "PROJECT=A:\DS_Vault\DS Main Vault\rag_project"
+REM --- Edit these two lines to match your local install ---
+set "VENV=%USERPROFILE%\.venvs\rag"
+set "PROJECT="
 
-REM OCR ingest passes need this (non-default Tesseract install path); harmless otherwise.
+REM OCR ingest passes need this if Tesseract is installed in a non-default
+REM location; harmless if the env var is unset. Adjust for your install.
 set "TESSDATA_PREFIX=%LOCALAPPDATA%\Programs\Tesseract-OCR\tessdata"
-REM Silence the benign cross-filesystem hardlink warning from uv.
-set "UV_LINK_MODE=copy"
 
 if not exist "%VENV%\Scripts\activate.bat" (
     echo [rag.bat] ERROR: venv not found at "%VENV%"
-    echo            The project venv may have moved or been reinstalled.
+    echo            Edit the VENV line at the top of this file, or activate
+    echo            your venv manually before running the python commands.
     exit /b 1
 )
 
 call "%VENV%\Scripts\activate.bat"
-cd /d "%PROJECT%"
+if not "%PROJECT%"=="" cd /d "%PROJECT%"
 
 if /i "%~1"=="serve" (
-    REM Warm endpoint for agents/bots. Port 8051 - NOT 8000 (Jupyter).
     echo [rag.bat] Starting RAG endpoint on http://127.0.0.1:8051 ...
     echo [rag.bat] Leave this window open. Health: curl.exe http://127.0.0.1:8051/health
     python -m uvicorn serve_api:app --host 127.0.0.1 --port 8051
@@ -42,25 +52,13 @@ if /i "%~1"=="serve" (
 )
 
 if /i "%~1"=="console" (
-    REM Management console for corpus admin (ingest/index/delete/jobs). Browser only.
     echo [rag.bat] Starting management console on http://127.0.0.1:8052 ...
     echo [rag.bat] Open that URL in a browser. Leave this window open.
     python -m uvicorn manage_api:app --host 127.0.0.1 --port 8052
     goto :end
 )
 
-if /i "%~1"=="ocr" (
-    REM DeepSeek-OCR vision server on :8100 (decoder on GPU1). Only needed for
-    REM --ocr-engine vlm ingest passes. Every flag here is load-bearing - see
-    REM config.yaml pdf.vlm_ocr. Stop it (Ctrl+C) when the OCR pass is done.
-    echo [rag.bat] Starting DeepSeek-OCR server on http://127.0.0.1:8100 (GPU1) ...
-    echo [rag.bat] Leave open only while OCR-ingesting; it holds ~3.5GB VRAM.
-    "A:\Llamacpp\llama-b9860-bin-win-vulkan-x64\llama-server.exe" -m "A:\Llamacpp\models\deepseek-ocr\DeepSeek-OCR-Q8_0.gguf" --mmproj "A:\Llamacpp\models\deepseek-ocr\mmproj-DeepSeek-OCR-Q8_0.gguf" -ngl 999 -dev Vulkan1 -c 8192 -np 1 --host 127.0.0.1 --port 8100 --jinja --chat-template-file "A:\Llamacpp\deepseek-ocr-passthrough.jinja" --flash-attn off
-    goto :end
-)
-
 if /i "%~1"=="web" (
-    REM Streamlit browser UI (preset selector + top-k controls in the sidebar).
     echo [rag.bat] Starting Streamlit app - a browser tab will open ...
     streamlit run app.py
     goto :end
