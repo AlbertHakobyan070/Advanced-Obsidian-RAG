@@ -14,7 +14,7 @@ are built once and reused. Build the pipeline once, call query() many times.
 
     from src.pipeline import RAGPipeline
     rag = RAGPipeline.from_config(cfg)
-    answer = rag.query("Explain knowledge distillation from my notes")
+    answer = rag.query("Explain knowledge distillation in my capstone")
 """
 from __future__ import annotations
 
@@ -121,6 +121,7 @@ class RAGPipeline:
         parent_context: bool | None = None,
         neighbor_context: bool | None = None,
         hype: bool | None = None,
+        rerank: str | None = None,
     ) -> tuple[list, dict]:
         """
         Retrieval only — everything query() does EXCEPT generation. Returns
@@ -163,7 +164,9 @@ class RAGPipeline:
             omnisearch=use_omni,
             hype=use_hype,
         )
-        top = self.reranker.rerank(question, candidates, top_k=k)
+        rerank_mode = rerank if rerank is not None else overrides.get("rerank_mode")
+        top = self.reranker.rerank(question, candidates, top_k=k,
+                                   mode=rerank_mode)
 
         # E2 small-to-big (post-rerank): per-call beats preset beats config.
         parent_on = parent_context
@@ -205,6 +208,7 @@ class RAGPipeline:
             "neighbors_added": neighbors,
             "hype": bool(use_hype if use_hype is not None
                          else self.retriever.hype_enabled),
+            "rerank_mode": (rerank_mode or self.reranker.mode),
         }
         return top, info
 
@@ -220,6 +224,7 @@ class RAGPipeline:
         parent_context: bool | None = None,
         neighbor_context: bool | None = None,
         hype: bool | None = None,
+        rerank: str | None = None,
         max_tokens: int | None = None,
     ) -> Answer:
         """
@@ -233,7 +238,7 @@ class RAGPipeline:
             dense_top_k=dense_top_k, sparse_top_k=sparse_top_k,
             hyde=hyde, omnisearch=omnisearch,
             parent_context=parent_context, neighbor_context=neighbor_context,
-            hype=hype,
+            hype=hype, rerank=rerank,
         )
         answer = self.generator.generate(question, top, max_tokens=max_tokens)
         answer.retrieval = info

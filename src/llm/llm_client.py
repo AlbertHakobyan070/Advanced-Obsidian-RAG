@@ -1,8 +1,8 @@
 """
 llm_client.py — One interface, three backends.
 
-    anthropic -> Anthropic Claude via the Anthropic SDK
-    openai    -> OpenAI GPT via the OpenAI SDK
+    anthropic -> Claude via the Anthropic SDK
+    openai    -> GPT via the OpenAI SDK
     local     -> KoboldCPP / Ollama / vLLM via OpenAI-compatible /v1 endpoint
 
 The point of this module: the rest of the pipeline NEVER imports a vendor SDK
@@ -12,11 +12,10 @@ directly. Swap the whole generation layer by editing one line in config.yaml.
     llm = LLMClient.from_config(cfg)
     text = llm.complete(system="...", user="...", temperature=0.1)
 
-Local note (e.g. KoboldCPP serving a small open model):
+Local note (KoboldCPP serving Gemma-4-E4B-it-Q8):
     KoboldCPP exposes an OpenAI-compatible API at /v1, so we reuse the OpenAI
-    SDK and just point base_url at it with a dummy key. Context length must
-    be set when LAUNCHING KoboldCPP (--contextsize N); it cannot be set
-    per-request.
+    SDK and just point base_url at it with a dummy key. Context length must be
+    set when LAUNCHING KoboldCPP (--contextsize N); it cannot be set per-request.
 """
 from __future__ import annotations
 
@@ -64,7 +63,7 @@ class LLMClient:
         Build a client from the config section named by `role`
         (currently only 'generation', but kept generic for HyDE/verify reuse).
         """
-        provider = cfg.get(f"{role}.provider", "openai")
+        provider = cfg.get(f"{role}.provider", "anthropic")
         temperature = cfg.get(f"{role}.temperature", 0.1)
         max_tokens = cfg.get(f"{role}.max_tokens", 1500)
 

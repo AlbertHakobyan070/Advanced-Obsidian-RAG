@@ -1,7 +1,7 @@
 """
 omnisearch_client.py — Live-vault lane via Obsidian's Omnisearch plugin.
 
-The RAG index is a snapshot: anything the user wrote since the last ingest is
+The RAG index is a snapshot: anything the author wrote since the last ingest is
 invisible to ChromaDB/BM25. Omnisearch (the community plugin) indexes the vault
 LIVE inside Obsidian and exposes a localhost HTTP API:
 
@@ -22,7 +22,7 @@ Two extra jobs it does:
   * course/domain tagging via detect_course_from_path, so metadata_boost and
     scope routing treat live notes like indexed ones;
   * marks metadata["live"] = True so citations can carry a "(live)" tag —
-    the answer may quote a note that is NOT yet in the index, and the user
+    the answer may quote a note that is NOT yet in the index, and the author
     should be able to tell.
 
 Usage:

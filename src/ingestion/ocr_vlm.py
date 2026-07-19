@@ -17,7 +17,7 @@ code hit any of:
   * SGLang / vLLM serving baidu/Unlimited-OCR on a real GPU (the reference
     stack wants CUDA 12.9 — see the HF card),
   * llama.cpp / LM Studio / Ollama serving one of its GGUF quantizations
-    locally (the CPU-viable path on the user's machine; slow but overnight-able),
+    locally (the CPU-viable path on the author's machine; slow but overnight-able),
   * FreeLLMAPI (:3001) fronting a free hosted vision model (Llama 4 Scout,
     Gemini) — zero local setup, works today, rate-limited.
 

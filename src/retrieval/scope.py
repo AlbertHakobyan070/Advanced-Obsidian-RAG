@@ -2,10 +2,9 @@
 scope.py — Query → retrieval-scope routing.
 
 If a query names a knowledge domain ("statistics", "BI", "NLP", "ggplot"…) or
-a content type ("my homework", "the lecture files", "the tech books"…),
-retrieval should *look where the user pointed*. This module detects those
-hints with the same word-boundary matcher the HyDE bypass uses, and turns
-them into a Scope:
+a content type ("my homework", "lecture files", "the tech books"…), retrieval
+should *look where the user pointed*. This module detects those hints with the
+same word-boundary matcher the HyDE bypass uses, and turns them into a Scope:
 
     domains       -> values of the `domain` metadata field (stats, ml, nlp, …)
     path_contains -> case-insensitive substrings of `source_file`

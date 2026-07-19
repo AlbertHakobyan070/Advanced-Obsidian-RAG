@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-main.py — CLI entry point for Personal RAG.
+main.py — CLI entry point for the personal RAG.
 
     python main.py index                      # build dense + sparse indexes from chunks.jsonl
     python main.py query "What is ARIMA?"      # one-shot question
@@ -84,6 +84,9 @@ def cmd_ingest_pdfs(args):
         loader.include_path = args.include_path.lower()
     if args.exclude_path:
         loader.exclude_path = args.exclude_path.lower()
+    if getattr(args, "include_files", None):
+        loader.include_files = {f.strip().lower()
+                                for f in args.include_files.split(",") if f.strip()}
     if args.output:
         loader.output_file = Path(args.output)
     if args.max_pages:
@@ -165,6 +168,9 @@ def cmd_ingest_code(args):
         loader.include_path = args.include_path.lower()
     if args.exclude_path:
         loader.exclude_path = args.exclude_path.lower()
+    if getattr(args, "include_files", None):
+        loader.include_files = {f.strip().lower()
+                                for f in args.include_files.split(",") if f.strip()}
     if args.exts:
         loader.exts = {e.strip().lower() for e in args.exts.split(",") if e.strip()}
     out = loader.ingest_vault()
@@ -174,6 +180,70 @@ def cmd_ingest_code(args):
         sys.exit(3)
     print(f"\n✅ Code chunks written to {out}")
     print(f"   Now run: python main.py index --append {out}")
+
+
+def cmd_ingest_md(args):
+    """Scoped markdown parse (inbox md lane). Unlike the vault-wide parser
+    run, this REQUIRES an include filter + its own output so the canonical
+    chunks.jsonl can never be clobbered. E2 parent sidecars are skipped for
+    scoped runs (parents_md.jsonl is a whole-vault artifact)."""
+    cfg = load_config(args.config)
+    _bootstrap_logging(cfg)
+    from src.ingestion.obsidian_parser import ObsidianParser
+
+    vault = args.vault or cfg.get("parser.vault_path") or cfg.get("pdf.vault_path")
+    parser = ObsidianParser(vault, config={
+        "chunking": args.chunking or cfg.get("parser.chunking", "heading"),
+        "include_path": args.include_path,
+        "skip_roots": [],                      # include_path is the scope here
+    })
+    docs = parser.parse_all()
+    if not docs:
+        print("\n❌ 0 markdown chunks produced — no matching .md files in scope.")
+        sys.exit(3)
+    parser.export_jsonl(docs, args.output)
+    print(f"\n✅ {len(docs)} markdown chunks written to {args.output}")
+    print(f"   Now run: python main.py index --append {args.output}")
+
+
+def cmd_fetch_web(args):
+    cfg = load_config(args.config)
+    _bootstrap_logging(cfg)
+    from src.ingestion.web_import import fetch_urls
+
+    urls = [u.strip() for u in args.urls.split(",") if u.strip()]
+    out_dir = Path(args.out_dir) if args.out_dir else _inbox_dir(cfg) / "_converted"
+    res = fetch_urls(urls, out_dir, backend=args.backend)
+    ok = sum(1 for r in res if r["ok"])
+    for r in res:
+        print(("✅" if r["ok"] else "❌") + f" {r.get('url')}: "
+              f"{r.get('file') or r.get('error')}")
+    print(f"\n{ok}/{len(res)} page(s) fetched into {out_dir}")
+    if ok < len(res):
+        sys.exit(3)
+
+
+def cmd_convert_files(args):
+    cfg = load_config(args.config)
+    _bootstrap_logging(cfg)
+    from src.ingestion.web_import import convert_files
+
+    inbox = _inbox_dir(cfg)
+    out_dir = Path(args.out_dir) if args.out_dir else inbox / "_converted"
+    files = [f.strip() for f in args.files.split(",") if f.strip()]
+    res = convert_files(files, inbox, out_dir, ocr_pages=args.ocr_pages or "")
+    ok = sum(1 for r in res if r["ok"])
+    for r in res:
+        print(("✅" if r["ok"] else "❌") + f" {r.get('file')}: "
+              f"{r.get('output') or r.get('error')}")
+    print(f"\n{ok}/{len(res)} file(s) converted into {out_dir}")
+    if ok < len(res):
+        sys.exit(3)
+
+
+def _inbox_dir(cfg) -> Path:
+    vault = Path(cfg.get("pdf.vault_path") or cfg.get("parser.vault_path"))
+    return vault / cfg.get("webui.inbox_dir", "00 – AUA_DS/Other/Inbox")
 
 
 def _render_answer(answer) -> None:
@@ -226,7 +296,7 @@ def cmd_chat(args):
     from src.pipeline import RAGPipeline
 
     rag = RAGPipeline.from_config(cfg)
-    print("Personal RAG — interactive mode. Type 'exit' or Ctrl-C to quit.\n")
+    print("the personal RAG — interactive mode. Type 'exit' or Ctrl-C to quit.\n")
     try:
         while True:
             q = input("❓ ").strip()
@@ -257,7 +327,7 @@ def cmd_serve(args):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="a local RAG over your personal knowledge base (markdown notes, PDFs, notebooks, code).")
+    p = argparse.ArgumentParser(description="Personal RAG over an Obsidian vault.")
     p.add_argument("--config", default=None, help="Path to config.yaml")
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -274,9 +344,10 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Process everything EXCEPT Books/ folders (for the lecture-notes pass; "
                           "guarantees already-ingested books aren't re-processed)")
     pdf.add_argument("--include-path", default=None, metavar="SUBSTR",
-                     help="Only process PDFs whose path contains SUBSTR (e.g. a folder name)")
+                     help="Only process PDFs whose path contains SUBSTR, e.g. \"Current Courses\"")
     pdf.add_argument("--exclude-path", default=None, metavar="SUBSTR",
-                     help="Skip PDFs whose path contains SUBSTR")
+                     help="Skip PDFs whose path contains SUBSTR, e.g. \"Current Courses\" "
+                          "to avoid re-processing the lecture pass")
     pdf.add_argument("--output", default=None, metavar="JSONL",
                      help="Write chunks here instead of data/pdf_chunks.jsonl "
                           "(e.g. data/lecture_chunks.jsonl)")
@@ -305,9 +376,13 @@ def build_parser() -> argparse.ArgumentParser:
                           "folder beside it (inbox lane: keeps re-runs from "
                           "re-processing or clobbering previous batches)")
     pdf.add_argument("--force-domain", default=None, metavar="DOMAIN",
-                     help="Stamp every chunk's domain (e.g. for inbox uploads "
-                          "that carry no path-based course metadata).")
-    pdf.add_argument("--chunking", default=None, choices=("heading", "fixed"),
+                     help="Stamp every chunk's domain (inbox uploads have no "
+                          "course path, so they land 'general' otherwise)")
+    pdf.add_argument("--include-files", default=None, metavar="NAME,NAME",
+                     help="Only process PDFs with these exact filenames "
+                          "(comma-separated; file-scoped custom jobs)")
+    pdf.add_argument("--chunking", default=None,
+                     choices=("heading", "fixed", "document", "none"),
                      help="How oversized sections are split: 'heading' = "
                           "paragraph packing (default), 'fixed' = strict "
                           "sliding window (for OCR/wall-of-text PDFs)")
@@ -341,9 +416,51 @@ def build_parser() -> argparse.ArgumentParser:
                            "skipped agent-project roots back in)")
     code.add_argument("--exclude-path", default=None, metavar="SUBSTR",
                       help="Skip files whose path contains SUBSTR")
+    code.add_argument("--include-files", default=None, metavar="NAME,NAME",
+                      help="Only process files with these exact filenames "
+                           "(comma-separated; file-scoped custom jobs)")
     code.add_argument("--exts", default=None,
                       help="Comma-separated subset, e.g. '.js,.ts,.sql' (default: all mapped)")
     code.set_defaults(func=cmd_ingest_code)
+
+    mdp = sub.add_parser("ingest-md",
+                         help="SCOPED markdown parse (inbox md lane) — needs "
+                              "--include-path and its own --output, never "
+                              "touches chunks.jsonl")
+    mdp.add_argument("--include-path", required=True, metavar="SUBSTR",
+                     help="Only .md files whose vault-relative path contains this")
+    mdp.add_argument("--output", required=True, metavar="JSONL",
+                     help="Chunk file to write (e.g. data/inbox_md_chunks.jsonl)")
+    mdp.add_argument("--chunking", default=None,
+                     choices=("heading", "fixed", "document", "none"),
+                     help="How oversized sections split (default: parser.chunking)")
+    mdp.add_argument("--vault", default=None, metavar="PATH",
+                     help="Override vault root")
+    mdp.set_defaults(func=cmd_ingest_md)
+
+    fw = sub.add_parser("fetch-web",
+                        help="Fetch web pages to markdown (inbox _converted "
+                             "staging) via requests/crawl4ai/scrapling + markitdown")
+    fw.add_argument("--urls", required=True, metavar="URL,URL",
+                    help="Comma-separated http(s) URLs")
+    fw.add_argument("--backend", default="auto",
+                    choices=("auto", "requests", "crawl4ai", "scrapling"),
+                    help="Fetch backend (auto = best installed; requests always works)")
+    fw.add_argument("--out-dir", default=None, metavar="DIR",
+                    help="Output folder (default: <inbox>/_converted)")
+    fw.set_defaults(func=cmd_fetch_web)
+
+    cv = sub.add_parser("convert-files",
+                        help="Convert inbox files (pdf/docx/pptx/xlsx/html/…) "
+                             "to markdown via markitdown, optional PDF-page OCR")
+    cv.add_argument("--files", required=True, metavar="NAME,NAME",
+                    help="Comma-separated inbox filenames")
+    cv.add_argument("--ocr-pages", default=None, metavar="SPEC",
+                    help='Also OCR these 1-based PDF pages (e.g. "1-4,9") and '
+                         "append the text (Tesseract)")
+    cv.add_argument("--out-dir", default=None, metavar="DIR",
+                    help="Output folder (default: <inbox>/_converted)")
+    cv.set_defaults(func=cmd_convert_files)
 
     q = sub.add_parser("query", help="Ask one question")
     q.add_argument("question")

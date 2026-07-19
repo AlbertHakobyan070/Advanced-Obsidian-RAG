@@ -15,6 +15,7 @@ import pytest
 
 from src.ingestion.obsidian_parser import (
     CHUNKING_STRATEGIES,
+    document_element_chunks,
     fixed_window_chunks,
     split_large_chunk,
     split_section,
@@ -105,8 +106,7 @@ def test_heading_no_ws_no_data_loss():
 # ---- split_section dispatcher ----
 
 def test_dispatch_strategies():
-    assert set(CHUNKING_STRATEGIES) == {"heading", "fixed"}
-    for strat in CHUNKING_STRATEGIES:
+    for strat in CHUNKING_STRATEGIES:      # registry is asserted further down
         assert split_section(PARA, 3000, 150, strat) == [PARA]
 
 
@@ -126,3 +126,50 @@ def test_small_sections_identical_across_strategies():
     for text in (PARA, "one line", "a\n\nb\n\nc"):
         assert (split_section(text, 3000, 150, "heading")
                 == split_section(text, 3000, 150, "fixed"))
+
+
+# ---- document_element_chunks (session 14: element-aware mode) ----
+
+CODE_FENCE = "```python\n" + "\n".join(f"def f{i}(): return {i}" for i in range(40)) + "\n```"
+TABLE = "| col1 | col2 |\n|------|------|\n" + "\n".join(
+    f"| a{i} | b{i} |" for i in range(30))
+LISTY = "\n".join(f"- item {i} with some words" for i in range(25))
+DOC = "\n\n".join([PARA, CODE_FENCE, PARA, TABLE, LISTY, PARA, PARA, PARA])
+
+
+def test_document_mode_small_passthrough():
+    assert document_element_chunks(PARA, 3000, 150) == [PARA]
+    assert document_element_chunks("", 3000, 150) == []
+
+
+def test_document_mode_never_cuts_elements():
+    chunks = document_element_chunks(DOC, 1400, 150)
+    assert len(chunks) > 1
+    # the code fence and the table each live WHOLE inside exactly one chunk
+    assert sum(1 for c in chunks if CODE_FENCE in c) == 1
+    assert sum(1 for c in chunks if TABLE in c) == 1
+    assert sum(1 for c in chunks if LISTY in c) == 1
+
+
+def test_document_mode_full_coverage():
+    assert_full_coverage(DOC, document_element_chunks(DOC, 1400, 150))
+
+
+def test_document_mode_oversized_element_falls_back():
+    # a single element bigger than max_size still gets split (fixed windows)
+    chunks = document_element_chunks(WALL, 3000, 150)
+    assert len(chunks) > 1
+    assert all(len(c) <= 3000 for c in chunks)
+
+
+def test_none_mode_keeps_section_whole():
+    assert split_section(STRUCTURED, 3000, 150, "none") == [STRUCTURED]
+    assert split_section("  ", 3000, 150, "none") == []
+
+
+def test_strategy_registry_and_dispatch():
+    assert set(CHUNKING_STRATEGIES) == {"heading", "fixed", "document", "none"}
+    with pytest.raises(ValueError):
+        split_section(PARA, 3000, 150, "semantic")
+    assert split_section(DOC, 1400, 150, "document") == \
+        document_element_chunks(DOC, 1400, 150)

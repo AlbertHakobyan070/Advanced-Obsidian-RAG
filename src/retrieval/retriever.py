@@ -263,7 +263,7 @@ class HybridRetriever:
 
         boost_code additionally opens a CODE LANE: an extra dense pass filtered
         to code_file_types plus a filtered sparse pass join the RRF fusion.
-        the user's scripts/notebooks are ~2.4% of the corpus, so without a
+        the author's scripts/notebooks are ~2.4% of the corpus, so without a
         reserved lane the candidate pool fills up with lecture PDFs that
         mention the same keywords, and the reranker never even sees the code.
 

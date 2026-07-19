@@ -1,5 +1,5 @@
 """
-obsidian_parser.py — Obsidian Vault Ingestion for Personal RAG Pipeline
+obsidian_parser.py — Obsidian Vault Ingestion for the personal RAG Pipeline
 =========================================================================
 Parses an Obsidian vault into semantically meaningful chunks ready for
 embedding. Handles:
@@ -53,189 +53,211 @@ class Document:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Course taxonomy — user-extensible
-# ─────────────────────────────────────────────────────────────────────
-# Every dictionary in this section is config-driven. The default values below
-# are GENERIC placeholders that cover common lecture-note conventions
-# (course codes, common subject names, "Lecture N" patterns). For your own
-# vault, override any of them in config.yaml under `parser.course_taxonomy.*`.
-# All matching is case-insensitive.
-#
-#   COURSE_HEADING_PATTERNS  : regexes that flag a heading as a "course lecture"
-#                              (used to split daily notes into lecture segments
-#                              and to recognise course-named folders/filenames)
-#   COURSE_MAP               : course code -> canonical course name
-#   DOMAIN_MAP               : canonical course name -> domain code
-#   FOLDER_COURSE_MAP        : lowercase folder name -> canonical course name
-#   COURSE_KEYWORDS          : ordered (keyword_substr, course_name) fallback
-#                              for the variant-rich human folder names that
-#                              exact matching can't enumerate
-#   COURSE_CODE_REGEX        : regex for codes like "CS 251", "DS 110", "ECON 101"
-#   SKIP_HEADING_PATTERNS    : regexes for headings that look course-ish but
-#                              are NOT courses (todos, placeholders, schedules…)
-#   ABBREVIATIONS            : ordered (heading_pattern, course_name) for short
-#                              course-name forms (NLP, ML, RL, …)
-#   DAILY_NOTE_DIRS          : folder names that identify a daily-note folder
+# Constants — adjust these to match YOUR vault conventions
 # ─────────────────────────────────────────────────────────────────────
 
-_DEFAULT_COURSE_TAXONOMY: dict = {
-    "course_code_regex": r"(CS|DS|ENGS|BSDS|ECON)\s*\d{2,3}",
-    "course_heading_patterns": [
-        # Course codes: "# CS 251", "## DS 223", …
-        r"^#{1,3}\s+(CS|DS|ENGS|BSDS|ECON)\s*\d{2,3}",
-        # Generic abbreviation / short-name pattern: "# NLP L2", "# RL L3", …
-        r"^#{1,3}\s+[A-Za-z]{2,6}\s+L\d+",
-        # "# Lecture N" / "## Lecture N:" — strongest generic signal of a lecture
-        r"^#{1,3}\s+Lecture\s+\d+",
-        # Generic: heading with dash/colon + lecture/week keyword
-        r"^#{1,3}\s+\w+\s*[-—:]\s+(?:Lecture|Week|Session|Lab|Tutorial|Intro|Quiz|Midterm|Final|Review|HW)",
-    ],
-    "course_map": {
-        # Code -> canonical name. Add your own institution's codes here.
-        # Example: "CS 251": "Machine Learning",
-    },
-    "domain_map": {
-        # Canonical course name -> domain code. Domain codes are free-form —
-        # they're used by retrieval scope routing (config.yaml domain_signals).
-        # Add your own canonical course names here.
-        # Example: "Machine Learning": "ml",
-    },
-    "folder_course_map": {
-        # Lowercase folder name -> canonical course name.
-        # Example: "machine learning": "Machine Learning",
-    },
-    "course_keywords": [
-        # (keyword_substring, course_name) — most-specific first.
-        # Example: ("machine learning", "Machine Learning"),
-    ],
-    "skip_heading_patterns": [
-        # Headings that look course-ish but are NOT courses.
-        r"^todo\b",
-        r"^to[\s-]?do",
-        r"^day\s+planner",
-        r"^plan\b",
-        r"^routine",
-        r"^schedule\b",
-        r"^pre-?study\b",
-        r"^sunday",
-        r"^saturday",
-        r"^tomorrow",
-        r"^before\b",
-        r"^after\b",
-        r"^now\b",
-        r"^main\s+tasks",
-        r"^current\s+(study|focus|job)",
-        r"^what\s+should",
-        r"^convo\s+with",
-        r"^\.\.\.$",                       # Placeholder headings
-        r"^excalidraw\s+data",              # Raw Excalidraw JSON in .md files
-        r"^library\s+schedule",
-        r"^genius\s+idea",
-        r"^do\s+not\s+include",             # Personal "do not include" notes (generic pattern)
-        r"^appeal\s+letter",                # Personal admin documents
-        r"^licensing\s+&\s+legal",          # One-off business docs
-    ],
-    "abbreviations": [
-        # (heading_regex, canonical_course_name) — add short-name forms here.
-        # Example: (r"^nlp\b", "Natural Language Processing"),
-    ],
-    "daily_note_dirs": [
-        "daily notes", "daily", "dailies", "journal",
-    ],
+# Patterns that identify a course lecture inside a daily note.
+# the author's daily notes have multiple course lectures back-to-back,
+# separated by H2 or H3 headings like "## CS 251 — Lecture 14" or
+# "## NLP Specialization — Week 3".
+# Expand this list to match your actual heading conventions.
+COURSE_HEADING_PATTERNS = [
+    # Course codes: "# CS 251", "## DS 223", etc.
+    r"^#{1,3}\s+(CS|DS|ENGS|BSDS|ECON)\s*\d{2,3}",
+    # Course abbreviations (from vault scout): "# TSF", "# NLP L2", "# RL L3", etc.
+    r"^#{1,3}\s+(TSF|NLP|RL|ML|MA|AI|NA|DV|DataViz|Dataviz|DATAVIZ|ArmHist|Econ)\b",
+    # Full course names: "# Statistics 2", "# Numerical Analysis L5", etc.
+    r"^#{1,3}\s+(Statistics|Numerical Analysis|Machine Learning|Linear Algebra|Calculus|Time Series|Data Visualization|Armenian History|Personal Finance|Economics|Capstone|Trust|Generative AI)\b",
+    # "# Lecture N" or "## Lecture N:"
+    r"^#{1,3}\s+Lecture\s+\d+",
+    # Course + Lecture pattern: "# RL L3", "# TSF L12", "# NLP L4"
+    r"^#{1,3}\s+\w+\s+L\d+",
+    # Generic: heading with dash/colon + lecture/week: "# RL — Lecture 5"
+    r"^#{1,3}\s+\w+\s*[-—:]\s+(?:Lecture|Week|Session|Lab|Tutorial|Intro|Quiz|Midterm|Final|PSS|HW)",
+]
+
+# Known course code → full name mapping (from the author's portfolio)
+COURSE_MAP = {
+    # Original AUA codes
+    "CS 251": "Machine Learning & AI",
+    "CS 246": "Reinforcement Learning",
+    "CS 108": "Statistics & Inference",
+    "CS 102": "Linear Algebra",
+    "CS 104": "Calculus / Multivariable",
+    "CS 112": "Numerical Methods",
+    "CS2:101": "Natural Language Processing",
+    "DS 110": "Statistics & Inference",
+    "DS 116": "Data Visualization",
+    "DS 120": "Programming & Engineering",
+    "DS 205": "Databases & Data Engineering",
+    "DS 206": "Business Intelligence & Analytics",
+    "DS 223": "Marketing Analytics",
+    "DS 232": "Generative AI",
+    "BSDS 227": "Business Analytics for Data Science",
+    "CS 362": "Time Series & Forecasting",
+    "ENGS 101": "Calculus I",
+    # Added from vault scout
+    "ECON 101": "Economics",
+    "ECON": "Economics",
 }
 
+# Map course names to knowledge domains (from the portfolio's 9 domains)
+DOMAIN_MAP = {
+    # Core DS/NLP domains (from portfolio)
+    "Natural Language Processing": "nlp",
+    "Machine Learning & AI": "ml",
+    "Statistics & Inference": "stats",
+    "Time Series & Forecasting": "ts",
+    "Business Intelligence & Analytics": "biz",
+    "Programming & Engineering": "prog",
+    "Data Visualization": "viz",
+    "Databases & Data Engineering": "db",
+    "Calculus I": "math",
+    "Calculus / Multivariable": "math",
+    "Linear Algebra": "math",
+    "Numerical Methods": "math",
+    "Generative AI": "ml",
+    "Marketing Analytics": "biz",
+    "Reinforcement Learning": "ml",
+    # Added from vault scout
+    "Intro to AI": "ml",
+    "Economics": "biz",
+    "Personal Finance": "biz",
+    "Trust": "general",
+    "Armenian History": "general",
+    "Capstone": "nlp",
+    # Added this phase (course-tag calibration)
+    "Data Structures & Algorithms": "prog",
+    "Intro to CS": "prog",
+    "Intro to Business": "biz",
+    "Ethics": "general",
+    "Physics & Chemistry": "general",
+    "Business Analytics for Data Science": "biz",
+    # Added: self-study tech books (Tech Books/<bucket>/ folders)
+    "Cloud & DevOps": "swe",
+    "Software Architecture": "swe",
+    "Web Development": "swe",
+    "Data Science (Books)": "ml",
+    "Python Development": "prog",
+}
 
-def _load_taxonomy() -> dict:
-    """Load the course taxonomy from config (if available) and merge over
-    the generic defaults above. Returns a single dict — see schema in
-    _DEFAULT_COURSE_TAXONOMY. Used by the detect_* helpers below.
-    """
-    try:
-        from src.utils.config_loader import load_config  # local import: avoids cycle at module import
-        cfg = load_config()
-        user_tax = cfg.get("parser.course_taxonomy", {}) or {}
-    except Exception:
-        user_tax = {}
+# Folder-name → course name lookup.
+# Used as a fallback in _detect_course_from_path when the folder name
+# doesn't match any heading pattern (e.g. "Statistics & Inference" has '&'
+# which confuses the regex engine, and some folder names use full titles
+# with dashes/spaces that the heading patterns don't cover).
+FOLDER_COURSE_MAP = {
+    # Exact folder name (case-insensitive) -> canonical course name
+    "statistics & inference":           "Statistics & Inference",
+    "statistics and inference":         "Statistics & Inference",
+    "natural language processing":      "Natural Language Processing",
+    "machine learning & ai":            "Machine Learning & AI",
+    "machine learning and ai":          "Machine Learning & AI",
+    "machine learning":                 "Machine Learning & AI",
+    "reinforcement learning":           "Reinforcement Learning",
+    "time series & forecasting":        "Time Series & Forecasting",
+    "time series and forecasting":      "Time Series & Forecasting",
+    "time series forecasting":          "Time Series & Forecasting",
+    "data visualization":               "Data Visualization",
+    "numerical methods":                "Numerical Methods",
+    "numerical analysis":               "Numerical Methods",
+    "calculus / multivariable":         "Calculus / Multivariable",
+    "calculus":                         "Calculus / Multivariable",
+    "linear algebra":                   "Linear Algebra",
+    "databases & data engineering":     "Databases & Data Engineering",
+    "databases and data engineering":   "Databases & Data Engineering",
+    "databases":                        "Databases & Data Engineering",
+    "business intelligence & analytics":"Business Intelligence & Analytics",
+    "business intelligence":            "Business Intelligence & Analytics",
+    "marketing analytics":              "Marketing Analytics",
+    "intro to ai":                      "Intro to AI",
+    "introduction to ai":               "Intro to AI",
+    "generative ai":                    "Generative AI",
+    "economics":                        "Economics",
+    "personal finance":                 "Personal Finance",
+    "armenian history":                 "Armenian History",
+    "trust":                            "Trust",
+    "capstone":                         "Capstone",
+    "programming & engineering":        "Programming & Engineering",
+    "programming and engineering":      "Programming & Engineering",
+    # --- Current Courses abbreviations (active course folders) ---
+    "nlp":                              "Natural Language Processing",
+    "rl":                               "Reinforcement Learning",
+    "ma":                               "Marketing Analytics",
+    "genai":                            "Generative AI",
+    "gen ai":                           "Generative AI",
+    "tsf":                              "Time Series & Forecasting",
+    "dataviz":                          "Data Visualization",
+    "dv":                               "Data Visualization",
+    # --- 01-Passed leaf course folders (exact names, incl. suffixes) ---
+    "ai (a+)":                          "Intro to AI",
+    "ai":                               "Intro to AI",
+    "ds116 (fixed pdfs)":               "Data Visualization",
+    "intro to cs":                      "Intro to CS",
+    "introduction to computer science": "Intro to CS",
+    "data structures":                  "Data Structures & Algorithms",
+    "data structures and algorithms":   "Data Structures & Algorithms",
+    "data structures/algorithms":       "Data Structures & Algorithms",
+    "intro to business":                "Intro to Business",
+    "introduction to business":         "Intro to Business",
+    "ethics":                           "Ethics",
+    "physics and chemistry b":          "Physics & Chemistry",
+    "physics and chemistry":            "Physics & Chemistry",
+    "statistics probability":           "Statistics & Inference",  # parent: all children are stats
+    # AUA course codes as folder names (some students name folders by code)
+    "ds 116":   "Data Visualization",
+    "ds 120":   "Programming & Engineering",
+    "ds 205":   "Databases & Data Engineering",
+    "ds 206":   "Business Intelligence & Analytics",
+    "ds 223":   "Marketing Analytics",
+    "ds 227":   "Business Analytics for Data Science",
+    "ds 232":   "Generative AI",
+    "ds 235":   "Generative AI",
+    "cs 251":   "Machine Learning & AI",
+    "cs 246":   "Reinforcement Learning",
+    "cs 362":   "Time Series & Forecasting",
+    "cs 108":   "Statistics & Inference",
+    "econ 101": "Economics",
+    # Self-study tech-book subfolders under Tech Books/ (folder name -> course)
+    "cloud & devops":        "Cloud & DevOps",
+    "software architecture": "Software Architecture",
+    "web development":       "Web Development",
+    "data science":          "Data Science (Books)",
+    "python development":    "Python Development",
+}
 
-    out = {k: (list(v) if isinstance(v, list) else dict(v) if isinstance(v, dict) else v)
-           for k, v in _DEFAULT_COURSE_TAXONOMY.items()}
-    for k, v in (user_tax or {}).items():
-        if k not in out:
-            continue
-        if isinstance(out[k], dict) and isinstance(v, dict):
-            out[k].update(v)
-        elif isinstance(out[k], list) and isinstance(v, list):
-            out[k] = list(v) + out[k]  # user entries tried first
-        else:
-            out[k] = v
-    return out
-
-
-_TAXONOMY: dict | None = None
-
-
-def _tax() -> dict:
-    """Lazy-loaded taxonomy singleton."""
-    global _TAXONOMY
-    if _TAXONOMY is None:
-        _TAXONOMY = _load_taxonomy()
-    return _TAXONOMY
-
-
-def reset_taxonomy_cache() -> None:
-    """Drop the cached taxonomy so the next call re-reads config (useful in
-    tests, or after live-editing config.yaml)."""
-    global _TAXONOMY
-    _TAXONOMY = None
-
-
-# Convenience views over the active taxonomy (read each time so config
-# edits are picked up on reset_taxonomy_cache()).
-def COURSE_HEADING_PATTERNS() -> list[str]:
-    return _tax()["course_heading_patterns"]
-
-
-def COURSE_MAP() -> dict:
-    return _tax()["course_map"]
-
-
-def DOMAIN_MAP() -> dict:
-    return _tax()["domain_map"]
-
-
-def FOLDER_COURSE_MAP() -> dict:
-    return _tax()["folder_course_map"]
-
-
-def COURSE_KEYWORDS() -> list[tuple[str, str]]:
-    return [tuple(x) for x in _tax()["course_keywords"]]
-
-
-def COURSE_CODE_REGEX() -> str:
-    return _tax()["course_code_regex"]
-
-
-def SKIP_HEADING_PATTERNS() -> list[str]:
-    return _tax()["skip_heading_patterns"]
-
-
-def ABBREVIATIONS() -> list[tuple[str, str]]:
-    return [tuple(x) for x in _tax()["abbreviations"]]
-
-
-def DAILY_NOTE_DIRS() -> list[str]:
-    return _tax()["daily_note_dirs"]
-
-
-# Back-compat: keep the bare constants as DEPRECATED tuples / empty dicts so
-# older imports don't NameError. New code should call the functions above.
-# (These are intentionally minimal — they reflect "no opinion" for users who
-# never configured anything.)
-COURSE_HEADING_PATTERNS_CONST: tuple = ()
-COURSE_MAP_CONST: dict = {}
-DOMAIN_MAP_CONST: dict = {}
-FOLDER_COURSE_MAP_CONST: dict = {}
-COURSE_KEYWORDS_CONST: tuple = ()
+# Ordered keyword fallback for the messy, variant-heavy human folder names that
+# exact matching can't enumerate ("Statistics (A+)", "Stat A(Vahe) Pass",
+# "Statistics B Pass", "Business Analytics for ...", truncated names, typos).
+# Most-specific FIRST. Matched as a case-insensitive substring against a single
+# path component, walking leaf->root so the deepest (most specific) folder wins.
+COURSE_KEYWORDS = [
+    ("reinforcement",         "Reinforcement Learning"),
+    ("natural language",      "Natural Language Processing"),
+    ("generative",            "Generative AI"),
+    ("marketing analytics",   "Marketing Analytics"),
+    ("business intelligence", "Business Intelligence & Analytics"),
+    ("business analytics",    "Business Intelligence & Analytics"),
+    ("time series",           "Time Series & Forecasting"),
+    ("machine learning",      "Machine Learning & AI"),
+    ("data visualization",    "Data Visualization"),
+    ("dataviz",               "Data Visualization"),
+    ("data structures",       "Data Structures & Algorithms"),
+    ("distributed systems",   "Databases & Data Engineering"),
+    ("database",              "Databases & Data Engineering"),
+    ("linear algebra",        "Linear Algebra"),
+    ("numerical",             "Numerical Methods"),
+    ("calculus",              "Calculus / Multivariable"),
+    ("probability",           "Statistics & Inference"),
+    ("statistic",             "Statistics & Inference"),   # statistics / statistical
+    ("personal finance",      "Personal Finance"),
+    ("intro to business",     "Intro to Business"),
+    ("economics",             "Economics"),
+    ("ethics",                "Ethics"),
+    ("physics",               "Physics & Chemistry"),
+    ("chemistry",             "Physics & Chemistry"),
+    ("computer science",      "Intro to CS"),
+]
 
 
 def detect_course_from_path(parts: list[str]) -> dict:
@@ -244,41 +266,36 @@ def detect_course_from_path(parts: list[str]) -> dict:
 
     Order:
       1. Exact FOLDER_COURSE_MAP (root->leaf). Only leaf course folders are
-         mapped, so organizational parents (e.g. "Programming for Data Science",
+         mapped, so organizational parents (e.g. "Prgoramming for Data Science",
          which holds ML/AI/TSF) do NOT clobber their children.
-      2. Course-code regex (default: CS|DS|ENGS|BSDS|ECON ###; configurable).
+      2. Course-code regex (CS|DS|ENGS|BSDS|ECON ###).
       3. Keyword substring fallback (leaf->root, most-specific-first) for the
          many human folder-name variants exact matching can't enumerate.
 
     Returns {course_code, course_name, domain}; unknown/unknown/general if none.
     """
-    fcm = FOLDER_COURSE_MAP()
-    dmap = DOMAIN_MAP()
-    cmap = COURSE_MAP()
-    ckw = COURSE_KEYWORDS()
-    code_re = COURSE_CODE_REGEX()
     # 1. exact folder-name match
     for part in parts:
-        name = fcm.get(part.lower().strip())
+        name = FOLDER_COURSE_MAP.get(part.lower().strip())
         if name:
             return {"course_code": name, "course_name": name,
-                    "domain": dmap.get(name, "general")}
+                    "domain": DOMAIN_MAP.get(name, "general")}
     # 2. course-code regex
     for part in parts:
-        m = re.search(code_re, part, re.IGNORECASE)
+        m = re.search(r"(CS|DS|ENGS|BSDS|ECON)\s*\d{2,3}", part, re.IGNORECASE)
         if m:
             code = re.sub(r"\s+", " ",
                           re.sub(r"(\D)(\d)", r"\1 \2", m.group(0).upper())).strip()
-            name = cmap.get(code, code)
+            name = COURSE_MAP.get(code, code)
             return {"course_code": code, "course_name": name,
-                    "domain": dmap.get(name, "general")}
+                    "domain": DOMAIN_MAP.get(name, "general")}
     # 3. keyword fallback, deepest folder first
     for part in reversed(parts):
         low = part.lower()
-        for kw, name in ckw:
+        for kw, name in COURSE_KEYWORDS:
             if kw in low:
                 return {"course_code": name, "course_name": name,
-                        "domain": dmap.get(name, "general")}
+                        "domain": DOMAIN_MAP.get(name, "general")}
     return {"course_code": "unknown", "course_name": "unknown", "domain": "general"}
 
 # Chunk size constraints (in characters)
@@ -364,31 +381,176 @@ def build_heading_tree(body: str) -> list[HeadingNode]:
 def detect_course_from_heading(heading: str) -> Optional[str]:
     """Try to extract a course code or name from a heading string.
     Returns course code/name, or '__SKIP__' for non-course headings,
-    or None if unrecognized. All matching dictionaries come from the
-    active course taxonomy (parser.course_taxonomy in config.yaml) —
-    see SKIP_HEADING_PATTERNS() and ABBREVIATIONS() for the schema.
-    """
+    or None if unrecognized."""
     h_stripped = heading.strip()
     h_lower = h_stripped.lower()
 
     # ── SKIP PATTERNS (non-academic headings) ──
-    # Checked first to prevent false matches (e.g., "Self S" matching "stat")
-    for pat in SKIP_HEADING_PATTERNS():
+    # These are detected first to prevent false matches (e.g., "Self S" matching "stat")
+    skip_patterns = [
+        r"^self\s*s",           # Self Study (55+ headings)
+        r"^mapp\b",             # Music Appreciation
+        r"^nutrition",          # Nutrition and Health
+        r"^bohl\b",             # Basics of Healthy Lifestyle
+        r"^healthy\s+lifestyle",
+        r"^hl\s+l\d",           # "HL L2" etc — Health Lifestyle lectures
+        r"^opera\b",            # Music/Opera notes
+        r"^music\b",
+        r"^baroque\b",
+        r"^todo\b",             # Task lists
+        r"^to[\s-]?do",
+        r"^day\s+planner",
+        r"^plan\b",
+        r"^routine",
+        r"^library\s+schedule",
+        r"^genius\s+idea",
+        r"^schedule\b",
+        r"^pre-?study\b",       # Pre-study sessions (not a course)
+        r"^sunday",             # Day-of-week notes
+        r"^saturday",
+        r"^tomorrow",
+        r"^before\b",
+        r"^after\b",
+        r"^now\b",
+        r"^main\s+tasks",
+        r"^current\s+(study|focus|job)",
+        r"^challenges\s+of",
+        r"^what\s+should",
+        r"^convo\s+with",
+        r"^king'?s\s+sunday",
+        r"^\.\.\.$",            # Placeholder headings
+        # Added from real vault data (post-run analysis)
+        r"^excalidraw\s+data",  # Raw Excalidraw JSON embedded in .md files (129x)
+        r"^basics\s+of\s+healthy", # BoHL full-title variant (13x)
+        r"^retro.futurist",     # Design/art one-off
+        r"^vaporwave",
+        r"^💰",                  # Finance recalculation personal notes
+        r"^seatbelt\s+safety",  # One-off assignment
+        r"^appeal\s+letter",    # Personal admin document
+        r"^ucom\b",             # Phone plan research
+        r"^comprehensive\s+report\s+on\s+arguments", # Essay
+        r"^do\s+not\s+include", # Notes to self (12x "do not include this claude")
+        r"^fall\s+\d{4}\s+course\s+schedule", # Schedule files
+        r"^american\s+university\s+of\s+armenia", # Boilerplate header
+        r"^formal\s+explanation\s+of\s+vegetation", # One-off
+        r"^problem\s+\d+:\s+inclusionary", # One-off homework
+        r"^licensing\s+&\s+legal",  # One-off business doc
+    ]
+    for pat in skip_patterns:
         if re.match(pat, h_lower):
             return "__SKIP__"
 
-    # ── COURSE CODE MATCH (configurable regex, e.g. "CS 251", "DS 110", "ECON 101") ──
-    code_match = re.search(COURSE_CODE_REGEX(), heading, re.IGNORECASE)
+    # ── COURSE CODE MATCH: "CS 251", "DS 110", "ECON 101", etc. ──
+    code_match = re.search(r"(CS|DS|ENGS|BSDS|ECON)\s*\d{2,3}", heading, re.IGNORECASE)
     if code_match:
         code = code_match.group(0).upper()
         # Normalize to exactly one space between letters and digits
         code = re.sub(r"\s+", " ", re.sub(r"(\D)(\d)", r"\1 \2", code)).strip()
         return code
 
-    # ── ABBREVIATION / SHORT-NAME MATCH ──
-    # Ordered: most-specific first to prevent partial matches.
-    # Each entry: (pattern, canonical course name) — see config taxonomy.
-    for pattern, course_name in ABBREVIATIONS():
+    # ── ABBREVIATION MATCH (from vault scout data) ──
+    # Ordered: longest first to prevent partial matches.
+    # Each entry: (pattern, canonical course name)
+    abbreviations = [
+        # Time Series — "TSF", "TSF L12", "Time Series Forecasting", "Time Series L9"
+        (r"^tsf\b", "Time Series & Forecasting"),
+        (r"^time\s+series", "Time Series & Forecasting"),
+
+        # Data Visualization — "DataViz", "Dataviz", "DV", "DATAVIZ", "DataViz L8", "DataV"
+        (r"^data\s*viz", "Data Visualization"),
+        (r"^datav\b", "Data Visualization"),
+        (r"^dv\b", "Data Visualization"),
+
+        # Numerical Analysis — "Numerical Analysis", "NA PSS6", "NA HW10", "NM L2"
+        (r"^numerical\s+analysis", "Numerical Methods"),
+        (r"^na\s+(pss|hw|midterm|l\d|pre)", "Numerical Methods"),
+        (r"^na\b", "Numerical Methods"),
+        (r"^nm\s+l\d", "Numerical Methods"),
+
+        # NLP — "NLP", "NLP L2", "NLP HW", "NLP Final Lecture", "NLP PSS", "NLP Midterm"
+        (r"^nlp\b", "Natural Language Processing"),
+
+        # Machine Learning — "ML", "ML L6", "ML FINAL", "ML group"
+        (r"^ml\b", "Machine Learning & AI"),
+
+        # Reinforcement Learning — "RL", "RL L3", "RL midterm", "RL PSS", "RL Dynamic"
+        (r"^rl\b", "Reinforcement Learning"),
+
+        # Marketing Analytics — "MA", "MA:", "MA Quiz", "MA: CLV", "MA L1"
+        (r"^ma[\s:]+", "Marketing Analytics"),
+        (r"^ma$", "Marketing Analytics"),
+
+        # Statistics — "Statistics", "Statistics 2", "Statistics:", "Stat ", "Statistics 2 L5"
+        (r"^statistics?\b", "Statistics & Inference"),
+        (r"^stat\s+(midterm|hw|pss|mid)", "Statistics & Inference"),
+        (r"^stat\b", "Statistics & Inference"),
+
+        # Armenian History — "ArmHist", "ArmHist2", "ArmHist 2", "ARMHist2",
+        #                     "Armenian History", "History", "ArmHistory"
+        (r"^armhist", "Armenian History"),
+        (r"^armenian\s+history", "Armenian History"),
+        (r"^armhistory", "Armenian History"),
+        (r"^history\b", "Armenian History"),
+
+        # AI (Intro to AI, separate from GenAI) — "AI", "AI:", "Ai:", "AI midterm"
+        (r"^ai[\s:]", "Intro to AI"),
+        (r"^ai$", "Intro to AI"),
+        (r"^ai\s+(?:midterm|pss|problem|recap)", "Intro to AI"),
+
+        # Calculus — "Calculus", "Calculus:", "Calculus 3:", "CALCULUS 3", "Calculus HW"
+        (r"^calculus", "Calculus / Multivariable"),
+
+        # Linear Algebra — "Linear Algebra"
+        (r"^linear\s+algebra", "Linear Algebra"),
+
+        # Economics — "Econ", "Economics", "ECON L2", "Introduction to Economics"
+        (r"^econ", "Economics"),
+        (r"^introduction\s+to\s+economics", "Economics"),
+
+        # Personal Finance — "Personal Finance", "Personal finance", "PF", "IPF"
+        (r"^personal\s+finance", "Personal Finance"),
+        (r"^personal\s+f\b", "Personal Finance"),
+        (r"^intro\s+to\s+personal\s+finance", "Personal Finance"),
+        (r"^ipf\b", "Personal Finance"),
+        (r"^pf\s+(game|quiz)", "Personal Finance"),
+        (r"^investment\b", "Personal Finance"),
+
+        # Capstone — "Capstone", "Capstone:", "Capstone meeting"
+        (r"^capstone", "Capstone"),
+        (r"^thesis\b", "Capstone"),
+
+        # Trust — "Trust", "Trust."
+        (r"^trust\b", "Trust"),
+
+        # Generative AI — "Generative AI", "GenAI", "Decoding in LLMs" etc.
+        (r"^generative\s+ai", "Generative AI"),
+        (r"^genai\b", "Generative AI"),
+
+        # Databases
+        (r"^database", "Databases & Data Engineering"),
+        (r"^sql\b", "Databases & Data Engineering"),
+
+        # BI
+        (r"^business\s+intelligence", "Business Intelligence & Analytics"),
+        (r"^power\s+bi", "Business Intelligence & Analytics"),
+        (r"^bi\b", "Business Intelligence & Analytics"),
+
+        # Group project (NLP)
+        (r"^group\s+project", "Natural Language Processing"),
+        # Filename-specific patterns (for files whose names are the only course signal)
+        (r"^sub.areas\s+ml", "Machine Learning & AI"),          # Sub_Areas ML Group Project.md
+        (r"^main\s+gp\s+text", "Natural Language Processing"),  # main GP text...md (GP = NLP group project)
+        (r"^nlp.presentation", "Natural Language Processing"),  # NLP_presentation_CODING...md
+        (r"^claude\s+pf\b", "Personal Finance"),                # Claude PF Round2-3.md
+        (r"^first\s+republic\s+arm", "Armenian History"),       # First Republic Armhist Summary.md
+        (r"^taxi.r\b", "Data Visualization"),                   # taxi-r-full-explanation.md
+
+        # Programming
+        (r"^python\b", "Programming & Engineering"),
+        (r"^fastapi\b", "Programming & Engineering"),
+    ]
+
+    for pattern, course_name in abbreviations:
         if re.match(pattern, h_lower):
             return course_name
 
@@ -396,25 +558,21 @@ def detect_course_from_heading(heading: str) -> Optional[str]:
 
 
 def resolve_course_metadata(course_id: Optional[str]) -> dict:
-    """Given a course code or name, return enriched metadata. Resolves
-    course codes and canonical course names against the active taxonomy."""
+    """Given a course code or name, return enriched metadata."""
     if not course_id:
         return {"course_code": "unknown", "course_name": "unknown", "domain": "general"}
 
-    dmap = DOMAIN_MAP()
-    cmap = COURSE_MAP()
-
-    # If it's already a canonical name (present in DOMAIN_MAP), use it
-    if course_id in dmap:
+    # If it's already a full name (from DOMAIN_MAP keys), use it
+    if course_id in DOMAIN_MAP:
         return {
             "course_code": course_id,
             "course_name": course_id,
-            "domain": dmap[course_id],
+            "domain": DOMAIN_MAP[course_id],
         }
 
     # Otherwise look up the code
-    name = cmap.get(course_id, course_id)
-    domain = dmap.get(name, "general")
+    name = COURSE_MAP.get(course_id, course_id)
+    domain = DOMAIN_MAP.get(name, "general")
     return {"course_code": course_id, "course_name": name, "domain": domain}
 
 
@@ -423,7 +581,7 @@ def resolve_course_metadata(course_id: Optional[str]) -> dict:
 # ─────────────────────────────────────────────────────────────────────
 
 DAILY_NOTE_PATTERNS = [
-    # "28.05.2026" or "28-05-2026" (DD.MM.YYYY — the user's format)
+    # "28.05.2026" or "28-05-2026" (DD.MM.YYYY — the author's format)
     r"^\d{2}[-_.]\d{2}[-_.]\d{4}$",
     # "2026-05-28" or "2026.05.28" (YYYY-MM-DD — standard ISO)
     r"^\d{4}[-_.]\d{2}[-_.]\d{2}$",
@@ -439,15 +597,16 @@ def is_daily_note(filepath: Path) -> bool:
     for pattern in DAILY_NOTE_PATTERNS:
         if re.match(pattern, stem):
             return True
-
-    # Also check if it's inside a folder named in DAILY_NOTE_DIRS (configurable)
+    # Also check if it's inside a "Daily Notes" or "daily" folder
     parts = [p.lower() for p in filepath.parts]
-    return any(d in parts for d in DAILY_NOTE_DIRS())
+    return any(d in parts for d in ["daily notes", "daily", "dailies", "journal",
+                                     "daily_study_notes", "09 - daily_study_notes"])
+
 
 def extract_date_from_filename(filepath: Path) -> Optional[str]:
     """Try to extract an ISO date from the filename."""
     stem = filepath.stem
-    # DD.MM.YYYY format (the user's vault)
+    # DD.MM.YYYY format (the author's vault)
     ddmmyyyy = re.search(r"(\d{2})[-_.](\d{2})[-_.](\d{4})", stem)
     if ddmmyyyy:
         dd, mm, yyyy = ddmmyyyy.group(1), ddmmyyyy.group(2), ddmmyyyy.group(3)
@@ -562,7 +721,101 @@ def split_large_chunk(text: str, max_size: int = MAX_CHUNK_SIZE,
 # under every strategy, so re-ingesting with a different strategy re-chunks
 # (new text → new doc_ids → swap playbook) only the long sections.
 
-CHUNKING_STRATEGIES = ("heading", "fixed")
+CHUNKING_STRATEGIES = ("heading", "fixed", "document", "none")
+
+_FENCE_RE = re.compile(r"^\s*(```|~~~)")
+_TABLE_RE = re.compile(r"^\s*\|.*\|\s*$")
+_LIST_RE = re.compile(r"^\s*([-*+]\s+|\d+[.)]\s+)")
+
+
+def _document_blocks(text: str) -> list[str]:
+    """Split text into document ELEMENTS: fenced code blocks, tables, lists,
+    and paragraphs. An element is never cut internally — a table row can't
+    end up in a different chunk than its header, a code fence stays whole."""
+    blocks: list[str] = []
+    cur: list[str] = []
+    mode: str | None = None      # code | table | list | para
+    in_fence = False
+
+    def flush():
+        nonlocal cur
+        joined = "\n".join(cur).strip("\n")
+        if joined.strip():
+            blocks.append(joined)
+        cur = []
+
+    for ln in text.split("\n"):
+        if in_fence:
+            cur.append(ln)
+            if _FENCE_RE.match(ln):
+                in_fence = False
+                flush()
+                mode = None
+            continue
+        if _FENCE_RE.match(ln):
+            flush()
+            cur = [ln]
+            in_fence = True
+            mode = "code"
+            continue
+        if not ln.strip():
+            # blank line ends the current element (indented list bodies keep
+            # their blanks only via the continuation rule below)
+            flush()
+            mode = None
+            continue
+        if _TABLE_RE.match(ln):
+            if mode != "table":
+                flush()
+                mode = "table"
+            cur.append(ln)
+            continue
+        if _LIST_RE.match(ln):
+            if mode != "list":
+                flush()
+                mode = "list"
+            cur.append(ln)
+            continue
+        if mode == "list" and ln[:1] in (" ", "\t"):
+            cur.append(ln)               # indented continuation of a list item
+            continue
+        if mode != "para":
+            flush()
+            mode = "para"
+        cur.append(ln)
+    if in_fence:                          # unterminated fence: keep what we have
+        flush()
+    else:
+        flush()
+    return blocks
+
+
+def document_element_chunks(text: str, max_size: int, overlap: int) -> list[str]:
+    """Document-aware packing: split into elements (code/table/list/paragraph),
+    then greedily pack consecutive elements up to max_size without ever cutting
+    inside one. A single element bigger than max_size falls back to the fixed
+    sliding window (the only honest option left)."""
+    text = text.strip()
+    if len(text) <= max_size:
+        return [text] if text else []
+    chunks: list[str] = []
+    buf: list[str] = []
+    size = 0
+    for b in _document_blocks(text):
+        if len(b) > max_size:
+            if buf:
+                chunks.append("\n\n".join(buf))
+                buf, size = [], 0
+            chunks.extend(fixed_window_chunks(b, max_size, overlap))
+            continue
+        if buf and size + len(b) + 2 > max_size:
+            chunks.append("\n\n".join(buf))
+            buf, size = [], 0
+        buf.append(b)
+        size += len(b) + 2
+    if buf:
+        chunks.append("\n\n".join(buf))
+    return chunks
 
 
 def fixed_window_chunks(text: str, max_size: int, overlap: int) -> list[str]:
@@ -603,15 +856,24 @@ def split_section(text: str, max_size: int, overlap: int,
 
     'heading' (default) = split_large_chunk, the historical
     paragraph/sentence-boundary packing. 'fixed' = fixed_window_chunks.
-    Both loaders (markdown + PDF) route through here; `--chunking fixed`
-    on the CLI or the console's Ingest tab selects per run.
+    'document' = document_element_chunks — element-aware packing that never
+    cuts inside a code fence, table, or list. 'none' = no splitting at all:
+    the whole section stays one chunk regardless of size (embedding models
+    truncate long inputs — use only for sources where splitting is worse).
+    All loaders (markdown + PDF) route through here; `--chunking` on the CLI
+    or the console's Ingest tab selects per run.
     """
     strategy = (strategy or "heading").lower()
     if strategy not in CHUNKING_STRATEGIES:
         raise ValueError(f"unknown chunking strategy {strategy!r}; "
                          f"expected one of {CHUNKING_STRATEGIES}")
+    if strategy == "none":
+        text = text.strip()
+        return [text] if text else []
     if strategy == "fixed":
         return fixed_window_chunks(text, max_size, overlap)
+    if strategy == "document":
+        return document_element_chunks(text, max_size, overlap)
     return split_large_chunk(text, max_size, overlap)
 
 
@@ -729,8 +991,14 @@ class ObsidianParser:
         # that could legitimately appear deeper inside course folders).
         # Session 8: the agent-project trees (Workspace1/Workspace2/Workspace3/...)
         # ballooned an unscoped parse 7K -> 88.7K chunks; the markdown corpus
-        # stays scoped to coursework until the user decides otherwise.
+        # stays scoped to coursework until the author decides otherwise.
         self.skip_roots = set(self.config.get("skip_roots", []))
+        # Optional scoped parse: only .md files whose vault-relative posix path
+        # contains this substring (case-insensitive). Powers the inbox md lane —
+        # a scoped parse MUST also set a non-default output so it never
+        # clobbers the full chunks.jsonl.
+        inc = self.config.get("include_path") or None
+        self.include_path = str(inc).lower() if inc else None
 
         # Stats
         self.stats = {
@@ -767,6 +1035,11 @@ class ObsidianParser:
             # Skip excluded top-level trees (agent projects etc.)
             rel_parts = f.relative_to(self.vault_path).parts
             if rel_parts and rel_parts[0] in self.skip_roots:
+                self.stats["files_skipped"] += 1
+                continue
+            # Scoped parse (inbox md lane): substring filter on the rel path
+            if self.include_path and self.include_path not in \
+                    f.relative_to(self.vault_path).as_posix().lower():
                 self.stats["files_skipped"] += 1
                 continue
             # Skip empty files
@@ -846,7 +1119,7 @@ class ObsidianParser:
         # 3. Folder-name exact lookup (case-insensitive) — catches full-title
         #    folder names like "Statistics & Inference" that have special chars
         for part in filepath.parts:
-            match = FOLDER_COURSE_MAP().get(part.lower().strip())
+            match = FOLDER_COURSE_MAP.get(part.lower().strip())
             if match:
                 return match
 
@@ -918,12 +1191,12 @@ class ObsidianParser:
         (including sub-headings) belongs to that lecture until the next
         course-level heading.
 
-        This handles a common daily-note format:
-            # CS 251
+        This handles the author's format:
+            # RL L3
             ## Topic: Policy Gradient
             content...
             ---
-            # CS 246
+            # NLP L4
             ## Attention Mechanism
             content...
         """
@@ -934,14 +1207,15 @@ class ObsidianParser:
         current_course = None
         current_course_meta = {}
         heading_stack = []  # for context inheritance
-        skip_mode = False   # skip non-academic sections (see SKIP_HEADING_PATTERNS)
+        skip_mode = False   # skip non-academic sections (Self S, MAPP, etc.)
 
         for i, node in enumerate(nodes):
             # Check if this heading starts a new course lecture
+            # the author uses H1 for course separators, so check level >= 1
             detected = detect_course_from_heading(node.title) if node.level >= 1 else None
 
             if detected == "__SKIP__":
-                # Non-academic section (matches SKIP_HEADING_PATTERNS)
+                # Non-academic section (Self Study, MAPP, Nutrition, etc.)
                 skip_mode = True
                 current_course = None
                 current_course_meta = {}
@@ -1105,7 +1379,7 @@ class ObsidianParser:
         print(f"  Course notes:     {s['course_notes']}")
         print(f"  Other notes:      {s['other_notes']}")
         print(f"  Total chunks:     {s['total_chunks']}")
-        print(f"  Skipped sections: {s['skipped_sections']} (matched SKIP_HEADING_PATTERNS)")
+        print(f"  Skipped sections: {s['skipped_sections']} (Self Study, MAPP, Nutrition, BoHL)")
         print(f"\n  Chunks by domain:")
         for domain, count in sorted(s["chunks_by_domain"].items(),
                                      key=lambda x: -x[1]):
@@ -1163,8 +1437,15 @@ def main():
     ap.add_argument("--skip-roots", default="",
                     help="Comma-separated TOP-LEVEL vault folders to exclude "
                          "(e.g. \"Workspace1,Workspace2\" — agent trees, not coursework)")
+    ap.add_argument("--include-path", default="",
+                    help="Only parse .md files whose vault-relative path contains "
+                         "this substring (scoped parse — ALWAYS pair with a "
+                         "non-default --output so chunks.jsonl is never clobbered)")
 
     args = ap.parse_args()
+    if args.include_path and args.output == "chunks.jsonl":
+        ap.error("--include-path requires an explicit non-default --output "
+                 "(a scoped parse would clobber the full chunks.jsonl)")
 
     config = {
         "max_chunk_size": args.max_chunk,
@@ -1172,6 +1453,7 @@ def main():
         "overlap_size": args.overlap,
         "chunking": args.chunking,
         "skip_roots": [s.strip() for s in args.skip_roots.split(",") if s.strip()],
+        "include_path": args.include_path or None,
     }
 
     parser = ObsidianParser(args.vault_path, config=config)

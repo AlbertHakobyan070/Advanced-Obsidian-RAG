@@ -1,5 +1,5 @@
 """
-pdf_loader.py — PDF ingestion for Personal RAG, matched to the vault parser.
+pdf_loader.py — PDF ingestion for the personal RAG, matched to the vault parser.
 
 Produces the SAME JSONL shape as obsidian_parser.py so the embedder/indexer
 need zero changes:
@@ -54,7 +54,6 @@ from src.ingestion.obsidian_parser import (
     FOLDER_COURSE_MAP,
     DOMAIN_MAP,
     COURSE_MAP,
-    COURSE_CODE_REGEX,
     clean_text,
     split_section,
     build_context_header,
@@ -172,9 +171,7 @@ def detect_ocr_engine() -> Optional[str]:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Script detection — by default the user can opt to placeholder any
-# non-Latin-script chunks (e.g. Cyrillic, Armenian, Hebrew) so they don't
-# pollute the dense embeddings of an English-only embedding model.
+# Script detection — the author skips all Armenian-script PDFs.
 # Ported from scout_pdfs.py so the loader is an authoritative, always-on gate
 # (independent of whether the dedup skip-list was regenerated).
 # ─────────────────────────────────────────────────────────────────────
@@ -204,7 +201,7 @@ def detect_script(text: str) -> str:
 
 def should_skip_script(script: str, skip_scripts: set[str]) -> bool:
     """True if the dominant script is skip-listed, including mixed docs that
-    contain a skip-listed script (e.g. 'mixed (cyrillic+latin)')."""
+    contain a skip-listed script (e.g. 'mixed (armenian+latin)')."""
     if not skip_scripts:
         return False
     if script in skip_scripts:
@@ -326,6 +323,9 @@ class PDFLoader:
         # exclude_path: skip PDFs whose relative path contains this substring,
         # e.g. "Current Courses" to avoid re-processing the lecture pass.
         self.exclude_path = exclude_path.lower() if exclude_path else None
+        # include_files: exact lowercase FILENAMES to process (file-scoped
+        # custom jobs from the console). None = no filename filter.
+        self.include_files: set[str] | None = None
         self.max_pages_per_pdf = max_pages_per_pdf
         # page_spec: an arbitrary 1-based page selector ("1-50,60,70-80") that
         # trims a PDF to a substantive subset (drop front-matter/index/back-
@@ -349,7 +349,7 @@ class PDFLoader:
         # Dedup skip-list (from scout_dedup.py) + folder/script gates.
         self.skip_set = load_skip_set(skip_list_file)
         self.skip_folders = [s.replace("\\", "/").lower() for s in (skip_folders or [])]
-        self.skip_scripts = set(skip_scripts if skip_scripts is not None else [])
+        self.skip_scripts = set(skip_scripts if skip_scripts is not None else ["armenian"])
         self.script_sample_pages = script_sample_pages
 
         # Figure extraction: save diagrams/plots to disk and link them to the
@@ -443,7 +443,7 @@ class PDFLoader:
             max_pages_per_pdf=cfg.get("pdf.max_pages_per_pdf"),
             skip_list_file=cfg.path("pdf.skip_list_file") if cfg.get("pdf.skip_list_file") else None,
             skip_folders=cfg.get("pdf.skip_folders", []),
-            skip_scripts=cfg.get("pdf.skip_scripts", []),
+            skip_scripts=cfg.get("pdf.skip_scripts", ["armenian"]),
             script_sample_pages=cfg.get("pdf.script_sample_pages", 3),
             extract_images=cfg.get("pdf.extract_images", False),
             figures_dir=cfg.path("pdf.figures_dir") if cfg.get("pdf.figures_dir")
@@ -494,6 +494,9 @@ class PDFLoader:
             if self.include_path and self.include_path not in rel_posix:
                 self.stats["pdfs_skipped_include"] += 1
                 continue
+            if self.include_files and f.name.lower() not in self.include_files:
+                self.stats["pdfs_skipped_include"] += 1
+                continue
             if self.exclude_path and self.exclude_path in rel_posix:
                 self.stats["pdfs_skipped_excluded"] += 1
                 continue
@@ -539,23 +542,19 @@ class PDFLoader:
         matches FOLDER_COURSE_MAP wins. Books live in <Course>/Books/<file>.
         """
         parts = list(filepath.relative_to(self.vault_path).parts)
-        fcm = FOLDER_COURSE_MAP()
-        dmap = DOMAIN_MAP()
-        cmap = COURSE_MAP()
-        code_re = COURSE_CODE_REGEX()
         # Try each path part against the folder map (case-insensitive)
         for part in parts:
-            name = fcm.get(part.lower().strip())
+            name = FOLDER_COURSE_MAP.get(part.lower().strip())
             if name:
-                domain = dmap.get(name, "general")
+                domain = DOMAIN_MAP.get(name, "general")
                 return {"course_code": name, "course_name": name, "domain": domain}
-        # Try course codes embedded in path (e.g. "CS 362")
+        # Try AUA course codes embedded in path (e.g. "CS 362")
         for part in parts:
-            m = re.search(code_re, part, re.IGNORECASE)
+            m = re.search(r"(CS|DS|ENGS|BSDS|ECON)\s*\d{2,3}", part, re.IGNORECASE)
             if m:
                 code = re.sub(r"\s+", " ", re.sub(r"(\D)(\d)", r"\1 \2", m.group(0).upper())).strip()
-                name = cmap.get(code, code)
-                domain = dmap.get(name, "general")
+                name = COURSE_MAP.get(code, code)
+                domain = DOMAIN_MAP.get(name, "general")
                 return {"course_code": code, "course_name": name, "domain": domain}
         return {"course_code": "unknown", "course_name": "unknown", "domain": "general"}
 
@@ -614,7 +613,7 @@ class PDFLoader:
 
         # Script gate (defense-in-depth, independent of the dedup skip-list):
         # sample the first few pages and skip the whole PDF if its dominant
-        # script is skip-listed (note: drop all non-Latin-script content).
+        # script is skip-listed (the author: drop all Armenian-script content).
         if self.skip_scripts:
             sample = []
             for pno in range(min(self.script_sample_pages, page_count)):

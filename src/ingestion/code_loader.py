@@ -7,12 +7,12 @@ WHY THIS EXISTS (P3, session 9)
   ast-based Python splitter lives). The gap was every OTHER language —
   JavaScript/TypeScript, SQL, Go, Java, C/C++, Rust, shell, Ruby, PHP, C#,
   Kotlin, Swift, Scala, Lua, … — which had no loader at all. This adds a
-  dedicated lane so the user's own scripts in those languages become retrievable.
+  dedicated lane so the author's own scripts in those languages become retrievable.
 
   Separate command (`ingest-code`) and JSONL (data/code_chunks.jsonl) keep the
   notebook and script corpora legible, but the internals reuse the same shared
   helpers pdf_loader/ipynb_loader use (course detection, size splitting, the
-  context header, the non-Latin script gate) so behavior is identical:
+  context header, the Armenian script gate) so behavior is identical:
       {"doc_id": "<16hex>", "text": "<context-header + fenced code>", "metadata": {...}}
   doc_id uses the same deterministic scheme, so `index --append` upserts are
   idempotent.
@@ -52,11 +52,10 @@ from src.ingestion.obsidian_parser import (
     FOLDER_COURSE_MAP,
     DOMAIN_MAP,
     COURSE_MAP,
-    COURSE_CODE_REGEX,
     split_large_chunk,
     build_context_header,
 )
-# Reuse the script gate so "skip non-Latin script" behaves identically everywhere.
+# Reuse the script gate so "skip Armenian" behaves identically everywhere.
 from src.ingestion.pdf_loader import detect_script, should_skip_script
 from src.utils.config_loader import Config
 from src.utils.logger import get_logger
@@ -213,7 +212,7 @@ class CodeLoader:
         self.min_chunk = min_chunk
         self.max_chunk = max_chunk
         self.overlap = overlap
-        self.skip_scripts = set(skip_scripts if skip_scripts is not None else [])
+        self.skip_scripts = set(skip_scripts if skip_scripts is not None else ["armenian"])
         self.language_map = dict(language_map or DEFAULT_LANGUAGE_MAP)
         # exts = the subset to actually ingest (defaults to every mapped ext).
         self.exts = {e.lower() for e in exts} if exts else set(self.language_map)
@@ -258,7 +257,7 @@ class CodeLoader:
             min_chunk=cfg.get("code.min_chunk_size", cfg.get("parser.min_chunk_size", 200)),
             max_chunk=cfg.get("code.max_chunk_size", cfg.get("parser.max_chunk_size", 3000)),
             overlap=cfg.get("code.overlap_size", cfg.get("parser.overlap_size", 150)),
-            skip_scripts=cfg.get("code.skip_scripts", cfg.get("pdf.skip_scripts", [])),
+            skip_scripts=cfg.get("code.skip_scripts", cfg.get("pdf.skip_scripts", ["armenian"])),
             language_map=language_map,
             exts={str(e).lower() for e in exts} if exts else None,
             include_path=cfg.get("code.include_path"),
@@ -284,6 +283,11 @@ class CodeLoader:
             if any(part in _SKIP_DIRS for part in f.parts):
                 continue
             rel_posix = f.relative_to(self.vault_path).as_posix().lower()
+            # include_files: exact-filename scope for file-scoped custom jobs
+            # (set post-construction by main.py; None = no filter).
+            if getattr(self, "include_files", None) \
+                    and f.name.lower() not in self.include_files:
+                continue
             if self.include_path and self.include_path not in rel_posix:
                 continue
             if self.exclude_path and self.exclude_path in rel_posix:
@@ -303,22 +307,18 @@ class CodeLoader:
 
     def _detect_course(self, filepath: Path) -> dict:
         parts = list(filepath.relative_to(self.vault_path).parts)
-        fcm = FOLDER_COURSE_MAP()
-        dmap = DOMAIN_MAP()
-        cmap = COURSE_MAP()
-        code_re = COURSE_CODE_REGEX()
         for part in parts:
-            name = fcm.get(part.lower().strip())
+            name = FOLDER_COURSE_MAP.get(part.lower().strip())
             if name:
                 return {"course_code": name, "course_name": name,
-                        "domain": dmap.get(name, "general")}
+                        "domain": DOMAIN_MAP.get(name, "general")}
         for part in parts:
-            m = re.search(code_re, part, re.IGNORECASE)
+            m = re.search(r"(CS|DS|ENGS|BSDS|ECON)\s*\d{2,3}", part, re.IGNORECASE)
             if m:
                 code = re.sub(r"\s+", " ", re.sub(r"(\D)(\d)", r"\1 \2", m.group(0).upper())).strip()
-                name = cmap.get(code, code)
+                name = COURSE_MAP.get(code, code)
                 return {"course_code": code, "course_name": name,
-                        "domain": dmap.get(name, "general")}
+                        "domain": DOMAIN_MAP.get(name, "general")}
         return {"course_code": "unknown", "course_name": "unknown", "domain": "general"}
 
     # ---- rendering ----
@@ -361,7 +361,7 @@ class CodeLoader:
         if not raw_text.strip():
             return []
 
-        # Whole-file non-Latin gate: a dominantly non-Latin source (rare — comments
+        # Whole-file Armenian gate: a dominantly Armenian source (rare — comments
         # only) is dropped rather than embedding un-vectorizable text.
         if (self.skip_scripts and len(raw_text.strip()) >= _MIN_SCRIPT_SAMPLE
                 and should_skip_script(detect_script(raw_text), self.skip_scripts)):

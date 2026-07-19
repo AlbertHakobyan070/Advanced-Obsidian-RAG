@@ -29,3 +29,5 @@ python-multipart==0.0.20
 # Do NOT install rapidocr-onnxruntime — its presence makes pymupdf4llm pick a
 # broken adaptor and knocks out the working Tesseract path. Tesseract needs no
 # pip package: install the system binary and set TESSDATA_PREFIX (see handoffs).
+
+markitdown[pdf,docx,pptx,xlsx]   # any-file -> markdown converter (import lane)

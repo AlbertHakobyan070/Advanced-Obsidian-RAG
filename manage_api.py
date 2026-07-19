@@ -1,5 +1,5 @@
 """
-manage_api.py — Corpus management console (backend) for the RAG pipeline.
+manage_api.py — Corpus management console (backend) for the personal RAG.
 
 Everything serve_api.py deliberately is NOT: ingest, index, OCR passes,
 document search/inspection, deletion, uploads — driven from a browser at
@@ -8,17 +8,17 @@ http://127.0.0.1:8052 (webui/index.html), with live job logs.
 Design rules (they encode this project's hard-won gotchas — don't undo them):
 
   * NO pipeline in-process. Heavy work runs as SUBPROCESSES of the existing
-    entry points (main.py / rebuild_bm25.py / recalibrate_courses.py), one
-    at a time, from a queue. ChromaDB is effectively single-writer and two
+    entry points (main.py / rebuild_bm25.py / recalibrate_courses.py), one at
+    a time, from a queue. ChromaDB is effectively single-writer and two
     concurrent ingests would fight over the JSONLs, so the worker is serial
     by construction. The query endpoint (:8051) stays untouched and warm.
   * Every ChromaDB scan/delete is PAGED in 5000-row batches ("too many SQL
-    variables" at large corpora otherwise).
+    variables" at ~168K chunks otherwise).
   * JSONL is the source of truth. Deleting from Chroma alone resurrects
     chunks at the next BM25 rebuild — so deletion here removes the rows from
     the JSONL files too, then queues a rebuild.
-  * JSONL lines split on "\n" ONLY (never .splitlines(): some Other/ chunk
-    text contains U+2028/U+2029/\x85 which would shred records).
+  * JSONL lines split on "\\n" ONLY (never .splitlines(): some Other/ chunk
+    text contains U+2028/U+2029/\\x85 which would shred records).
 
 Run (inside the venv, from project root):
     python -m uvicorn manage_api:app --host 127.0.0.1 --port 8052
@@ -266,6 +266,21 @@ def _safe_rel(p: str, *, default_dir: str = "data") -> str:
     return p
 
 
+def _files_csv(files) -> str:
+    """Validate + join a filename list for --include-files/--files flags.
+    Plain filenames only (the upload sanitizer never produces commas or path
+    separators, so anything else here is a caller bug or an escape attempt)."""
+    if isinstance(files, str):
+        files = [f for f in files.split(",")]
+    names = [str(f).strip() for f in (files or []) if str(f).strip()]
+    if not names:
+        raise ValueError("file list is empty")
+    for n in names:
+        if n != Path(n).name or "," in n:
+            raise ValueError(f"plain filenames only: {n!r}")
+    return ",".join(names)
+
+
 def _build_argv(kind: str, prm: dict) -> list[str]:
     py = sys.executable
     if kind == "ingest_pdfs":
@@ -292,9 +307,11 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
             if prm["ocr_engine"] not in ("auto", "tesseract", "vlm", "none"):
                 raise ValueError("ocr_engine must be auto|tesseract|vlm|none")
             argv += ["--ocr-engine", prm["ocr_engine"]]
+        if prm.get("include_files"):
+            argv += ["--include-files", _files_csv(prm["include_files"])]
         if prm.get("chunking"):
-            if prm["chunking"] not in ("heading", "fixed"):
-                raise ValueError("chunking must be heading|fixed")
+            if prm["chunking"] not in ("heading", "fixed", "document", "none"):
+                raise ValueError("chunking must be heading|fixed|document|none")
             argv += ["--chunking", prm["chunking"]]
         if prm.get("no_images"):
             argv.append("--no-images")
@@ -327,8 +344,49 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
             argv += ["--include-path", str(prm["include_path"])]
         if prm.get("exclude_path"):
             argv += ["--exclude-path", str(prm["exclude_path"])]
+        if prm.get("include_files"):
+            argv += ["--include-files", _files_csv(prm["include_files"])]
         if prm.get("exts"):
             argv += ["--exts", str(prm["exts"])]
+        return argv
+    if kind == "ingest_md":
+        # Scoped md parse (inbox md lane): include filter + own output are
+        # REQUIRED so the canonical chunks.jsonl can never be clobbered.
+        if not prm.get("include_path"):
+            raise ValueError("ingest_md requires include_path")
+        out = _safe_rel(str(prm.get("output") or ""))
+        if Path(out).name == "chunks.jsonl":
+            raise ValueError("ingest_md must not write chunks.jsonl")
+        argv = [py, "main.py", "ingest-md",
+                "--include-path", str(prm["include_path"]),
+                "--output", out]
+        if prm.get("chunking"):
+            if prm["chunking"] not in ("heading", "fixed", "document", "none"):
+                raise ValueError("chunking must be heading|fixed|document|none")
+            argv += ["--chunking", prm["chunking"]]
+        return argv
+    if kind == "fetch_web":
+        urls = prm.get("urls") or []
+        if isinstance(urls, str):
+            urls = [u for u in urls.replace("\n", ",").split(",") if u.strip()]
+        urls = [str(u).strip() for u in urls if str(u).strip()]
+        if not urls:
+            raise ValueError("fetch_web requires urls")
+        for u in urls:
+            if not re.match(r"^https?://", u):
+                raise ValueError(f"only http(s) URLs are fetched: {u!r}")
+        backend = prm.get("backend") or "auto"
+        if backend not in ("auto", "requests", "crawl4ai", "scrapling"):
+            raise ValueError("backend must be auto|requests|crawl4ai|scrapling")
+        return [py, "main.py", "fetch-web", "--urls", ",".join(urls),
+                "--backend", backend]
+    if kind == "convert_files":
+        argv = [py, "main.py", "convert-files",
+                "--files", _files_csv(prm.get("files"))]
+        if prm.get("ocr_pages"):
+            from src.ingestion.pdf_loader import parse_page_spec
+            parse_page_spec(str(prm["ocr_pages"]))   # ValueError -> 400
+            argv += ["--ocr-pages", str(prm["ocr_pages"])]
         return argv
     if kind == "index_append":
         return [py, "main.py", "index", "--append", _safe_rel(str(prm.get("file", "")))]
@@ -489,12 +547,51 @@ class DeleteIn(BaseModel):
 class InboxIngestIn(BaseModel):
     force: bool = False             # ingest even if a file looks already-indexed
     ocr_engine: Optional[str] = None  # optional override (auto|tesseract|vlm|none)
-    chunking: Optional[str] = None  # heading|fixed (how oversized sections split)
+    chunking: Optional[str] = None  # heading|fixed|document|none (oversized sections)
     # Batch-level metadata (inbox files carry no course path): stamped on every
     # chunk of this batch. domain feeds scope routing; tags feed tag search +
     # the retrieval tag boost.
     domain: Optional[str] = None
     tags: list[str] = Field(default_factory=list)
+    # Optional subset: restrict the lane to these inbox filenames (the custom-
+    # jobs designer routes its custom files elsewhere and sends the rest here).
+    # None/empty = the whole inbox, the classic behavior.
+    files: Optional[list[str]] = None
+
+
+class InboxDeleteIn(BaseModel):
+    names: list[str] = Field(min_length=1)   # plain filenames inside the inbox
+
+
+class ImportFetchIn(BaseModel):
+    urls: list[str] = Field(min_length=1)
+    backend: str = "auto"           # auto | requests | crawl4ai | scrapling
+
+
+class ImportConvertIn(BaseModel):
+    files: list[str] = Field(min_length=1)   # inbox filenames to convert to .md
+    ocr_pages: Optional[str] = None          # e.g. "1-4,9" — OCR these PDF pages too
+
+
+class ImportPromoteIn(BaseModel):
+    names: list[str] = Field(min_length=1)   # _converted .md files -> inbox root
+
+
+class CustomGroupIn(BaseModel):
+    kind: str                                # pdf | code | md
+    files: list[str] = Field(min_length=1)   # inbox filenames in this group
+    chunking: Optional[str] = None           # heading|fixed|document|none
+    ocr_engine: Optional[str] = None         # pdf groups only
+    pages: Optional[str] = None              # pdf groups only ("1-50,60")
+    domain: Optional[str] = None             # pdf groups only (force_domain)
+    tags: list[str] = Field(default_factory=list)  # pdf groups only
+    exts: Optional[str] = None               # code groups only (".sql,.js")
+    output: Optional[str] = None             # override the timestamped JSONL
+
+
+class CustomIngestIn(BaseModel):
+    groups: list[CustomGroupIn] = Field(min_length=1)
+    force: bool = False             # override the already-indexed dup guard
 
 
 class RetagIn(BaseModel):
@@ -874,7 +971,7 @@ def jobs_cancel(jid: str) -> dict:
 
 def _inbox() -> Path:
     vault = Path(CFG.get("pdf.vault_path") or CFG.get("parser.vault_path"))
-    inbox = vault / CFG.get("webui.inbox_dir", "Inbox")
+    inbox = vault / CFG.get("webui.inbox_dir", "00 – AUA_DS/Other/Inbox")
     inbox.mkdir(parents=True, exist_ok=True)
     return inbox
 
@@ -930,13 +1027,17 @@ def ingest_inbox(body: InboxIngestIn) -> dict:
     earlier one, and processed PDFs are archived to Inbox/_ingested/.
     """
     inbox = _inbox()
+    subset = {n.strip() for n in (body.files or []) if n.strip()} or None
     pdfs = [f for f in sorted(inbox.iterdir())
-            if f.is_file() and f.suffix.lower() == ".pdf"]
+            if f.is_file() and f.suffix.lower() == ".pdf"
+            and (subset is None or f.name in subset)]
     non_pdfs = [f.name for f in sorted(inbox.iterdir())
-                if f.is_file() and f.suffix.lower() != ".pdf"]
+                if f.is_file() and f.suffix.lower() != ".pdf"
+                and (subset is None or f.name in subset)]
     if not pdfs:
         return JSONResponse(
-            {"ok": False, "error": "No PDFs in the inbox — drop files in first.",
+            {"ok": False, "error": "No PDFs in the inbox — drop files in first."
+             if subset is None else "None of the requested files are inbox PDFs.",
              "non_pdfs_ignored": non_pdfs}, status_code=400)
 
     # Duplicate guard: match inbox filenames against everything already indexed.
@@ -963,6 +1064,8 @@ def ingest_inbox(body: InboxIngestIn) -> dict:
     out = f"data/inbox_{time.strftime('%Y%m%d_%H%M%S')}_chunks.jsonl"
     params: dict[str, Any] = {"include_path": include_rel, "output": out,
                               "no_images": True, "archive_processed": True}
+    if subset is not None:
+        params["include_files"] = [f.name for f in pdfs]
     if body.ocr_engine:
         params["ocr_engine"] = body.ocr_engine
     if body.chunking:
@@ -985,6 +1088,202 @@ def ingest_inbox(body: InboxIngestIn) -> dict:
             "jobs": [j1.public(), j2.public()],
             "note": "index --append rebuilds the sparse index itself; restart "
                     "serve_api (:8051) once the append job finishes."}
+
+
+# ---- inbox housekeeping + import lane (fetch / convert / promote) ----
+
+def _converted_dir() -> Path:
+    d = _inbox() / "_converted"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+@app.post("/api/inbox/delete")
+def inbox_delete(body: InboxDeleteIn) -> dict:
+    """Remove added-by-accident files from the inbox (and/or its _converted
+    staging). Deletes the FILES ON DISK inside the inbox only — nothing that
+    was already indexed is touched (that's /api/documents/delete)."""
+    inbox = _inbox()
+    conv = _converted_dir()
+    removed, missing = [], []
+    for name in body.names:
+        name = (name or "").strip()
+        if not name or Path(name).name != name:
+            missing.append(name)
+            continue
+        p = inbox / name
+        if not p.is_file():
+            p = conv / name
+        if p.is_file():
+            p.unlink()
+            removed.append(name)
+        else:
+            missing.append(name)
+    return {"ok": True, "removed": removed, "missing": missing}
+
+
+@app.get("/api/import/converted")
+def import_converted() -> dict:
+    """List staged .md conversions awaiting promotion to the inbox."""
+    conv = _converted_dir()
+    rows = [{"name": f.name, "bytes": f.stat().st_size}
+            for f in sorted(conv.iterdir())
+            if f.is_file() and f.suffix.lower() == ".md"]
+    return {"dir": str(conv), "files": rows}
+
+
+@app.post("/api/import/fetch")
+def import_fetch(body: ImportFetchIn) -> dict:
+    """Queue a fetch_web job: pull the URLs, convert to .md via markitdown,
+    stage the outputs in <inbox>/_converted (nothing is indexed)."""
+    try:
+        job = enqueue("fetch_web", {"urls": body.urls, "backend": body.backend})
+    except ValueError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+    return {"ok": True, "job": job.public(),
+            "note": "Outputs land in _converted — review, then promote to the "
+                    "inbox and ingest."}
+
+
+@app.post("/api/import/convert")
+def import_convert(body: ImportConvertIn) -> dict:
+    """Queue a convert_files job: markitdown the named inbox files to .md in
+    _converted; optional Tesseract OCR for selected PDF pages."""
+    inbox = _inbox()
+    missing = [n for n in body.files if not (inbox / n).is_file()
+               or Path(n).name != n]
+    if missing:
+        return JSONResponse({"ok": False, "error": "not in inbox",
+                             "missing": missing}, status_code=400)
+    try:
+        job = enqueue("convert_files",
+                      {"files": body.files, "ocr_pages": body.ocr_pages})
+    except ValueError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+    return {"ok": True, "job": job.public()}
+
+
+@app.post("/api/import/promote")
+def import_promote(body: ImportPromoteIn) -> dict:
+    """Move staged _converted .md files into the inbox root so they appear in
+    the uploads list and can be routed by the ingest lanes."""
+    inbox = _inbox()
+    conv = _converted_dir()
+    moved, missing = [], []
+    for name in body.names:
+        name = (name or "").strip()
+        src = conv / name
+        if not name or Path(name).name != name or not src.is_file():
+            missing.append(name)
+            continue
+        dest = inbox / name
+        i = 1
+        while dest.exists():
+            dest = inbox / f"{Path(name).stem} ({i}){Path(name).suffix}"
+            i += 1
+        shutil.move(str(src), str(dest))
+        moved.append(dest.name)
+    return {"ok": True, "moved": moved, "missing": missing}
+
+
+# ---- custom-jobs designer: per-group file-scoped ingest ----
+
+@app.post("/api/ingest_custom")
+def ingest_custom(body: CustomIngestIn) -> dict:
+    """
+    Compile the custom-jobs plan into the serial job queue. Each group is a
+    set of inbox files of one kind with its own parameters:
+      pdf  -> ingest_pdfs  (chunking / ocr_engine / pages / domain / tags)
+      code -> ingest_code  (chunking n/a; exts subset)
+      md   -> ingest_md    (chunking; one job per file — the parser scope is
+                            a path substring, so each md file gets its own)
+    Every group's output JSONL gets its own index_append job right after it,
+    so a failed group never blocks the others' indexing.
+    Guards: unknown kinds/files -> 400; already-indexed-looking files -> 409
+    unless force (same stem check as the inbox lane).
+    """
+    inbox = _inbox()
+    vault = Path(CFG.get("pdf.vault_path") or CFG.get("parser.vault_path"))
+    include_rel = inbox.relative_to(vault).as_posix()
+    have = {f.name for f in inbox.iterdir() if f.is_file()}
+
+    problems = []
+    for gi, g in enumerate(body.groups):
+        if g.kind not in ("pdf", "code", "md"):
+            problems.append(f"group {gi}: kind must be pdf|code|md")
+        for n in g.files:
+            if n not in have:
+                problems.append(f"group {gi}: {n!r} is not in the inbox")
+    if problems:
+        return JSONResponse({"ok": False, "error": "bad plan",
+                             "problems": problems}, status_code=400)
+
+    # Dup guard across ALL custom files (stem match against the manifest).
+    manifest = build_manifest()
+    known: dict[str, str] = {}
+    for sf, d in manifest.items():
+        known.setdefault(Path(sf).stem.lower(), sf)
+        fn = str(d.get("filename") or "")
+        if fn:
+            known.setdefault(Path(fn).stem.lower(), sf)
+    all_files = [n for g in body.groups for n in g.files]
+    conflicts = [{"file": n, "existing_source": known[Path(n).stem.lower()]}
+                 for n in all_files if Path(n).stem.lower() in known]
+    if conflicts and not body.force:
+        return JSONResponse(
+            {"ok": False,
+             "error": f"{len(conflicts)} file(s) look already indexed.",
+             "conflicts": conflicts,
+             "hint": "force:true ingests anyway (duplicates if same files)."},
+            status_code=409)
+
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    jobs = []
+    try:
+        for gi, g in enumerate(body.groups):
+            if g.kind == "md":
+                # one scoped parse per md file (path-substring scope)
+                for fi, name in enumerate(g.files):
+                    out = f"data/inbox_{ts}_g{gi}f{fi}_md_chunks.jsonl"
+                    jobs.append(enqueue("ingest_md", {
+                        "include_path": f"{include_rel}/{name}",
+                        "output": out, "chunking": g.chunking}))
+                    jobs.append(enqueue("index_append", {"file": out}))
+                continue
+            out = g.output or f"data/inbox_{ts}_g{gi}_{g.kind}_chunks.jsonl"
+            if g.kind == "pdf":
+                params: dict[str, Any] = {
+                    "include_path": include_rel, "include_files": g.files,
+                    "output": out, "no_images": True, "archive_processed": True}
+                if g.chunking:
+                    params["chunking"] = g.chunking
+                if g.ocr_engine:
+                    params["ocr_engine"] = g.ocr_engine
+                if g.pages:
+                    params["pages"] = g.pages
+                if g.domain:
+                    params["force_domain"] = g.domain.strip().lower()
+                if g.tags:
+                    params["force_tags"] = [t.strip().lstrip("#").lower()
+                                            for t in g.tags if t.strip()]
+                jobs.append(enqueue("ingest_pdfs", params))
+            else:                                        # code
+                params = {"include_path": include_rel, "include_files": g.files,
+                          "output": out}
+                if g.exts:
+                    params["exts"] = g.exts
+                jobs.append(enqueue("ingest_code", params))
+            jobs.append(enqueue("index_append", {"file": out}))
+    except (ValueError, KeyError) as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+    return {"ok": True,
+            "jobs": [j.public() for j in jobs],
+            "forced_past_conflicts": conflicts if body.force else [],
+            "note": "Groups run serially; each group's append follows it. "
+                    "Restart serve_api (:8051) after the last append. "
+                    "Code/md chunks keep path-derived metadata — use retag "
+                    "for domain/course/tags afterwards if needed."}
 
 
 # ---- vault tree (browse / in-RAG check / retag staging UI) ----
@@ -1027,11 +1326,11 @@ def vault_tree(path: str = "") -> dict:
     """
     One folder level of the vault, with per-file in-RAG status. `path` is
     vault-relative posix; '' = the configured browse root (webui.vault_tree_root,
-    default '<vault-root>' per the spec — the rest of the vault is reachable
+    default '00 – AUA_DS' per the design spec — the rest of the vault is reachable
     via /api/vault/search below). Read-only: never writes to the vault.
     """
     vault = _vault_root()
-    root_rel = str(CFG.get("webui.vault_tree_root", ""))
+    root_rel = str(CFG.get("webui.vault_tree_root", "00 – AUA_DS"))
     base = (vault / (path or root_rel)).resolve()
     if not str(base).lower().startswith(str(vault.resolve()).lower()):
         return JSONResponse({"error": "path escapes the vault"}, status_code=400)
@@ -1083,7 +1382,7 @@ def settings() -> dict:
     return {
         "rag_api": RAG_API,
         "vault_path": str(CFG.get("pdf.vault_path") or CFG.get("parser.vault_path")),
-        "inbox_dir": CFG.get("webui.inbox_dir", "Inbox"),
+        "inbox_dir": CFG.get("webui.inbox_dir", "00 – AUA_DS/Other/Inbox"),
         "jsonl_files": [p.name for p in chunk_files()],
         "ocr_engines": ["auto", "tesseract", "vlm", "none"],
     }
@@ -1093,14 +1392,13 @@ def settings() -> dict:
 def api_schema() -> dict:
     """
     Machine-readable capability map of the MANAGEMENT console, so an agent
-    (a coding agent with HTTP + file tools) can drive corpus operations
-    over JSON the same way it drives the query API (:8051) — no browser,
-    no page snapshots.
+    (Claude Code) can drive corpus operations over JSON the same way
+    it drives the query API (:8051) — no browser, no page snapshots.
 
     Every operation carries a `permission` tier the calling agent MUST honor:
       * read       — safe, no confirmation needed (stats, search, status, logs)
-      * mutating   — changes the index; ask the user first (ingest/append/retag/OCR)
-      * destructive— removes content; ALWAYS confirm with the user, echo exactly
+      * mutating   — changes the index; ask the operator first (ingest/append/retag/OCR)
+      * destructive— removes content; ALWAYS confirm with the operator, echo exactly
                      what will be deleted, and never run unprompted.
     This is a POLICY the agent enforces (the local API has no auth) — the tiers
     exist so a toolkit/skill can gate calls. See the rag-ops skill.
@@ -1112,7 +1410,7 @@ def api_schema() -> dict:
         "query_api": RAG_API,
         "permission_tiers": {
             "read": "safe; no confirmation",
-            "mutating": "changes the index; ask the user before running",
+            "mutating": "changes the index; ask the operator before running",
             "destructive": "removes content; ALWAYS confirm, echo the exact "
                            "targets, never run unprompted",
         },
@@ -1171,8 +1469,46 @@ def api_schema() -> dict:
                            "append (archives processed PDFs). Chains two jobs.",
                 "body": {"force": "bool (past the 409 dup guard)",
                          "ocr_engine": "auto|tesseract|vlm|none?",
+                         "chunking": "heading|fixed|document|none?",
                          "domain": "str? (stamped on the batch)",
-                         "tags": "list[str]?"}},
+                         "tags": "list[str]?",
+                         "files": "list[str]? (restrict to these inbox PDFs; "
+                                  "unset = whole inbox)"}},
+            "POST /api/ingest_custom": {
+                "permission": "mutating",
+                "purpose": "custom-jobs designer lane: per-group file-scoped "
+                           "ingest (pdf/code/md kinds, each with its own "
+                           "params) + an append per group. Same 409 dup guard "
+                           "as the inbox lane.",
+                "body": {"groups": "[{kind: pdf|code|md, files: [names], "
+                                   "chunking?, ocr_engine?, pages?, domain?, "
+                                   "tags?, exts?, output?}]",
+                         "force": "bool"}},
+            "POST /api/inbox/delete": {
+                "permission": "mutating",
+                "purpose": "remove staged files from the inbox / _converted "
+                           "folder ON DISK (index untouched — that's "
+                           "/api/documents/delete)",
+                "body": {"names": "list[str] (plain filenames)"}},
+            "GET /api/import/converted": {
+                "permission": "read",
+                "purpose": "list staged .md conversions in <inbox>/_converted"},
+            "POST /api/import/fetch": {
+                "permission": "mutating",
+                "purpose": "queue fetch_web: pull http(s) URLs -> markdown "
+                           "(markitdown) into _converted. Nothing indexed.",
+                "body": {"urls": "list[str]",
+                         "backend": "auto|requests|crawl4ai|scrapling"}},
+            "POST /api/import/convert": {
+                "permission": "mutating",
+                "purpose": "queue convert_files: markitdown inbox files to .md "
+                           "in _converted; optional PDF-page OCR",
+                "body": {"files": "list[str]", "ocr_pages": '"1-4,9"?'}},
+            "POST /api/import/promote": {
+                "permission": "mutating",
+                "purpose": "move _converted .md files into the inbox root so "
+                           "the ingest lanes can pick them up",
+                "body": {"names": "list[str]"}},
             "POST /api/jobs": {
                 "permission": "mutating",
                 "purpose": "queue a job. Kinds + params under `job_kinds` below.",
@@ -1204,12 +1540,15 @@ def api_schema() -> dict:
             "ingest_pdfs": {
                 "permission": "mutating",
                 "params": {"include_path": "substr", "exclude_path": "substr",
+                           "include_files": "list[str] (exact filenames)",
                            "output": "data/*.jsonl", "max_pages": "int",
                            "pages": '"1-50,60,70-80" (1-based subset)',
                            "ocr_engine": "auto|tesseract|vlm|none",
-                           "chunking": "heading|fixed (how oversized sections "
-                                       "split; fixed = sliding window for "
-                                       "OCR/wall-of-text)",
+                           "chunking": "heading|fixed|document|none (how "
+                                       "oversized sections split; fixed = "
+                                       "sliding window for OCR walls, document "
+                                       "= element-aware [code/tables/lists "
+                                       "never cut], none = no splitting)",
                            "only_books": "bool", "skip_books": "bool",
                            "no_images": "bool", "force_domain": "str",
                            "force_tags": "csv or list"},
@@ -1223,9 +1562,28 @@ def api_schema() -> dict:
             "ingest_code": {
                 "permission": "mutating",
                 "params": {"output": "data/*.jsonl", "include_path": "substr",
-                           "exclude_path": "substr", "exts": ".js,.ts,.sql,..."},
+                           "exclude_path": "substr",
+                           "include_files": "list[str] (exact filenames)",
+                           "exts": ".js,.ts,.sql,..."},
                 "note": "every language ingest_notebooks doesn't cover; agent-"
                         "project roots need an include_path to be scoped in"},
+            "ingest_md": {
+                "permission": "mutating",
+                "params": {"include_path": "substr (REQUIRED)",
+                           "output": "data/*.jsonl (REQUIRED, never chunks.jsonl)",
+                           "chunking": "heading|fixed|document|none"},
+                "note": "SCOPED markdown parse (inbox md lane); guarded so the "
+                        "vault-wide chunks.jsonl can never be clobbered"},
+            "fetch_web": {
+                "permission": "mutating",
+                "params": {"urls": "list[str] (http/https only)",
+                           "backend": "auto|requests|crawl4ai|scrapling"},
+                "note": "writes .md to <inbox>/_converted; indexes nothing"},
+            "convert_files": {
+                "permission": "mutating",
+                "params": {"files": "list[str] (inbox filenames)",
+                           "ocr_pages": '"1-4,9"? (Tesseract, PDFs only)'},
+                "note": "markitdown any-file -> .md into <inbox>/_converted"},
             "index_append": {"permission": "mutating",
                              "params": {"file": "data/*.jsonl"},
                              "note": "idempotent upsert; also rebuilds sparse"},

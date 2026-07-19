@@ -43,7 +43,7 @@ def _compile_signals(signals: list[str]) -> list[tuple[str, re.Pattern]]:
     Boundaries are only asserted next to alphanumeric edge characters, so a
     trailing '_' or '.' acts as a prefix wildcard: "geom_" matches "geom_point"
     but "code" does NOT match "encoder". A simple plural is tolerated
-    ("code" also matches "codes" — the user's actual ggplot query said "my codes").
+    ("code" also matches "codes" — the author's actual ggplot query said "my codes").
     """
     compiled = []
     for sig in signals:

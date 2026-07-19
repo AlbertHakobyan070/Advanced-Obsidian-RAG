@@ -106,3 +106,69 @@ def test_discovery_skips_dir_named_like_sql(tmp_path):
     found = loader.discover_files()
     names = {f.relative_to(tmp_path).as_posix() for f in found}
     assert names == {"real.sql", "PSS2_Solutions.sql/inner.sql"}
+
+
+# ---- session 14: new job kinds + chunking values + rerank modes ----
+
+def test_chunking_document_none_accepted():
+    for mode in ("document", "none"):
+        argv = _build_argv("ingest_pdfs", {"chunking": mode})
+        assert argv[-2:] == ["--chunking", mode]
+    with pytest.raises(ValueError):
+        _build_argv("ingest_pdfs", {"chunking": "semantic"})
+
+
+def test_include_files_pass_through_and_guards():
+    argv = _build_argv("ingest_pdfs", {"include_files": ["a.pdf", "b.pdf"]})
+    assert "--include-files" in argv and "a.pdf,b.pdf" in argv
+    argv = _build_argv("ingest_code", {"include_files": "x.sql"})
+    assert "--include-files" in argv and "x.sql" in argv
+    with pytest.raises(ValueError):
+        _build_argv("ingest_pdfs", {"include_files": ["../evil.pdf"]})
+    # empty list = no filter at all, not an error
+    assert "--include-files" not in _build_argv("ingest_pdfs", {"include_files": []})
+
+
+def test_ingest_md_guards():
+    argv = _build_argv("ingest_md", {"include_path": "Inbox/x.md",
+                                     "output": "data/inbox_md.jsonl",
+                                     "chunking": "document"})
+    assert "ingest-md" in argv and "--chunking" in argv
+    with pytest.raises(ValueError):        # scoped parse may never hit chunks.jsonl
+        _build_argv("ingest_md", {"include_path": "Inbox",
+                                  "output": "data/chunks.jsonl"})
+    with pytest.raises(ValueError):        # include filter is mandatory
+        _build_argv("ingest_md", {"output": "data/x.jsonl"})
+
+
+def test_fetch_web_and_convert_files_validation():
+    argv = _build_argv("fetch_web", {"urls": ["https://a.io/x"], "backend": "auto"})
+    assert "fetch-web" in argv
+    with pytest.raises(ValueError):
+        _build_argv("fetch_web", {"urls": ["ftp://a.io/x"]})
+    with pytest.raises(ValueError):
+        _build_argv("fetch_web", {"urls": [], "backend": "auto"})
+    argv = _build_argv("convert_files", {"files": ["r.docx"], "ocr_pages": "1-3"})
+    assert "convert-files" in argv and "--ocr-pages" in argv
+    with pytest.raises(ValueError):
+        _build_argv("convert_files", {"files": ["r.docx"], "ocr_pages": "0-3"})
+
+
+def test_lexical_reranker_orders_by_term_coverage():
+    from src.retrieval.reranker import Reranker
+    from src.retrieval.retriever import RetrievedDoc
+
+    def doc(text):
+        return RetrievedDoc(id=text[:8], text=text, metadata={}, score=0.0)
+
+    rr = Reranker(model_name="unused", top_k=2, mode="lexical")
+    docs = [doc("nothing relevant here at all whatsoever"),
+            doc("gradient descent updates weights via the gradient"),
+            doc("the weather was nice")]
+    out = rr.rerank("gradient descent weights", docs)
+    assert out[0].text.startswith("gradient descent")
+    assert len(out) == 2
+    # none-mode just truncates in fused order, loading no model
+    rr_none = Reranker(model_name="unused", top_k=2, mode="none")
+    assert [d.text for d in rr_none.rerank("q", docs)] == \
+        [docs[0].text, docs[1].text]

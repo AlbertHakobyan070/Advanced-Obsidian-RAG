@@ -202,7 +202,7 @@ pre.log{background:var(--log-bg);border:1px solid var(--line);border-radius:var(
 <header>
   <div class="hrow">
     <div class="wordmark"><svg class="mark" viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><rect x="3" y="3" width="5" height="18" rx="1"/><rect x="10" y="3" width="5" height="18" rx="1" opacity=".55"/><rect x="17" y="6" width="4" height="15" rx="1" opacity=".3"/></svg>Corpus <em>Ledger</em></div>
-    <div class="sub">RAG management console · :8052</div>
+    <div class="sub">Personal RAG — management console · :8052</div>
     <div class="statuses">
       <span><span class="dot" id="dot-manage"></span>manage</span>
       <span><span class="dot" id="dot-rag"></span>query api :8051</span>
@@ -253,15 +253,15 @@ pre.log{background:var(--log-bg);border:1px solid var(--line);border-radius:var(
     <div class="panel">
       <h2>Add documents</h2>
       <p class="hint">Files land in the vault inbox — <span class="mono" id="inbox-path">…</span> — then get indexed by an inbox ingest job.</p>
-      <div class="dropzone" id="dropzone">Drop PDFs here, or click to choose files</div>
+      <div class="dropzone" id="dropzone">Drop files here, or click to choose (PDFs ingest directly; docx/pptx/html/… convert to .md first)</div>
       <input type="file" id="filepick" multiple style="display:none">
       <div id="upload-busy" style="display:none;margin-top:10px"><svg class="reel" viewBox="0 0 24 24"><circle class="b" cx="12" cy="12" r="9"/><circle class="a" cx="12" cy="12" r="6"/></svg>Uploading…</div>
       <table style="margin-top:12px"><tbody id="inbox-rows"><tr><td class="empty">Inbox is empty.</td></tr></tbody></table>
       <div class="row" style="margin-top:10px">
-        <input id="inbox-domain" placeholder="domain (opt): ml / stats / nlp…" style="width:190px" title="Stamped on every chunk of this batch — feeds domain scope routing. Inbox files have no path-derived metadata, so they default to 'general' otherwise.">
+        <input id="inbox-domain" placeholder="domain (opt): swe / ml / nlp…" style="width:190px" title="Stamped on every chunk of this batch — feeds domain scope routing. Inbox files have no course folder, so they land 'general' otherwise.">
         <input id="inbox-tags" placeholder="tags (opt): agentic, python" style="flex:1;min-width:150px" title="Comma-separated. Stamped on every chunk — searchable and boosted at retrieval when a tag appears in the query.">
-        <select id="inbox-chunking" style="width:170px" title="How OVERSIZED sections are split. heading = paragraph packing (default). fixed = strict sliding window — for scanned/OCR PDFs whose paragraph structure is noise.">
-          <option value="">chunking: heading</option><option value="fixed">chunking: fixed</option></select>
+        <select id="inbox-chunking" style="width:190px" title="How OVERSIZED sections are split. heading = paragraph packing (default). fixed = strict sliding window — for scanned/OCR PDFs whose paragraph structure is noise. document = element-aware: code blocks, tables and lists are never cut internally. none = no splitting (whole section = one chunk; embeddings truncate very long text).">
+          <option value="">chunking: heading</option><option value="fixed">chunking: fixed</option><option value="document">chunking: document</option><option value="none">chunking: none</option></select>
       </div>
       <div class="row" style="margin-top:10px">
         <button class="btn primary" id="btn-ingest-inbox">Ingest inbox now</button>
@@ -283,6 +283,52 @@ pre.log{background:var(--log-bg);border:1px solid var(--line);border-radius:var(
   </div>
 
   <div class="panel">
+    <h2>Fetch &amp; convert → .md</h2>
+    <p class="hint">Pull online articles as markdown, or convert uploaded files (pdf / docx / pptx / xlsx / html / …) to markdown via <span class="mono">markitdown</span>. Outputs stage in <span class="mono">_converted</span> — review, then <b>promote</b> them to the inbox for ingestion.</p>
+    <div class="grid g2">
+      <div>
+        <label class="f">Web links (one per line)</label>
+        <textarea id="fx-urls" rows="3" style="width:100%" placeholder="https://example.com/article&#10;https://arxiv.org/abs/…"></textarea>
+        <div class="row" style="margin-top:8px">
+          <select id="fx-backend" title="Fetch backend. auto = best installed (crawl4ai → scrapling → requests). requests always works; crawl4ai/scrapling need a pip install and fail readable if missing.">
+            <option value="auto">backend: auto</option><option value="requests">backend: requests</option><option value="crawl4ai">backend: crawl4ai</option><option value="scrapling">backend: scrapling</option></select>
+          <button class="btn primary" id="fx-fetch">Fetch → .md</button>
+        </div>
+      </div>
+      <div>
+        <label class="f">Convert inbox uploads</label>
+        <p class="hint" style="margin:4px 0 8px">Use the <b>→md</b> button on any inbox file (left panel). Optional OCR for scanned PDF pages:</p>
+        <div class="row">
+          <input id="fx-ocrpages" placeholder='OCR pages (opt): e.g. 1-4,9' style="width:200px" title="1-based PDF pages to ALSO run through Tesseract OCR — appended to the markitdown text. For scanned pages with no text layer.">
+        </div>
+        <div style="margin-top:10px"><label class="f">Staged conversions (_converted)</label>
+          <table style="margin-top:6px"><tbody id="fx-converted"><tr><td class="empty">Nothing staged.</td></tr></tbody></table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Custom-jobs designer</h2>
+    <p class="hint">Route each inbox file: <b>default</b> = the standard inbox lane (PDFs only), <b>custom</b> = sorted by type into the job groups below, each with its own knobs. Review the plan, then ingest.</p>
+    <div id="cg-groups"></div>
+    <div class="row" style="margin-top:10px">
+      <select id="cg-chunking" title="Global chunking for EVERY custom group. default = each lane's config default. document = element-aware (code/tables/lists never cut). none = no splitting.">
+        <option value="">chunking (all custom): default</option><option value="heading">chunking: heading</option><option value="fixed">chunking: fixed</option><option value="document">chunking: document</option><option value="none">chunking: none</option></select>
+    </div>
+    <div style="margin-top:12px"><label class="f">Plan preview</label>
+      <div id="cg-preview" class="note" style="margin-top:6px">Inbox is empty.</div>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button class="btn primary" id="cg-ingest-custom" title="Queue the custom groups only (files routed 'default' are left alone).">Ingest custom jobs</button>
+      <button class="btn primary" id="cg-ingest-all" title="Queue the custom groups AND the standard inbox lane for the remaining default-routed PDFs.">Ingest all</button>
+      <button class="btn" id="cg-ingest-inbox" title="Classic whole-inbox lane only (every inbox PDF; custom routing ignored).">Ingest inbox only</button>
+      <span id="cg-msg" class="hint" style="margin:0"></span>
+    </div>
+    <div class="note">Custom code/md chunks keep path-derived metadata (inbox files have no course folder) — retag domain/course/tags from Documents afterwards. Notebook files (.ipynb/.py/.R) aren't file-scopable yet — use the ingest-notebooks Custom job below.</div>
+  </div>
+
+  <div class="panel">
     <h2>Custom job</h2>
     <p class="hint">Full control over the same CLI the terminal uses. Jobs run one at a time.</p>
     <label class="f">Kind</label>
@@ -299,7 +345,7 @@ pre.log{background:var(--log-bg);border:1px solid var(--line);border-radius:var(
 
     <div id="jf-ingest_pdfs" class="jform">
       <div class="grid g2">
-        <div><label class="f">Include path (substring)</label><input id="p-include" placeholder="e.g. lectures, books, Inbox"></div>
+        <div><label class="f">Include path (substring)</label><input id="p-include" placeholder="e.g. Current Courses, Inbox, GenAI"></div>
         <div><label class="f">Exclude path</label><input id="p-exclude" placeholder="optional"></div>
         <div><label class="f">Output JSONL</label><input id="p-output" placeholder="data/pdf_chunks.jsonl"></div>
         <div><label class="f">Max pages / PDF</label><input id="p-maxpages" type="number" min="1" placeholder="all"></div>
@@ -307,8 +353,8 @@ pre.log{background:var(--log-bg);border:1px solid var(--line);border-radius:var(
         <div><label class="f">OCR engine</label>
           <select id="p-ocr"><option value="">auto (config)</option><option>tesseract</option><option>vlm</option><option>none</option></select></div>
         <div><label class="f">Chunking</label>
-          <select id="p-chunking" title="How OVERSIZED sections are split. heading = paragraph packing that respects the text's structure (the long-standing default). fixed = strict sliding window with even sizes — for OCR'd or wall-of-text PDFs whose paragraph structure is noise. Small sections chunk identically either way.">
-            <option value="">heading (default)</option><option>fixed</option></select></div>
+          <select id="p-chunking" title="How OVERSIZED sections are split. heading = paragraph packing that respects the text's structure (the long-standing default). fixed = strict sliding window with even sizes — for OCR'd or wall-of-text PDFs whose paragraph structure is noise. document = element-aware: code blocks, tables and lists never get cut internally. none = no splitting at all (one chunk per section — embeddings truncate very long text). Small sections chunk identically under every mode.">
+            <option value="">heading (default)</option><option>fixed</option><option>document</option><option>none</option></select></div>
         <div style="align-self:end" class="row">
           <label class="chk"><input type="checkbox" id="p-onlybooks">only Books folders</label>
           <label class="chk"><input type="checkbox" id="p-skipbooks">skip Books folders</label>
@@ -330,12 +376,12 @@ pre.log{background:var(--log-bg);border:1px solid var(--line);border-radius:var(
 
     <div id="jf-ingest_code" class="jform" style="display:none">
       <div class="grid g2">
-        <div><label class="f">Include path (substring)</label><input id="p-code-include" placeholder="e.g. src, projects"></div>
+        <div><label class="f">Include path (substring)</label><input id="p-code-include" placeholder="e.g. Capstone, Current Courses"></div>
         <div><label class="f">Exclude path</label><input id="p-code-exclude" placeholder="optional"></div>
         <div><label class="f">Output JSONL</label><input id="p-code-output" placeholder="data/code_chunks.jsonl"></div>
         <div><label class="f">Extensions (subset)</label><input id="p-code-exts" placeholder=".js,.ts,.sql (blank = all mapped)"></div>
       </div>
-      <div class="note">Covers the languages the notebook loader doesn't (.js/.ts/.sql/.go/.java/.c/.cpp/.rs/.sh/…). <b>.py/.R/.Rmd/.ipynb</b> stay on <b>ingest-notebooks</b>. Large agent-project roots are skipped unless an Include path names them.</div>
+      <div class="note">Covers the languages the notebook loader doesn't (.js/.ts/.sql/.go/.java/.c/.cpp/.rs/.sh/…). <b>.py/.R/.Rmd/.ipynb</b> stay on <b>ingest-notebooks</b>. Agent-project roots (Workspace1, Workspace2, …) are skipped unless an Include path names them.</div>
     </div>
 
     <div id="jf-index_append" class="jform" style="display:none">
@@ -438,8 +484,8 @@ pre.log{background:var(--log-bg);border:1px solid var(--line);border-radius:var(
 <section id="tab-query">
   <div class="panel">
     <h2>Test console</h2>
-    <p class="hint">Talks straight to the warm query endpoint (:8051). <b>Ask</b> = full RAG answer (needs a generation endpoint). <b>Search only</b> = retrieval, no LLM.</p>
-    <textarea id="q-text" rows="2" style="width:100%" placeholder="What do my notes say about the central limit theorem?"></textarea>
+    <p class="hint">Talks straight to the warm query endpoint (:8051). <b>Ask</b> = full RAG answer (needs FreeLLMAPI). <b>Search only</b> = retrieval, no LLM.</p>
+    <textarea id="q-text" rows="2" style="width:100%" placeholder="What do I know about conjugate priors?"></textarea>
     <div class="row" style="margin-top:10px">
       <select id="q-preset"><option value="">preset: none</option><option>code</option><option>concept</option><option>synthesis</option></select>
       <input id="q-topk" type="number" min="1" max="50" placeholder="rerank_k" style="width:86px" title="rerank_top_k — how many reranked chunks reach the LLM (blank = config default, 7)">
@@ -449,6 +495,9 @@ pre.log{background:var(--log-bg);border:1px solid var(--line);border-radius:var(
       <label class="chk" title="Query expansion: search with a hypothetical ANSWER instead of the raw question"><input type="checkbox" id="q-hyde" checked>HyDE</label>
       <label class="chk" title="Question-matching lane: match the query against pre-generated hypothetical questions (only chunks covered by a build_hype.py run participate; fails soft otherwise)"><input type="checkbox" id="q-hype">HyPE</label>
       <label class="chk" title="Fuse LIVE-vault hits (needs Obsidian open with the Omnisearch HTTP server)"><input type="checkbox" id="q-omni">Omnisearch (live vault)</label>
+      <select id="q-rerank" title="Rerank method for this call. cross-encoder = semantic (query,chunk) scoring (the default). lexical = model-free query-term coverage — for exact-keyword hunts. none = keep the fused RRF order as-is."><option value="">rerank: default</option><option value="cross_encoder">rerank: cross-encoder</option><option value="lexical">rerank: lexical</option><option value="none">rerank: none</option></select>
+      <select id="q-parent" title="E2 small-to-big: swap matched note chunks for their FULL enclosing section (parents sidecar). default = config/preset (ON in the synthesis preset)."><option value="">parents: default</option><option value="on">parents: on</option><option value="off">parents: off</option></select>
+      <select id="q-neigh" title="E2 small-to-big: append adjacent-page PDF chunks as marked supplementary sources. default = config/preset (ON in the synthesis preset)."><option value="">neighbors: default</option><option value="on">neighbors: on</option><option value="off">neighbors: off</option></select>
       <span style="flex:1"></span>
       <button class="btn" id="q-search">Search only</button>
       <button class="btn primary" id="q-ask">Ask</button>
@@ -462,7 +511,7 @@ pre.log{background:var(--log-bg);border:1px solid var(--line);border-radius:var(
 <section id="tab-info">
   <div class="panel">
     <h2>How this RAG works</h2>
-    <p class="hint">A hybrid-retrieval RAG over your personal knowledge base. Its <b>core</b> is two search lanes — <b>Dense</b> (semantic / vectors) and <b>Sparse</b> (keyword / BM25) — run together and <b>fused</b> with Reciprocal Rank Fusion; optional branches can widen or reshape the query and add extra lanes. The fused pool is <b>re-ranked</b> by a cross-encoder, then a cited answer is <b>grounded</b> in your own materials. Everything up to generation is local; only the final answer needs the LLM.</p>
+    <p class="hint">A hybrid-retrieval RAG over your Obsidian vault. Its <b>core</b> is two search lanes — <b>Dense</b> (semantic / vectors) and <b>Sparse</b> (keyword / BM25) — run together and <b>fused</b> with Reciprocal Rank Fusion; optional branches can widen or reshape the query and add extra lanes. The fused pool is <b>re-ranked</b> by a cross-encoder, then a cited answer is <b>grounded</b> in your own materials. Everything up to generation is local; only the final answer needs the LLM.</p>
     <div class="row" style="margin:0 0 12px">
       <button class="btn dgbtn on" data-dg="query">Query pipeline</button>
       <button class="btn dgbtn" data-dg="ingest">Ingestion pipeline</button>
@@ -691,7 +740,7 @@ pre.log{background:var(--log-bg);border:1px solid var(--line);border-radius:var(
 
         <!-- ===== spine ===== -->
         <rect class="main" x="396" y="14" width="168" height="36" rx="8" style="stroke:var(--amber);stroke-width:1.6"/>
-        <text class="t" x="480" y="36">Your source files</text>
+        <text class="t" x="480" y="36">Your vault files</text>
         <text class="tol" x="572" y="32">vault = read-only;</text>
         <text class="tol" x="572" y="45">inbox = the only write</text>
 
@@ -876,7 +925,7 @@ $("#nav").addEventListener("click",e=>{const b=e.target.closest("button");if(!b)
   $$("section").forEach(s=>s.classList.toggle("on",s.id==="tab-"+b.dataset.tab));
   clearInterval(state.timers.tab);
   if(b.dataset.tab==="ledger"){loadOverview();state.timers.tab=setInterval(loadOverview,10000)}
-  if(b.dataset.tab==="ingest")loadInbox();
+  if(b.dataset.tab==="ingest"){loadInbox();loadConverted()}
   if(b.dataset.tab==="jobs"){loadJobs();state.timers.tab=setInterval(loadJobs,2000)}
   if(b.dataset.tab==="vault"&&!state.vaultLoaded){state.vaultLoaded=true;loadVaultRoot()}
   if(b.dataset.tab==="info")renderInfoMath();
@@ -936,35 +985,175 @@ async function upload(files){
   catch(e){toast("upload: "+e.message,1)}
   $("#upload-busy").style.display="none";$("#filepick").value="";
 }
+/* Custom-jobs designer state: per-file routing + per-group params survive
+   inbox reloads (files disappearing drop out of the route map naturally). */
+state.inboxFiles=[];state.route={};
+state.groupParams={pdf:{ocr:"",pages:"",domain:"",tags:""},code:{exts:""},md:{}};
+const CODE_EXTS=new Set([".js",".ts",".jsx",".tsx",".sql",".go",".java",".c",".cpp",".h",".hpp",".rs",".sh",".bat",".ps1",".css",".scss",".php",".rb",".kt",".swift",".scala",".lua",".pl",".jl"]);
+const NB_EXTS=new Set([".ipynb",".py",".r",".rmd"]);
+function fileKind(name){
+  const i=name.lastIndexOf("."),ext=(i>=0?name.slice(i):"").toLowerCase();
+  if(ext===".pdf")return"pdf";if(ext===".md")return"md";
+  if(CODE_EXTS.has(ext))return"code";if(NB_EXTS.has(ext))return"nb";return"other";
+}
 async function loadInbox(){
   try{const r=await api("/api/inbox");
     $("#inbox-path").textContent=r.inbox;
-    $("#inbox-rows").innerHTML=r.files.length?r.files.map(f=>
-      `<tr><td>${esc(f.name)}</td><td style="text-align:right" class="mono">${gb(f.bytes)}</td></tr>`).join("")
-      :`<tr><td class="empty">Inbox is empty.</td></tr>`;
+    state.inboxFiles=r.files;
+    const live=new Set(state.inboxFiles.map(f=>f.name));
+    for(const n of Object.keys(state.route))if(!live.has(n))delete state.route[n];
+    $("#inbox-rows").innerHTML=state.inboxFiles.length?state.inboxFiles.map(f=>{
+      const k=fileKind(f.name),routable=(k==="pdf"||k==="code"||k==="md");
+      const route=state.route[f.name]||"default";
+      const sel=routable?`<select class="ibx-route" data-name="${esc(f.name)}" title="default = standard inbox lane (PDFs only). custom = this file joins its type's custom job group below.">
+          <option value="default"${route==="default"?" selected":""}>default</option>
+          <option value="custom"${route==="custom"?" selected":""}>custom (${k})</option></select>`
+        :`<span class="hint" style="margin:0" title="${k==="nb"?"notebook files: use the ingest-notebooks Custom job":"convert to .md first (→md), then route the .md"}">${k==="nb"?"notebooks job":"convert first"}</span>`;
+      const conv=k!=="md"?`<button class="btn ibx-conv" data-name="${esc(f.name)}" title="Convert to markdown via markitdown into _converted (optional OCR pages from the Fetch & convert panel)">→md</button>`:"";
+      return `<tr><td>${esc(f.name)}</td><td style="text-align:right" class="mono">${gb(f.bytes)}</td>
+        <td>${sel}</td><td style="text-align:right;white-space:nowrap">${conv}
+        <button class="btn ibx-del" data-name="${esc(f.name)}" title="Remove this file from the inbox (disk only — the index is untouched)">✕</button></td></tr>`;
+    }).join(""):`<tr><td class="empty">Inbox is empty.</td></tr>`;
+    $$(".ibx-route").forEach(s=>s.onchange=()=>{state.route[s.dataset.name]=s.value;renderPlan()});
+    $$(".ibx-del").forEach(b=>b.onclick=async()=>{
+      if(!confirm(`Remove ${b.dataset.name} from the inbox?\n\n(The file on disk is deleted; nothing already indexed is touched.)`))return;
+      try{await api("/api/inbox/delete",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({names:[b.dataset.name]})});toast("Removed "+b.dataset.name);loadInbox()}
+      catch(e){toast(e.message,1)}});
+    $$(".ibx-conv").forEach(b=>b.onclick=async()=>{
+      const ocr=$("#fx-ocrpages").value.trim()||undefined;
+      try{const r=await api("/api/import/convert",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({files:[b.dataset.name],ocr_pages:ocr})});
+        toast(`Convert job ${r.job.id} queued — output appears in _converted`);}
+      catch(e){toast(e.message,1)}});
+    renderPlan();
   }catch(e){/* settings tab may load before config; quiet */}
 }
-$("#btn-ingest-inbox").onclick=async()=>{
-  /* Server-side lane (/api/ingest_inbox) owns the job params — the old
-     UI-hardcoded only_books:true matched 0 inbox files and "succeeded". */
+function planGroups(){
+  const g={pdf:[],code:[],md:[]};
+  for(const f of state.inboxFiles){
+    if((state.route[f.name]||"default")!=="custom")continue;
+    const k=fileKind(f.name);if(g[k])g[k].push(f.name);
+  }
+  return g;
+}
+function renderPlan(){
+  const g=planGroups(),p=state.groupParams,chunk=$("#cg-chunking").value;
+  const cards=[];
+  if(g.pdf.length)cards.push(`<div class="note" style="margin-bottom:8px"><b>PDF group</b> — ${g.pdf.map(esc).join(", ")}
+    <div class="row" style="margin-top:8px">
+      <select id="gp-ocr" title="OCR engine for this group"><option value=""${!p.pdf.ocr?" selected":""}>OCR: auto</option><option${p.pdf.ocr==="tesseract"?" selected":""}>tesseract</option><option${p.pdf.ocr==="vlm"?" selected":""}>vlm</option><option${p.pdf.ocr==="none"?" selected":""}>none</option></select>
+      <input id="gp-pages" placeholder="pages: 1-50,60 (opt)" style="width:150px" value="${esc(p.pdf.pages)}" title="1-based page subset for every PDF in this group">
+      <input id="gp-domain" placeholder="domain (opt)" style="width:110px" value="${esc(p.pdf.domain)}" title="force_domain stamped on the group's chunks">
+      <input id="gp-tags" placeholder="tags (opt)" style="width:140px" value="${esc(p.pdf.tags)}" title="force_tags stamped on the group's chunks"></div></div>`);
+  if(g.code.length)cards.push(`<div class="note" style="margin-bottom:8px"><b>Code group</b> — ${g.code.map(esc).join(", ")}
+    <div class="row" style="margin-top:8px"><input id="gp-exts" placeholder="exts subset (opt): .sql,.js" style="width:190px" value="${esc(p.code.exts)}" title="restrict which extensions the code loader maps"></div></div>`);
+  if(g.md.length)cards.push(`<div class="note" style="margin-bottom:8px"><b>Markdown group</b> — ${g.md.map(esc).join(", ")}
+    <div class="hint" style="margin:6px 0 0">scoped parse, one job per file; metadata comes from the note's headings</div></div>`);
+  $("#cg-groups").innerHTML=cards.join("");
+  const bind=(id,obj,key)=>{const el=$(id);if(el)el.oninput=()=>{obj[key]=el.value;renderPlanText()}};
+  bind("#gp-ocr",p.pdf,"ocr");bind("#gp-pages",p.pdf,"pages");bind("#gp-domain",p.pdf,"domain");
+  bind("#gp-tags",p.pdf,"tags");bind("#gp-exts",p.code,"exts");
+  const sel=$("#gp-ocr");if(sel)sel.onchange=()=>{p.pdf.ocr=sel.value;renderPlanText()};
+  renderPlanText();
+}
+function renderPlanText(){
+  const g=planGroups(),p=state.groupParams,chunk=$("#cg-chunking").value||"default";
+  const defPdfs=state.inboxFiles.filter(f=>fileKind(f.name)==="pdf"&&(state.route[f.name]||"default")!=="custom").map(f=>f.name);
+  const ignored=state.inboxFiles.filter(f=>{const k=fileKind(f.name);return (k!=="pdf")&&(state.route[f.name]||"default")!=="custom"}).map(f=>f.name);
+  const L=[];
+  if(g.pdf.length)L.push(`<b>custom pdf</b> (${g.pdf.length}): chunking ${esc(chunk)} · OCR ${esc(p.pdf.ocr||"auto")}${p.pdf.pages?` · pages ${esc(p.pdf.pages)}`:""}${p.pdf.domain?` · domain ${esc(p.pdf.domain)}`:""}${p.pdf.tags?` · tags ${esc(p.pdf.tags)}`:""} → ingest-pdfs + append`);
+  if(g.code.length)L.push(`<b>custom code</b> (${g.code.length}): ${p.code.exts?`exts ${esc(p.code.exts)} · `:""}→ ingest-code + append`);
+  if(g.md.length)L.push(`<b>custom md</b> (${g.md.length}): chunking ${esc(chunk)} → ingest-md per file + append`);
+  L.push(`<b>default lane</b> (${defPdfs.length} PDF${defPdfs.length===1?"":"s"}): ${defPdfs.length?esc(defPdfs.join(", "))+" — batch domain/tags/chunking from the Add-documents fields":"nothing"} <span class="hint" style="margin:0">(runs on “Ingest all” / “Ingest inbox only”)</span>`);
+  if(ignored.length)L.push(`<span class="hint" style="margin:0">not ingestable as-is (convert or use notebooks job): ${esc(ignored.join(", "))}</span>`);
+  $("#cg-preview").innerHTML=state.inboxFiles.length?L.map(x=>`<div style="margin-bottom:4px">${x}</div>`).join(""):"Inbox is empty.";
+}
+/* Standard inbox lane, optionally restricted to a file subset (Ingest all). */
+async function ingestInboxLane(filesSubset){
   const go=async(force)=>{
     const domain=$("#inbox-domain").value.trim()||undefined;
     const tags=$("#inbox-tags").value.split(",").map(t=>t.trim()).filter(Boolean);
     const chunking=$("#inbox-chunking").value||undefined;
+    const body={force,domain,tags,chunking};
+    if(filesSubset&&filesSubset.length)body.files=filesSubset;
     const res=await fetch("/api/ingest_inbox",{method:"POST",
-      headers:{"Content-Type":"application/json"},body:JSON.stringify({force,domain,tags,chunking})});
+      headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
     const r=await res.json().catch(()=>({}));
     if(res.ok&&r.ok){
       toast(`Queued: ingest ${r.files.length} PDF(s) → append (rebuilds BM25). Restart :8051 after.`);
-      return}
+      return true}
     if(res.status===409&&r.conflicts){
       const list=r.conflicts.map(c=>`• ${c.file}\n   already indexed as: ${c.existing_source}`).join("\n");
       if(confirm(`Possible duplicates — these inbox files match documents already in the corpus:\n\n${list}\n\nOK = ingest anyway (will duplicate chunks if they are the same files)\nCancel = skip; remove them from the inbox first.`))
         return go(true);
-      toast("Ingest cancelled — inbox left untouched.",1);return}
-    toast(r.error||("HTTP "+res.status),1)};
-  try{await go(false)}catch(e){toast(e.message,1)}
+      toast("Ingest cancelled — inbox left untouched.",1);return false}
+    toast(r.error||("HTTP "+res.status),1);return false};
+  try{return await go(false)}catch(e){toast(e.message,1);return false}
+}
+$("#btn-ingest-inbox").onclick=()=>ingestInboxLane(null);
+$("#cg-ingest-inbox").onclick=()=>ingestInboxLane(null);
+async function ingestCustomGroups(){
+  const g=planGroups(),p=state.groupParams,chunk=$("#cg-chunking").value||undefined;
+  const groups=[];
+  if(g.pdf.length){const gp={kind:"pdf",files:g.pdf,chunking:chunk,
+    ocr_engine:p.pdf.ocr||undefined,pages:p.pdf.pages.trim()||undefined,
+    domain:p.pdf.domain.trim()||undefined,
+    tags:p.pdf.tags.split(",").map(t=>t.trim()).filter(Boolean)};groups.push(gp)}
+  if(g.code.length)groups.push({kind:"code",files:g.code,exts:p.code.exts.trim()||undefined});
+  if(g.md.length)groups.push({kind:"md",files:g.md,chunking:chunk});
+  if(!groups.length){toast("No files are routed to custom — flip a file's route select first.",1);return false}
+  const go=async(force)=>{
+    const res=await fetch("/api/ingest_custom",{method:"POST",
+      headers:{"Content-Type":"application/json"},body:JSON.stringify({groups,force})});
+    const r=await res.json().catch(()=>({}));
+    if(res.ok&&r.ok){
+      $("#cg-msg").textContent=`queued ${r.jobs.length} job(s)`;
+      toast(`Queued ${r.jobs.length} job(s) (ingest + append per group). Restart :8051 after the last append.`);
+      return true}
+    if(res.status===409&&r.conflicts){
+      const list=r.conflicts.map(c=>`• ${c.file}\n   already indexed as: ${c.existing_source}`).join("\n");
+      if(confirm(`Possible duplicates:\n\n${list}\n\nOK = ingest anyway\nCancel = skip.`))return go(true);
+      toast("Custom ingest cancelled.",1);return false}
+    toast(r.error||(r.problems||[]).join("; ")||("HTTP "+res.status),1);return false};
+  try{return await go(false)}catch(e){toast(e.message,1);return false}
+}
+$("#cg-ingest-custom").onclick=()=>ingestCustomGroups();
+$("#cg-ingest-all").onclick=async()=>{
+  const ok=await ingestCustomGroups();
+  const defPdfs=state.inboxFiles.filter(f=>fileKind(f.name)==="pdf"&&(state.route[f.name]||"default")!=="custom").map(f=>f.name);
+  if(defPdfs.length)await ingestInboxLane(defPdfs);
+  else if(ok)toast("No default-routed PDFs left — custom groups cover everything.");
 };
+$("#cg-chunking").onchange=()=>renderPlanText();
+/* ---------- fetch & convert lane ---------- */
+$("#fx-fetch").onclick=async()=>{
+  const urls=$("#fx-urls").value.split("\n").map(u=>u.trim()).filter(Boolean);
+  if(!urls.length){toast("Paste at least one http(s) link first.",1);return}
+  try{const r=await api("/api/import/fetch",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({urls,backend:$("#fx-backend").value})});
+    toast(`Fetch job ${r.job.id} queued — watch Jobs; outputs land in _converted`);}
+  catch(e){toast(e.message,1)}
+};
+async function loadConverted(){
+  try{const r=await api("/api/import/converted");
+    $("#fx-converted").innerHTML=r.files.length?r.files.map(f=>
+      `<tr><td>${esc(f.name)}</td><td style="text-align:right" class="mono">${gb(f.bytes)}</td>
+       <td style="text-align:right;white-space:nowrap">
+       <button class="btn fx-promote" data-name="${esc(f.name)}" title="Move into the inbox uploads list for ingestion">promote</button>
+       <button class="btn fx-del" data-name="${esc(f.name)}" title="Delete this staged conversion">✕</button></td></tr>`).join("")
+      :`<tr><td class="empty">Nothing staged.</td></tr>`;
+    $$(".fx-promote").forEach(b=>b.onclick=async()=>{
+      try{const r=await api("/api/import/promote",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({names:[b.dataset.name]})});
+        toast(`Promoted ${r.moved.join(", ")} to the inbox`);loadInbox();loadConverted()}
+      catch(e){toast(e.message,1)}});
+    $$(".fx-del").forEach(b=>b.onclick=async()=>{
+      try{await api("/api/inbox/delete",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({names:[b.dataset.name]})});toast("Deleted "+b.dataset.name);loadConverted()}
+      catch(e){toast(e.message,1)}});
+  }catch(e){/* quiet before config */}
+}
 
 /* ---------- ingest: quick actions + custom job ---------- */
 $$("#tab-ingest [data-quick]").forEach(b=>b.onclick=async()=>{
@@ -1059,7 +1248,7 @@ $("#d-retag").onclick=async()=>{
   const n=state.selDocs.size;if(!n)return;
   const domain=prompt(`Retag ${n} document(s).\n\nDomain (blank = keep current). Known: stats, ml, nlp, viz, biz, ts, db, math, swe, prog, general:`);
   if(domain===null)return;
-  const course=prompt(`Course (blank = keep current). Full name as it appears in the Documents course column, e.g. "Machine Learning":`);
+  const course=prompt(`Course (blank = keep current). Full name as it appears in the Documents course column, e.g. "Databases & Data Engineering":`);
   if(course===null)return;
   const addT=prompt("Tags to ADD (comma-separated, blank = none):");
   if(addT===null)return;
@@ -1283,6 +1472,9 @@ async function runQuery(retrieveOnly){
   const body={q,include_text:900,hyde:$("#q-hyde").checked,hype:$("#q-hype").checked,
     omnisearch:$("#q-omni").checked};
   const preset=$("#q-preset").value;if(preset)body.preset=preset;
+  const rr=$("#q-rerank").value;if(rr)body.rerank=rr;
+  const pc=$("#q-parent").value;if(pc)body.parent_context=(pc==="on");
+  const nc=$("#q-neigh").value;if(nc)body.neighbor_context=(nc==="on");
   const tk=$("#q-topk").value;if(tk)body.top_k=+tk;
   const dk=$("#q-densek").value;if(dk)body.dense_top_k=+dk;
   const sk=$("#q-sparsek").value;if(sk)body.sparse_top_k=+sk;
@@ -1331,7 +1523,7 @@ $$(".dgbtn").forEach(b=>b.onclick=()=>{
 /* ---------- boot ---------- */
 (async()=>{
   try{const s=await api("/api/settings");state.ragApi=s.rag_api;state.jsonls=s.jsonl_files}catch(e){}
-  loadOverview();loadFacets();loadInbox();
+  loadOverview();loadFacets();loadInbox();loadConverted();
   state.timers.tab=setInterval(loadOverview,10000);
 })();
 </script>

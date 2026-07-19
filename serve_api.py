@@ -108,6 +108,9 @@ class QueryIn(BaseModel):
     # HyPE lane (query→hypothetical-question matching; needs build_hype.py
     # to have populated the question collection — fails soft otherwise).
     hype: bool | None = None
+    # Rerank method for this call: cross_encoder (semantic, the default) |
+    # lexical (query-term coverage, model-free) | none (fused order as-is).
+    rerank: str | None = None
     # true = skip generation entirely; the response carries the reranked chunks
     # (with labels + text) and confidence "RETRIEVE_ONLY". No LLM involved, so
     # this works even when the generation proxy is down — the calling agent can
@@ -136,6 +139,9 @@ class SearchIn(BaseModel):
     parent_context: bool | None = None
     neighbor_context: bool | None = None
     hype: bool | None = None
+    # Rerank method for this call: cross_encoder | lexical | none.
+    # Unset = the configured retrieval.rerank_mode (cross_encoder).
+    rerank: str | None = None
     include_text: int = Field(default=1200, ge=0, le=6000)
     max_sources: int | None = Field(default=None, ge=1)
 
@@ -291,9 +297,9 @@ def query(body: QueryIn) -> QueryOut:
                 hyde=body.hyde, omnisearch=body.omnisearch,
                 parent_context=body.parent_context,
                 neighbor_context=body.neighbor_context,
-                hype=body.hype,
+                hype=body.hype, rerank=body.rerank,
             )
-        except KeyError as e:
+        except (KeyError, ValueError) as e:
             return QueryOut(answer=f"Bad request: {e.args[0]}",
                             confidence="ERROR", citations=[], sources=[])
         inc = 1200 if body.include_text is None else body.include_text
@@ -312,8 +318,9 @@ def query(body: QueryIn) -> QueryOut:
                         hyde=body.hyde, omnisearch=body.omnisearch,
                         parent_context=body.parent_context,
                         neighbor_context=body.neighbor_context,
-                        hype=body.hype, max_tokens=body.max_tokens)
-    except KeyError as e:
+                        hype=body.hype, rerank=body.rerank,
+                        max_tokens=body.max_tokens)
+    except (KeyError, ValueError) as e:
         # Unknown preset name — tell the caller what IS available.
         return QueryOut(
             answer=f"Bad request: {e.args[0]}",
@@ -351,7 +358,7 @@ def search(body: SearchIn) -> dict:
     """
     Retrieval ONLY — hybrid search + rerank, no generation. The response is
     the reranked chunks with human labels and (by default) their text, so an
-    agent with its own strong model can ground itself on the user's materials
+    agent with its own strong model can ground itself on the author's materials
     and reason over them directly. Zero dependency on the generation proxy.
     """
     rag = _rag()
@@ -362,9 +369,9 @@ def search(body: SearchIn) -> dict:
             hyde=body.hyde, omnisearch=body.omnisearch,
             parent_context=body.parent_context,
             neighbor_context=body.neighbor_context,
-            hype=body.hype,
+            hype=body.hype, rerank=body.rerank,
         )
-    except KeyError as e:
+    except (KeyError, ValueError) as e:
         return {"error": e.args[0], "results": [], "retrieval": {}}
     results = _sources_out(docs, [], body.include_text, body.max_sources)
     return {
@@ -461,6 +468,8 @@ def schema() -> dict:
                          "parent_context": "bool? (E2: swap note chunks for full sections)",
                          "neighbor_context": "bool? (E2: add adjacent-page PDF context)",
                          "hype": "bool? (HyPE question-matching lane; needs build_hype.py)",
+                         "rerank": "cross_encoder|lexical|none? (rerank method; "
+                                   "unset = config retrieval.rerank_mode)",
                          "include_text": "0-6000 chars (default 1200)",
                          "max_sources": "int?"},
             },
@@ -472,6 +481,7 @@ def schema() -> dict:
                          "hyde": "bool?", "omnisearch": "bool?",
                          "parent_context": "bool?", "neighbor_context": "bool?",
                          "hype": "bool? (HyPE question-matching lane)",
+                         "rerank": "cross_encoder|lexical|none?",
                          "retrieve_only": "bool (skip generation)",
                          "include_text": "0-6000 chars?", "max_sources": "int?",
                          "max_tokens": "64-8192? (cap the answer's output "
@@ -490,7 +500,7 @@ def schema() -> dict:
         "example_cmd": (
             'curl.exe -s -X POST http://127.0.0.1:8051/search -H '
             '"Content-Type: application/json" -d '
-            '"{\\"q\\": \\"show me my python script for backoff retries\\", '
+            '"{\\"q\\": \\"how did I tune mBERT in my capstone\\", '
             '\\"top_k\\": 8}"'
         ),
     }
