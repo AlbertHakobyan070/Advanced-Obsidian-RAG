@@ -1,5 +1,5 @@
 """
-obsidian_parser.py — Obsidian Vault Ingestion for the personal RAG Pipeline
+obsidian_parser.py — Obsidian Vault Ingestion for Personal RAG Pipeline
 =========================================================================
 Parses an Obsidian vault into semantically meaningful chunks ready for
 embedding. Handles:

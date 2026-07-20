@@ -1,5 +1,5 @@
 """
-app.py — Streamlit interface for the personal RAG.
+app.py — Streamlit interface for Personal RAG.
 
     streamlit run app.py      (or: python main.py serve)
 
@@ -21,7 +21,7 @@ import streamlit as st
 from src.pipeline import RAGPipeline
 from src.utils.config_loader import load_config, persist_config_values
 
-st.set_page_config(page_title="the personal RAG", page_icon="📚", layout="wide")
+st.set_page_config(page_title="Personal RAG", page_icon="📚", layout="wide")
 
 
 @st.cache_resource(show_spinner="Loading pipeline…")
@@ -76,7 +76,7 @@ def main():
         st.caption("Answers are grounded in your own lecture notes. "
                    "Citations are audited by a second model pass.")
 
-    st.title("📚 Personal RAG")
+    st.title("📚 the personal RAG")
     st.caption("Ask anything from your Obsidian vault — grounded, cited answers from your own notes.")
 
     if "history" not in st.session_state:

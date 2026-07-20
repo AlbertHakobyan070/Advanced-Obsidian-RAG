@@ -12,7 +12,7 @@ python main.py ingest-pdfs [--pages "1-50,60"] [--chunking heading|fixed|documen
 python main.py ingest-notebooks
 python main.py ingest-code --include-path "<subtree>" [--include-files "x.sql"]
 python main.py ingest-md --include-path "<scope>" --output data/<name>.jsonl   # scoped md parse (guarded)
-python main.py fetch-web --urls "https://…" [--backend auto|requests|crawl4ai|scrapling]
+python main.py fetch-web --urls "https://…" [--backend auto|requests|crawl4ai|scrapling] [--format md|pdf]
 python main.py convert-files --files "report.docx" [--ocr-pages "1-4,9"]       # markitdown → .md
 python main.py query "<question>" [--preset code|concept|synthesis] [--top-k N] [--max-tokens N]
 python main.py chat                        # interactive REPL
@@ -61,6 +61,17 @@ Every `/query` response echoes what actually ran:
                "dense_top_k": 40, "sparse_top_k": 40, "scopes": ["code"] }
 ```
 
+`GET /history` returns the last `/search` + `/query` calls (newest first, in-memory):
+the question, the knobs the caller explicitly set, the full retrieval echo of what
+actually ran, confidence and timing — so an agent tuning hyperparameters can see what
+it already tried instead of re-deriving it.
+
+`fetch-web --format pdf` prints the fully rendered page through headless Chromium
+(LaTeX, tables and highlighted code exactly as the site shows them) instead of
+converting to markdown — the right lane for math- or code-heavy sources, and the
+output ingests through the PDF lane with real page numbers. It needs Playwright's
+Chromium once: `python -m playwright install chromium`.
+
 ## Presets and per-query knobs
 
 Named override bundles in `config.yaml`, selectable per query with no restart — the warm
@@ -92,28 +103,35 @@ retrieval:
 
 Open **http://127.0.0.1:8052**. Tabs:
 
-- **Query** — Ask / Search with every knob (pools, HyDE/HyPE, rerank method, E2
-  parents/neighbors), plus copy, `.md` export (Obsidian-ready), and a Markdown + LaTeX
-  preview.
+- **Query** — Ask / Search with every knob in labeled groups (pool sizes, extra lanes
+  HyDE/HyPE/Omnisearch, rerank method, E2 parents/neighbors), plus copy and `.md` export
+  (Obsidian-ready). The Markdown + LaTeX **Preview** toggle renders the answer *and every
+  source chunk* — math, tables and fenced code included.
 - **Documents** — search, `#tag` filter, **retag** (domain / course / tags —
   metadata-only, no re-embed), and **delete** from the index.
 - **Vault** — browse the mounted vault tree read-only.
-- **Ingest** — a three-step flow: **1 · Add documents** (upload to the inbox, remove
-  mistakes with ✕); **2 · Fetch & convert** (pull web links as markdown, or convert any
-  upload — pdf/docx/pptx/xlsx/html — to `.md` via markitdown, with optional per-page OCR;
-  outputs stage in `_converted` until promoted); **3 · Route & ingest** — the
-  custom-jobs designer: route each file `default | custom`, custom files sort into
-  PDF / code / md job groups with per-group knobs and a global chunking pick, review the
-  live plan preview, then *Ingest custom jobs* / *Ingest all* / *Ingest inbox only*.
-  Vault-wide passes live under *Advanced · Custom job*.
+- **Ingest** — a three-step flow: **1 · Add documents** (upload to the inbox; every file
+  can carry its **own ⚙ settings** — domain / tags / chunking, and OCR engine / page
+  subset for PDFs — or inherit the batch defaults; 👁 previews any md/PDF, with PDF page
+  numbers visible for OCR-range picking); **2 · Fetch & convert** (pull web links as
+  `.md` via markitdown **or as a printed `.pdf`** of the rendered page via headless
+  Chromium — LaTeX/tables/code intact; convert any upload — pdf/docx/pptx/xlsx/html — to
+  `.md`, with optional per-page OCR; outputs stage in `_converted` with preview until
+  promoted); **3 · Jobs designer** — route each file `default | custom`; files sharing
+  identical settings batch into one job, files with different ⚙ settings split into
+  separate jobs automatically; review the live plan preview, then *Ingest custom jobs* /
+  *Ingest all* / *Ingest inbox only*. Vault-wide passes live under **Advanced** in the
+  same panel — same serial queue, whole-vault scope.
 - **Jobs** — watch long-running ingest / maintenance jobs.
-- **Settings** — four themes (the warm Ledger pair + **Material mint** dark/light), a
-  description mode that overlays inline explainers on every Ingest/Query section, and the
-  editable config surface: vault root, Chroma / BM25 / chunks paths, embedding +
-  cross-encoder models, default rerank & chunking, generation endpoint. Saves rewrite
-  `config.yaml` in place (comments preserved); nothing hot-applies — the response says
-  which service to restart. Point the paths at another vault + index trio to run the same
-  console against a different corpus.
+- **Settings** — appearance with **dark and light preset shelves**: the built-in themes
+  (the warm Ledger pair + **Material mint** dark/light) plus your own **saved presets** —
+  export the active theme as CSS variables, tweak, save under a name, rename or delete
+  from its chip; an Obsidian-style **vault switcher** that remembers every vault ever
+  opened together with its own path/index settings and swaps the whole set atomically;
+  and the editable config surface with **📁 folder pickers**: vault root, Chroma / BM25 /
+  chunks paths, embedding + cross-encoder models, default rerank & chunking, generation
+  endpoint. Saves rewrite `config.yaml` in place (comments preserved); nothing
+  hot-applies — the response says which service to restart.
 - **Info** — an in-app diagram of the whole pipeline with a query/ingestion toggle and a
   per-knob influence table.
 
@@ -123,9 +141,7 @@ successful index-changing job); the Ledger shows an **Index health** card — �
 when the dense (Chroma) and sparse (BM25) indexes hold the same corpus, ✗ drifted with
 the fix spelled out (the BM25 count comes from a sidecar written at build time — no
 giant unpickle); and the Query tab keeps a restorable **history** of your last 20
-queries with their knobs. Themes are also **importable/exportable** as CSS-variable
-blocks from Settings → Appearance — export the active theme as a template, edit the
-values, paste it back as the `custom` theme.
+queries with their knobs.
 
 ## For agents
 

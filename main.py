@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-main.py — CLI entry point for the personal RAG.
+main.py — CLI entry point for Personal RAG.
 
     python main.py index                      # build dense + sparse indexes from chunks.jsonl
     python main.py query "What is ARIMA?"      # one-shot question
@@ -213,7 +213,7 @@ def cmd_fetch_web(args):
 
     urls = [u.strip() for u in args.urls.split(",") if u.strip()]
     out_dir = Path(args.out_dir) if args.out_dir else _inbox_dir(cfg) / "_converted"
-    res = fetch_urls(urls, out_dir, backend=args.backend)
+    res = fetch_urls(urls, out_dir, backend=args.backend, fmt=args.format)
     ok = sum(1 for r in res if r["ok"])
     for r in res:
         print(("✅" if r["ok"] else "❌") + f" {r.get('url')}: "
@@ -296,7 +296,7 @@ def cmd_chat(args):
     from src.pipeline import RAGPipeline
 
     rag = RAGPipeline.from_config(cfg)
-    print("the personal RAG — interactive mode. Type 'exit' or Ctrl-C to quit.\n")
+    print("Personal RAG — interactive mode. Type 'exit' or Ctrl-C to quit.\n")
     try:
         while True:
             q = input("❓ ").strip()
@@ -327,7 +327,7 @@ def cmd_serve(args):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Personal RAG over an Obsidian vault.")
+    p = argparse.ArgumentParser(description="the author's personal RAG over his Obsidian vault.")
     p.add_argument("--config", default=None, help="Path to config.yaml")
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -446,6 +446,10 @@ def build_parser() -> argparse.ArgumentParser:
     fw.add_argument("--backend", default="auto",
                     choices=("auto", "requests", "crawl4ai", "scrapling"),
                     help="Fetch backend (auto = best installed; requests always works)")
+    fw.add_argument("--format", default="md", choices=("md", "pdf"),
+                    help="md = convert to markdown (markitdown); pdf = print "
+                         "the rendered page via headless Chromium (keeps "
+                         "LaTeX/tables/code exactly as the site shows them)")
     fw.add_argument("--out-dir", default=None, metavar="DIR",
                     help="Output folder (default: <inbox>/_converted)")
     fw.set_defaults(func=cmd_fetch_web)

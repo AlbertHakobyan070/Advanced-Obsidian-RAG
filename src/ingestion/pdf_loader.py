@@ -1,5 +1,5 @@
 """
-pdf_loader.py — PDF ingestion for the personal RAG, matched to the vault parser.
+pdf_loader.py — PDF ingestion for Personal RAG, matched to the vault parser.
 
 Produces the SAME JSONL shape as obsidian_parser.py so the embedder/indexer
 need zero changes:

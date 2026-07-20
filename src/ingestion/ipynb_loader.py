@@ -1,5 +1,5 @@
 """
-ipynb_loader.py — Native code & notebook ingestion for the personal RAG.
+ipynb_loader.py — Native code & notebook ingestion for Personal RAG.
 
 WHY THIS EXISTS
   Notebooks exported to PDF lose code indentation, cell boundaries, and table

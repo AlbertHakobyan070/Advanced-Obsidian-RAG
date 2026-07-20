@@ -1,5 +1,5 @@
 """
-manage_api.py — Corpus management console (backend) for the personal RAG.
+manage_api.py — Corpus management console (backend) for Personal RAG.
 
 Everything serve_api.py deliberately is NOT: ingest, index, OCR passes,
 document search/inspection, deletion, uploads — driven from a browser at
@@ -378,8 +378,11 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
         backend = prm.get("backend") or "auto"
         if backend not in ("auto", "requests", "crawl4ai", "scrapling"):
             raise ValueError("backend must be auto|requests|crawl4ai|scrapling")
+        fmt = prm.get("format") or "md"
+        if fmt not in ("md", "pdf"):
+            raise ValueError("format must be md|pdf")
         return [py, "main.py", "fetch-web", "--urls", ",".join(urls),
-                "--backend", backend]
+                "--backend", backend, "--format", fmt]
     if kind == "convert_files":
         argv = [py, "main.py", "convert-files",
                 "--files", _files_csv(prm.get("files"))]
@@ -589,6 +592,7 @@ class InboxDeleteIn(BaseModel):
 class ImportFetchIn(BaseModel):
     urls: list[str] = Field(min_length=1)
     backend: str = "auto"           # auto | requests | crawl4ai | scrapling
+    format: str = "md"              # md (markitdown) | pdf (Chromium print)
 
 
 class ImportConvertIn(BaseModel):
@@ -1098,7 +1102,10 @@ def ingest_inbox(body: InboxIngestIn) -> dict:
 
     vault = Path(CFG.get("pdf.vault_path") or CFG.get("parser.vault_path"))
     include_rel = inbox.relative_to(vault).as_posix()   # exact folder, not "Inbox"
-    out = f"data/inbox_{time.strftime('%Y%m%d_%H%M%S')}_chunks.jsonl"
+    # uuid tail: per-file metadata sends several of these calls in the same
+    # second, and same-name outputs would make the batches clobber each other
+    out = (f"data/inbox_{time.strftime('%Y%m%d_%H%M%S')}"
+           f"_{uuid.uuid4().hex[:4]}_chunks.jsonl")
     params: dict[str, Any] = {"include_path": include_rel, "output": out,
                               "no_images": True, "archive_processed": True}
     if subset is not None:
@@ -1161,24 +1168,49 @@ def inbox_delete(body: InboxDeleteIn) -> dict:
 
 @app.get("/api/import/converted")
 def import_converted() -> dict:
-    """List staged .md conversions awaiting promotion to the inbox."""
+    """List staged conversions (.md and printed .pdf) awaiting promotion."""
     conv = _converted_dir()
-    rows = [{"name": f.name, "bytes": f.stat().st_size}
+    rows = [{"name": f.name, "bytes": f.stat().st_size,
+             "ext": f.suffix.lower()}
             for f in sorted(conv.iterdir())
-            if f.is_file() and f.suffix.lower() == ".md"]
+            if f.is_file() and f.suffix.lower() in (".md", ".pdf")]
     return {"dir": str(conv), "files": rows}
+
+
+@app.get("/api/import/file")
+def import_file(name: str, where: str = "converted"):
+    """Serve one staged/inbox file for in-console preview (md rendered
+    client-side; pdf shown in the browser's viewer with page numbers — that's
+    how you pick OCR page ranges). Plain filenames only; read-only."""
+    if Path(name).name != name or not name:
+        return JSONResponse({"error": "plain filenames only"}, status_code=400)
+    base = {"converted": _converted_dir(), "inbox": _inbox()}.get(where)
+    if base is None:
+        return JSONResponse({"error": "where must be converted|inbox"},
+                            status_code=400)
+    p = base / name
+    if not p.is_file() or p.suffix.lower() not in (".md", ".pdf"):
+        return JSONResponse({"error": f"no such previewable file: {name}"},
+                            status_code=404)
+    media = "application/pdf" if p.suffix.lower() == ".pdf" else \
+            "text/markdown; charset=utf-8"
+    return FileResponse(p, media_type=media,
+                        content_disposition_type="inline")
 
 
 @app.post("/api/import/fetch")
 def import_fetch(body: ImportFetchIn) -> dict:
-    """Queue a fetch_web job: pull the URLs, convert to .md via markitdown,
-    stage the outputs in <inbox>/_converted (nothing is indexed)."""
+    """Queue a fetch_web job: pull the URLs into <inbox>/_converted, either as
+    markdown (markitdown) or as a printed PDF of the rendered page (headless
+    Chromium — LaTeX/tables/code exactly as the site shows them). Nothing is
+    indexed."""
     try:
-        job = enqueue("fetch_web", {"urls": body.urls, "backend": body.backend})
+        job = enqueue("fetch_web", {"urls": body.urls, "backend": body.backend,
+                                    "format": body.format})
     except ValueError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
     return {"ok": True, "job": job.public(),
-            "note": "Outputs land in _converted — review, then promote to the "
+            "note": "Outputs land in _converted — preview, then promote to the "
                     "inbox and ingest."}
 
 
@@ -1274,7 +1306,7 @@ def ingest_custom(body: CustomIngestIn) -> dict:
              "hint": "force:true ingests anyway (duplicates if same files)."},
             status_code=409)
 
-    ts = time.strftime("%Y%m%d_%H%M%S")
+    ts = f"{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:4]}"
     jobs = []
     try:
         for gi, g in enumerate(body.groups):
@@ -1363,7 +1395,7 @@ def vault_tree(path: str = "") -> dict:
     """
     One folder level of the vault, with per-file in-RAG status. `path` is
     vault-relative posix; '' = the configured browse root (webui.vault_tree_root,
-    default '00 – AUA_DS' per the design spec — the rest of the vault is reachable
+    default '00 – AUA_DS' per the author's spec — the rest of the vault is reachable
     via /api/vault/search below). Read-only: never writes to the vault.
     """
     vault = _vault_root()
@@ -1557,6 +1589,191 @@ def settings_update(body: SettingsIn) -> dict:
                       "of the corpus (main.py index) before search works again."}
 
 
+# ---- folder browser (Settings path pickers) ----
+
+@app.get("/api/browse")
+def browse(path: str = "") -> dict:
+    """
+    One level of the LOCAL filesystem, folders only — powers the Settings
+    tab's path pickers and the vault switcher (a browser page can't open a
+    native folder dialog for server-side paths). '' lists the drives.
+    Read-only; never creates or touches anything.
+    """
+    if not path:
+        import string
+        drives = [f"{d}:/" for d in string.ascii_uppercase
+                  if Path(f"{d}:/").exists()]
+        return {"path": "", "parent": None, "dirs": drives}
+    p = Path(path)
+    if not p.is_dir():
+        return JSONResponse({"error": f"not a folder: {path}"}, status_code=404)
+    dirs = []
+    try:
+        for entry in sorted(p.iterdir(), key=lambda x: x.name.lower()):
+            if entry.is_dir() and not entry.name.startswith((".", "$")):
+                dirs.append(entry.name)
+    except PermissionError:
+        return JSONResponse({"error": f"no permission: {path}"}, status_code=403)
+    parent = str(p.parent) if p.parent != p else ""
+    return {"path": str(p), "parent": parent, "dirs": dirs}
+
+
+# ---- vault switcher (Obsidian-style: every vault ever opened stays listed,
+#      and each vault remembers its own index/path settings) ----
+
+# The per-vault settings snapshot: everything that must travel WITH a vault.
+# Each corpus needs its own index trio — reusing another vault's indexes
+# retrieves nonsense (same warning the Settings tab shows).
+VAULT_KEYS = ["parser.vault_path", "paths.chunks_file", "paths.chroma_dir",
+              "paths.bm25_index", "paths.collection_name", "webui.inbox_dir"]
+
+# Registry lives at a vault-INDEPENDENT path (DATA_DIR follows the per-vault
+# chunks_file, so it moves on switch — the registry must not move with it).
+_VAULT_REGISTRY = ROOT / "data" / ".vault_registry.json"
+_vault_lock = threading.Lock()
+
+
+def _load_vaults() -> list[dict]:
+    try:
+        return json.loads(_VAULT_REGISTRY.read_text(encoding="utf-8"))["vaults"]
+    except Exception:
+        return []
+
+
+def _save_vaults(vaults: list[dict]) -> None:
+    _VAULT_REGISTRY.write_text(
+        json.dumps({"vaults": vaults}, indent=2, ensure_ascii=False),
+        encoding="utf-8")
+
+
+def _fresh_settings_snapshot() -> dict[str, str]:
+    from src.utils.config_loader import load_config as _load
+    disk = _load()
+    return {k: str(disk.get(k) or "") for k in VAULT_KEYS}
+
+
+def _norm_vault(p: str) -> str:
+    return str(p).replace("\\", "/").rstrip("/").lower()
+
+
+class VaultSwitchIn(BaseModel):
+    path: str                       # vault root folder (absolute)
+    label: Optional[str] = None     # display name; defaults to the folder name
+
+
+class VaultForgetIn(BaseModel):
+    path: str                       # registry entry to drop (files untouched)
+
+
+@app.get("/api/vaults")
+def vaults_list() -> dict:
+    snap = _fresh_settings_snapshot()
+    cur = _norm_vault(snap["parser.vault_path"])
+    with _vault_lock:
+        vaults = _load_vaults()
+        known = {_norm_vault(v["path"]) for v in vaults}
+        if cur and cur not in known:      # current vault self-registers
+            vaults.append({"path": snap["parser.vault_path"],
+                           "label": Path(snap["parser.vault_path"]).name,
+                           "last_used": time.strftime("%Y-%m-%d %H:%M"),
+                           "settings": snap})
+            _save_vaults(vaults)
+    rows = [{**{k: v for k, v in v.items() if k != "settings"},
+             "current": _norm_vault(v["path"]) == cur} for v in vaults]
+    return {"vaults": rows, "current": snap["parser.vault_path"]}
+
+
+@app.post("/api/vaults/switch")
+def vaults_switch(body: VaultSwitchIn) -> dict:
+    """
+    Switch the console (and, after restarts, the whole RAG) to another vault.
+    Obsidian-style: the CURRENT vault's settings are snapshotted into the
+    registry first, then the target's last-known settings are restored — or,
+    for a never-seen vault, a fresh per-vault index trio is scaffolded next to
+    the current one (empty corpus is a valid state; ingest fills it).
+    Nothing hot-applies: restart :8051 + :8052 after switching.
+    """
+    target = Path(body.path)
+    if not target.is_dir():
+        return JSONResponse({"ok": False,
+                             "error": f"vault folder does not exist: {body.path}"},
+                            status_code=400)
+    snap = _fresh_settings_snapshot()
+    cur_key = _norm_vault(snap["parser.vault_path"])
+    tgt_key = _norm_vault(str(target))
+
+    with _vault_lock:
+        vaults = _load_vaults()
+        by_key = {_norm_vault(v["path"]): v for v in vaults}
+        # 1. snapshot the current vault's state (its "last session")
+        if cur_key:
+            cur = by_key.get(cur_key)
+            if cur is None:
+                cur = {"path": snap["parser.vault_path"],
+                       "label": Path(snap["parser.vault_path"]).name}
+                vaults.append(cur)
+                by_key[cur_key] = cur
+            cur["settings"] = snap
+            cur["last_used"] = time.strftime("%Y-%m-%d %H:%M")
+        # 2. restore (or scaffold) the target's state
+        tgt = by_key.get(tgt_key)
+        scaffolded = False
+        if tgt is None or not tgt.get("settings"):
+            slug = re.sub(r"[^\w\-]+", "_", target.name).strip("_").lower() or "vault"
+            chroma_root = Path(snap["paths.chroma_dir"]).parent
+            settings = {
+                "parser.vault_path": str(target).replace("\\", "/"),
+                "paths.chunks_file": f"data/vaults/{slug}/chunks.jsonl",
+                "paths.chroma_dir": (chroma_root / f"vault_{slug}" / "chroma_db"
+                                     ).as_posix(),
+                "paths.bm25_index": (chroma_root / f"vault_{slug}" / "bm25_index.pkl"
+                                     ).as_posix(),
+                "paths.collection_name": snap["paths.collection_name"] or "obsidian_vault",
+                "webui.inbox_dir": snap["webui.inbox_dir"] or "Inbox",
+            }
+            scaffolded = True
+            if tgt is None:
+                tgt = {"path": str(target), "label": body.label or target.name}
+                vaults.append(tgt)
+            tgt["settings"] = settings
+        if body.label:
+            tgt["label"] = body.label
+        tgt["last_used"] = time.strftime("%Y-%m-%d %H:%M")
+        try:
+            written = _persist_section_keys(ROOT / "config.yaml", tgt["settings"])
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        _save_vaults(vaults)
+
+    if scaffolded:
+        Path(tgt["settings"]["paths.chunks_file"]).parent.mkdir(
+            parents=True, exist_ok=True)
+    return {"ok": True, "written": written, "scaffolded": scaffolded,
+            "note": ("New vault: empty per-vault indexes were scaffolded — "
+                     "ingest to fill them. " if scaffolded else
+                     "Restored this vault's last-known settings. ")
+                    + "Restart :8051 + :8052 to apply."}
+
+
+@app.post("/api/vaults/forget")
+def vaults_forget(body: VaultForgetIn) -> dict:
+    """Drop a vault from the registry (files/indexes on disk untouched).
+    The currently active vault cannot be forgotten."""
+    snap = _fresh_settings_snapshot()
+    if _norm_vault(body.path) == _norm_vault(snap["parser.vault_path"]):
+        return JSONResponse({"ok": False,
+                             "error": "that vault is currently active"},
+                            status_code=400)
+    with _vault_lock:
+        vaults = _load_vaults()
+        kept = [v for v in vaults if _norm_vault(v["path"]) != _norm_vault(body.path)]
+        if len(kept) == len(vaults):
+            return JSONResponse({"ok": False, "error": "not in the registry"},
+                                status_code=404)
+        _save_vaults(kept)
+    return {"ok": True, "forgotten": body.path}
+
+
 # ---- service restart lane (:8051) ----
 
 def _rag_port() -> int:
@@ -1628,7 +1845,7 @@ def service_restart() -> dict:
 def api_schema() -> dict:
     """
     Machine-readable capability map of the MANAGEMENT console, so an agent
-    (Claude Code) can drive corpus operations over JSON the same way
+    (the local agent / Claude Code) can drive corpus operations over JSON the same way
     it drives the query API (:8051) — no browser, no page snapshots.
 
     Every operation carries a `permission` tier the calling agent MUST honor:
@@ -1731,10 +1948,39 @@ def api_schema() -> dict:
                 "purpose": "list staged .md conversions in <inbox>/_converted"},
             "POST /api/import/fetch": {
                 "permission": "mutating",
-                "purpose": "queue fetch_web: pull http(s) URLs -> markdown "
-                           "(markitdown) into _converted. Nothing indexed.",
+                "purpose": "queue fetch_web: pull http(s) URLs into _converted "
+                           "as markdown (markitdown) or as a printed PDF of "
+                           "the rendered page (headless Chromium — keeps "
+                           "LaTeX/tables/code as the site shows them). "
+                           "Nothing indexed.",
                 "body": {"urls": "list[str]",
-                         "backend": "auto|requests|crawl4ai|scrapling"}},
+                         "backend": "auto|requests|crawl4ai|scrapling",
+                         "format": "md|pdf"}},
+            "GET /api/import/file": {
+                "permission": "read",
+                "purpose": "serve one staged/inbox .md or .pdf for preview "
+                           "(pdf shows page numbers -> pick OCR page ranges)",
+                "query": {"name": "plain filename", "where": "converted|inbox"}},
+            "GET /api/browse": {
+                "permission": "read",
+                "purpose": "one level of the local filesystem, folders only "
+                           "('' = drives) — powers the Settings path pickers"},
+            "GET /api/vaults": {
+                "permission": "read",
+                "purpose": "vault registry (Obsidian-style): every vault ever "
+                           "opened, with labels + which one is active"},
+            "POST /api/vaults/switch": {
+                "permission": "mutating",
+                "purpose": "snapshot the current vault's settings, restore the "
+                           "target's last-known ones (or scaffold a fresh "
+                           "per-vault index trio for a new vault), persist to "
+                           "config.yaml. Restart :8051 + :8052 after.",
+                "body": {"path": "vault root folder", "label": "str?"}},
+            "POST /api/vaults/forget": {
+                "permission": "mutating",
+                "purpose": "drop a non-active vault from the registry "
+                           "(nothing on disk is touched)",
+                "body": {"path": "registry entry"}},
             "POST /api/import/convert": {
                 "permission": "mutating",
                 "purpose": "queue convert_files: markitdown inbox files to .md "
@@ -1832,8 +2078,9 @@ def api_schema() -> dict:
             "fetch_web": {
                 "permission": "mutating",
                 "params": {"urls": "list[str] (http/https only)",
-                           "backend": "auto|requests|crawl4ai|scrapling"},
-                "note": "writes .md to <inbox>/_converted; indexes nothing"},
+                           "backend": "auto|requests|crawl4ai|scrapling",
+                           "format": "md|pdf (pdf = Chromium page print)"},
+                "note": "writes .md/.pdf to <inbox>/_converted; indexes nothing"},
             "convert_files": {
                 "permission": "mutating",
                 "params": {"files": "list[str] (inbox filenames)",

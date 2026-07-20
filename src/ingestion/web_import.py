@@ -125,12 +125,40 @@ def fetch_one(url: str, backend: str = "auto") -> tuple[bytes, str]:
     return _fetch_requests(url)
 
 
-def fetch_urls(urls: list[str], dest_dir: Path, backend: str = "auto") -> list[dict]:
-    """Fetch every URL and write one .md per page into dest_dir.
-    Returns per-URL result dicts; a failed URL reports its error and the run
-    continues (partial success is the useful behavior for link batches)."""
+def _print_pdf(url: str, dest: Path) -> None:
+    """Render the live page in headless Chromium and print it to PDF.
+    Keeps the site's own rendering — LaTeX (KaTeX/MathJax), tables, syntax-
+    highlighted code — which markdown conversion necessarily flattens."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as e:
+        raise RuntimeError(
+            "PDF fetch needs playwright — pip install playwright && "
+            "python -m playwright install chromium") from e
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        try:
+            page = browser.new_page(viewport={"width": 1280, "height": 1024})
+            page.goto(url, wait_until="networkidle", timeout=90_000)
+            page.wait_for_timeout(1500)       # late math/highlight rendering
+            page.pdf(path=str(dest), format="A4", print_background=True,
+                     margin={"top": "14mm", "bottom": "14mm",
+                             "left": "12mm", "right": "12mm"})
+        finally:
+            browser.close()
+
+
+def fetch_urls(urls: list[str], dest_dir: Path, backend: str = "auto",
+               fmt: str = "md") -> list[dict]:
+    """Fetch every URL and write one .md (or printed .pdf) per page into
+    dest_dir. Returns per-URL result dicts; a failed URL reports its error and
+    the run continues (partial success is the useful behavior for link
+    batches). fmt="pdf" prints the rendered page via headless Chromium —
+    URLs that ARE a PDF are saved as-is either way in that mode."""
+    if fmt not in ("md", "pdf"):
+        raise ValueError("fmt must be md|pdf")
     dest_dir.mkdir(parents=True, exist_ok=True)
-    md = _markitdown()
+    md = _markitdown() if fmt == "md" else None
     out: list[dict] = []
     for url in urls:
         url = url.strip()
@@ -141,6 +169,19 @@ def fetch_urls(urls: list[str], dest_dir: Path, backend: str = "auto") -> list[d
                         "error": "only http(s) URLs are fetched"})
             continue
         try:
+            if fmt == "pdf":
+                stem = _slug_for(url)
+                dest = _unique(dest_dir, stem, ".pdf")
+                if url.lower().split("?")[0].endswith(".pdf"):
+                    payload, _ = _fetch_requests(url)   # already a PDF
+                    dest.write_bytes(payload)
+                else:
+                    _print_pdf(url, dest)
+                out.append({"url": url, "ok": True, "file": dest.name,
+                            "bytes": dest.stat().st_size})
+                log.info("printed %s -> %s (%d bytes)", url, dest.name,
+                         dest.stat().st_size)
+                continue
             payload, ctype = fetch_one(url, backend)
             stem = _slug_for(url)
             if "markdown" in ctype:

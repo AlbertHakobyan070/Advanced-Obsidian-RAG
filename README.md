@@ -102,8 +102,14 @@ so results are always explainable.
 
 | Surface | Port | What it's for |
 |---|---|---|
-| **Query API** (`serve_api`) | `:8051` | Warm FastAPI endpoint — `/query`, `/search`, `/config`. For agents, scripts, bots. |
-| **Corpus Ledger console** (`manage_api`) | `:8052` | Visual management: Query, Documents (search / filter / retag / delete), Vault browser, Ingest, Jobs, and an **Info** tab that diagrams the whole pipeline in-app. |
+| **Query API** (`serve_api`) | `:8051` | Warm FastAPI endpoint — `/query`, `/search`, `/config`, `/history` (recent calls with their knobs + retrieval echo, for agents iterating on hyperparameters). |
+| **Corpus Ledger console** (`manage_api`) | `:8052` | Visual management: Query (rendered md + LaTeX answers *and* sources), Documents (search / filter / retag / delete), Vault browser, Ingest (per-file settings, web import as `.md` or printed `.pdf`, previews), Jobs, Settings (theme presets, vault switcher, config surface with folder pickers), and an **Info** tab that diagrams the whole pipeline in-app. |
+
+The console's import lane pulls online sources straight into the corpus pipeline:
+fetch a URL as **markdown** (via `markitdown`, with `crawl4ai` / `scrapling` /
+`requests` backends) or as a **printed PDF** of the fully rendered page (headless
+Chromium — LaTeX, tables and highlighted code preserved), preview the result (PDF
+page numbers guide OCR-range picking), then promote it into the normal ingest flow.
 
 ## Evaluation — example setup
 

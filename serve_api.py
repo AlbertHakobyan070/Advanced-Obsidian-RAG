@@ -42,7 +42,8 @@ Defaults (live-update the warm pipeline; persist=true also writes config.yaml):
 Port 8051 by default — pick any free port (8000 often collides with Jupyter)."""
 from __future__ import annotations
 
-from collections import Counter
+import time
+from collections import Counter, deque
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -56,6 +57,28 @@ from src.utils.config_loader import load_config, persist_config_values
 
 # Holds the warm pipeline; built once in the lifespan handler below.
 _STATE: dict = {}
+
+# Rolling call history (in-memory, newest first via GET /history). Lets an
+# agent see which knob combinations were tried recently — presets, pool
+# sizes, expansion toggles — and what each run actually did (the retrieval
+# echo), so it can tune hyperparameters instead of guessing blind.
+_HISTORY: deque = deque(maxlen=50)
+
+
+def _record_history(endpoint: str, body, retrieval: dict | None,
+                    confidence: str, n_sources: int, t0: float) -> None:
+    knobs = {k: v for k, v in body.model_dump().items()
+             if v is not None and k not in ("q", "include_text", "max_sources")}
+    _HISTORY.appendleft({
+        "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "endpoint": endpoint,
+        "q": body.q,
+        "knobs": knobs,
+        "retrieval": retrieval or {},
+        "confidence": confidence,
+        "sources": n_sources,
+        "ms": int((time.time() - t0) * 1000),
+    })
 
 
 @asynccontextmanager
@@ -287,6 +310,7 @@ def set_config(body: ConfigIn) -> dict:
 @app.post("/query", response_model=QueryOut)
 def query(body: QueryIn) -> QueryOut:
     rag = _rag()
+    t0 = time.time()
 
     # ---- retrieval-only fast path: no LLM, works with the proxy down ----
     if body.retrieve_only:
@@ -303,6 +327,8 @@ def query(body: QueryIn) -> QueryOut:
             return QueryOut(answer=f"Bad request: {e.args[0]}",
                             confidence="ERROR", citations=[], sources=[])
         inc = 1200 if body.include_text is None else body.include_text
+        _record_history("/query(retrieve_only)", body, info,
+                        "RETRIEVE_ONLY", len(docs), t0)
         return QueryOut(
             answer="",
             confidence="RETRIEVE_ONLY",
@@ -343,6 +369,8 @@ def query(body: QueryIn) -> QueryOut:
         )
 
     citations = [CitationOut(n=c.number, label=c.source_label) for c in ans.citations]
+    _record_history("/query", body, ans.retrieval, ans.confidence,
+                    len(ans.sources), t0)
     return QueryOut(
         answer=ans.text,
         confidence=ans.confidence,
@@ -362,6 +390,7 @@ def search(body: SearchIn) -> dict:
     and reason over them directly. Zero dependency on the generation proxy.
     """
     rag = _rag()
+    t0 = time.time()
     try:
         docs, info = rag.search(
             body.q, preset=body.preset, top_k=body.top_k,
@@ -373,11 +402,27 @@ def search(body: SearchIn) -> dict:
         )
     except (KeyError, ValueError) as e:
         return {"error": e.args[0], "results": [], "retrieval": {}}
+    _record_history("/search", body, info, "RETRIEVE_ONLY", len(docs), t0)
     results = _sources_out(docs, [], body.include_text, body.max_sources)
     return {
         "results": [r.model_dump() for r in results],
         "retrieval": info,
     }
+
+
+@app.get("/history")
+def history(limit: int = 20) -> dict:
+    """
+    The last calls to /search and /query (newest first, in-memory, resets on
+    restart): question, the knobs the caller sent, the retrieval echo of what
+    actually ran, confidence and timing. An agent tuning hyperparameters reads
+    this instead of re-deriving what it already tried.
+    """
+    return {"calls": list(_HISTORY)[: max(1, min(limit, 50))],
+            "note": "in-memory since the last :8051 restart; knobs shows only "
+                    "what the caller explicitly set — everything else ran on "
+                    "preset/config defaults (see retrieval for the effective "
+                    "values)."}
 
 
 @app.get("/omnisearch")
@@ -491,7 +536,15 @@ def schema() -> dict:
             },
             "GET/POST /config": "read / live-update retrieval defaults "
                                 "(persist=true also rewrites config.yaml)",
+            "GET /history?limit=": "last /search + /query calls (newest "
+                                   "first): question, caller knobs, retrieval "
+                                   "echo, confidence, ms. In-memory; use it "
+                                   "to iterate on knob settings.",
         },
+        "ingestion": "this API is read-only over the corpus. Web fetch "
+                     "(URL -> staged .md or printed .pdf), file conversion, "
+                     "ingest and index jobs live on the management console "
+                     "(:8052) — GET :8052/api/schema for that capability map.",
         "presets": {name: dict(vals) for name, vals in (rag.presets or {}).items()},
         "auto_preset": "the 'code' preset self-applies on code-intent queries",
         "scope_routing": "queries naming a domain ('my statistics homework') or "
