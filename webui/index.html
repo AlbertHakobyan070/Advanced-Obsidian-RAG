@@ -67,7 +67,9 @@ body.descs .desc{display:block}
 html{background:var(--bg)}
 /* one glow, fixed to the viewport, never repeated — the old scrolling
    radial-gradient tiled itself every viewport height (visible banding) */
-body{background:var(--bg);color:var(--ink);font:14px/1.55 var(--body);min-height:100vh;
+/* background-color as a LONGHAND: inside the `background` shorthand with a
+   var(), Chromium wedges the color transition mid-flight on theme switch */
+body{background-color:var(--bg);color:var(--ink);font:14px/1.55 var(--body);min-height:100vh;
   background-image:radial-gradient(ellipse 80% 60% at 50% -12%,var(--glow),transparent 70%);
   background-repeat:no-repeat;background-attachment:fixed}
 body,.panel,.stat,button.btn,input,select,textarea,pre.log{
