@@ -172,3 +172,22 @@ def test_lexical_reranker_orders_by_term_coverage():
     rr_none = Reranker(model_name="unused", top_k=2, mode="none")
     assert [d.text for d in rr_none.rerank("q", docs)] == \
         [docs[0].text, docs[1].text]
+
+
+def test_persist_section_keys_section_aware(tmp_path):
+    from manage_api import _persist_section_keys
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        'parser:\n  vault_path: "old/path"   # comment kept\n  chunking: heading\n'
+        'generation:\n  model: auto\n  base_url: "http://localhost:3001/v1"\n'
+        'retrieval:\n  rerank_mode: cross_encoder\n', encoding="utf-8")
+    written = _persist_section_keys(cfg, {"parser.vault_path": "A:/new vault",
+                                          "retrieval.rerank_mode": "lexical"})
+    text = cfg.read_text(encoding="utf-8")
+    assert set(written) == {"parser.vault_path", "retrieval.rerank_mode"}
+    # value swapped in place, quoting + trailing comment preserved
+    assert 'vault_path: "A:/new vault"   # comment kept' in text
+    assert "rerank_mode: lexical" in text
+    assert "model: auto" in text                      # other sections untouched
+    with pytest.raises(ValueError):                   # unknown leaf -> refuse
+        _persist_section_keys(cfg, {"generation.nope": "x"})

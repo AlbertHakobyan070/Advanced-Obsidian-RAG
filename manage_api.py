@@ -1377,15 +1377,144 @@ def vault_search(q: str, limit: int = 60) -> dict:
     return {"rows": rows, "truncated": False}
 
 
+# Editable config surface for the Settings tab. Maps dotted key -> spec.
+# Everything here is persisted into config.yaml IN PLACE (comments preserved);
+# none of it hot-applies — the response says which services need a restart.
+EDITABLE_SETTINGS: dict[str, dict] = {
+    "parser.vault_path":            {"kind": "dir",  "restart": ":8051 + :8052",
+                                     "label": "Obsidian vault root"},
+    "paths.chunks_file":            {"kind": "str",  "restart": ":8052",
+                                     "label": "Markdown chunks JSONL (data dir anchor)"},
+    "paths.chroma_dir":             {"kind": "str",  "restart": ":8051 + :8052",
+                                     "label": "ChromaDB directory (dense vectors)"},
+    "paths.bm25_index":             {"kind": "str",  "restart": ":8051 + :8052",
+                                     "label": "BM25 index pickle (sparse)"},
+    "paths.collection_name":        {"kind": "str",  "restart": ":8051 + :8052",
+                                     "label": "Chroma collection name"},
+    "embedding.local_model":        {"kind": "str",  "restart": ":8051",
+                                     "label": "Embedding model (HF id or local path)"},
+    "retrieval.cross_encoder_model": {"kind": "str", "restart": ":8051",
+                                     "label": "Cross-encoder rerank model"},
+    "retrieval.rerank_mode":        {"kind": "enum", "restart": ":8051",
+                                     "values": ["cross_encoder", "lexical", "none"],
+                                     "label": "Default rerank method"},
+    "parser.chunking":              {"kind": "enum", "restart": ":8052",
+                                     "values": ["heading", "fixed", "document", "none"],
+                                     "label": "Default chunking strategy"},
+    "generation.base_url":          {"kind": "str",  "restart": ":8051",
+                                     "label": "Generation endpoint (OpenAI-compatible)"},
+    "generation.model":             {"kind": "str",  "restart": ":8051",
+                                     "label": "Generation model id"},
+    "webui.inbox_dir":              {"kind": "str",  "restart": ":8052",
+                                     "label": "Inbox folder (vault-relative)"},
+}
+
+
+def _persist_section_keys(cfg_path: Path, changes: dict[str, Any]) -> list[str]:
+    """Rewrite `section.leaf` values in config.yaml IN PLACE, preserving
+    comments and layout. Section-aware (unlike persist_config_values) so keys
+    that repeat across sections — vault_path, model — stay unambiguous: the
+    leaf must appear exactly once WITHIN its top-level section block."""
+    text = cfg_path.read_text(encoding="utf-8")
+    lines = text.split("\n")
+    written: list[str] = []
+    for dotted, value in changes.items():
+        section, _, leaf = dotted.partition(".")
+        sval = ("true" if value else "false") if isinstance(value, bool) else str(value)
+        if any(c in sval for c in "\r\n"):
+            raise ValueError(f"{dotted}: newlines not allowed")
+        # quote strings that YAML would mangle (paths with ':' etc.)
+        if not re.fullmatch(r"[\w.\-/]+", sval):
+            sval = '"' + sval.replace('"', '\\"') + '"'
+        sec_re = re.compile(rf"^{re.escape(section)}\s*:\s*(#.*)?$")
+        key_re = re.compile(
+            rf"^(?P<pre>[ \t]+{re.escape(leaf)}[ \t]*:[ \t]*)(?P<val>[^#\r\n]*?)(?P<post>[ \t]*(?:#[^\r\n]*)?)$")
+        hits = []
+        in_sec = False
+        for i, ln in enumerate(lines):
+            if sec_re.match(ln):
+                in_sec = True
+                continue
+            if in_sec and ln and not ln[0] in " \t#":
+                in_sec = False               # next top-level key ends the block
+            if in_sec:
+                m = key_re.match(ln)
+                if m:
+                    hits.append((i, m))
+        if len(hits) != 1:
+            raise ValueError(f"{dotted}: found {len(hits)} matches in "
+                             f"{cfg_path.name}; refusing to rewrite ambiguously")
+        i, m = hits[0]
+        lines[i] = m.group("pre") + sval + m.group("post")
+        written.append(dotted)
+    if written:
+        cfg_path.write_text("\n".join(lines), encoding="utf-8")
+    return written
+
+
+class SettingsIn(BaseModel):
+    changes: dict[str, Any] = Field(min_length=1)
+
+
 @app.get("/api/settings")
 def settings() -> dict:
+    # Re-read config.yaml fresh: after a save (no restart yet) the boot-time
+    # CFG is stale, and the Settings tab must show what's ON DISK.
+    from src.utils.config_loader import load_config as _load
+    disk_cfg = _load()
+    editable = {}
+    for key, spec in EDITABLE_SETTINGS.items():
+        editable[key] = {**spec, "value": disk_cfg.get(key)}
     return {
         "rag_api": RAG_API,
         "vault_path": str(CFG.get("pdf.vault_path") or CFG.get("parser.vault_path")),
         "inbox_dir": CFG.get("webui.inbox_dir", "00 – AUA_DS/Other/Inbox"),
         "jsonl_files": [p.name for p in chunk_files()],
         "ocr_engines": ["auto", "tesseract", "vlm", "none"],
+        "config_path": str(ROOT / "config.yaml"),
+        "editable": editable,
     }
+
+
+@app.post("/api/settings")
+def settings_update(body: SettingsIn) -> dict:
+    """Persist whitelisted config values into config.yaml (comment-preserving,
+    section-aware). Nothing hot-applies: the response lists which services to
+    restart. Vault path must exist; enums are validated; unknown keys 400."""
+    changes: dict[str, Any] = {}
+    restarts: set[str] = set()
+    for key, value in body.changes.items():
+        spec = EDITABLE_SETTINGS.get(key)
+        if not spec:
+            return JSONResponse({"ok": False, "error": f"unknown setting {key!r}"},
+                                status_code=400)
+        sval = str(value).strip()
+        if not sval:
+            return JSONResponse({"ok": False, "error": f"{key}: empty value"},
+                                status_code=400)
+        if spec["kind"] == "enum" and sval not in spec["values"]:
+            return JSONResponse(
+                {"ok": False,
+                 "error": f"{key} must be one of {spec['values']}"}, status_code=400)
+        if spec["kind"] == "dir" and not Path(sval).is_dir():
+            return JSONResponse(
+                {"ok": False,
+                 "error": f"{key}: directory does not exist: {sval}"}, status_code=400)
+        # No boot-time-CFG "unchanged" skip here: CFG goes stale after a save
+        # without a restart, and rewriting an identical value is harmless.
+        changes[key] = sval
+        restarts.add(spec["restart"])
+    if not changes:
+        return {"ok": True, "written": [], "note": "nothing changed"}
+    try:
+        written = _persist_section_keys(ROOT / "config.yaml", changes)
+    except ValueError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+    return {"ok": True, "written": written,
+            "note": "Saved to config.yaml. Restart to apply: "
+                    + "; ".join(sorted(restarts))
+                    + ". Changing the embedding model REQUIRES a full re-embed "
+                      "of the corpus (main.py index) before search works again."}
 
 
 @app.get("/api/schema")
@@ -1509,6 +1638,18 @@ def api_schema() -> dict:
                 "purpose": "move _converted .md files into the inbox root so "
                            "the ingest lanes can pick them up",
                 "body": {"names": "list[str]"}},
+            "GET /api/settings": {
+                "permission": "read",
+                "purpose": "runtime info + the editable config surface (paths, "
+                           "models, defaults) with current values"},
+            "POST /api/settings": {
+                "permission": "mutating",
+                "purpose": "persist whitelisted config values into config.yaml "
+                           "(comment-preserving). NOTHING hot-applies — the "
+                           "response says which services to restart. Changing "
+                           "the embedding model needs a FULL RE-EMBED (ask "
+                           "the operator).",
+                "body": {"changes": "{dotted.key: value} from GET editable"}},
             "POST /api/jobs": {
                 "permission": "mutating",
                 "purpose": "queue a job. Kinds + params under `job_kinds` below.",
