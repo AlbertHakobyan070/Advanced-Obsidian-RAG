@@ -119,9 +119,13 @@ Open **http://127.0.0.1:8052**. Tabs:
 
 Ops niceties: the header's **⟳ restart** button relaunches the warm query API in one
 click (and `webui.auto_restart_rag` in Settings does it automatically after every
-successful index-changing job); the Ledger shows a **dense = sparse health verdict**
-(the BM25 count comes from a sidecar written at build time — no giant unpickle); and
-the Query tab keeps a restorable **history** of your last 20 queries with their knobs.
+successful index-changing job); the Ledger shows an **Index health** card — ✓ in sync
+when the dense (Chroma) and sparse (BM25) indexes hold the same corpus, ✗ drifted with
+the fix spelled out (the BM25 count comes from a sidecar written at build time — no
+giant unpickle); and the Query tab keeps a restorable **history** of your last 20
+queries with their knobs. Themes are also **importable/exportable** as CSS-variable
+blocks from Settings → Appearance — export the active theme as a template, edit the
+values, paste it back as the `custom` theme.
 
 ## For agents
 

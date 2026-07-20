@@ -76,6 +76,10 @@ h1,h2,h3{font-family:var(--disp);font-weight:600;letter-spacing:.01em}
 /* header */
 header{border-bottom:1px solid var(--line);padding:18px 0 14px;margin-bottom:0}
 .hrow{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap}
+/* right-side header controls: one centered group, equal heights */
+.hctrl{margin-left:auto;display:flex;align-items:center;gap:10px;flex-wrap:wrap;align-self:center}
+.hctrl .st{font:12px var(--mono);color:var(--ink-dim);display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.hctrl .btn{height:30px;display:inline-flex;align-items:center}
 .wordmark{font-family:var(--disp);font-size:22px;font-weight:600}
 .wordmark em{font-style:normal;color:var(--amber)}
 .sub{color:var(--ink-dim);font-size:12.5px}
@@ -208,6 +212,20 @@ pre.log{background:var(--log-bg);border:1px solid var(--line);border-radius:var(
 .wordmark .mark{fill:var(--amber);vertical-align:-2px;margin-right:7px}
 #theme-toggle{padding:4px 10px;font-size:12px;white-space:nowrap}
 .stat{transition:transform .15s ease,border-color .15s ease,background-color .25s ease}
+/* balanced stat shelf: all cards share one responsive row */
+#stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));gap:14px}
+/* micro-motion: buttons lift on hover, settle on press; panels rise in softly */
+button.btn{transition:background-color .18s ease,color .18s ease,border-color .18s ease,transform .12s ease,box-shadow .18s ease}
+button.btn:hover:not(:disabled){transform:translateY(-1px)}
+button.btn:active:not(:disabled){transform:translateY(0)}
+section.on .panel{animation:rise .28s ease both}
+section.on .panel:nth-of-type(2),section.on .grid .panel:nth-child(2){animation-delay:.05s}
+section.on .panel:nth-of-type(3){animation-delay:.09s}
+details#customjob-details summary{transition:color .15s ease}
+details#customjob-details summary:hover{color:var(--amber)}
+@media (prefers-reduced-motion:reduce){
+  button.btn,section.on .panel{animation:none;transition:none;transform:none}
+}
 .stat:hover{transform:translateY(-2px);border-color:var(--amber-dim)}
 .spine .n .pct{color:var(--ink-faint);font-size:10px;margin-left:4px}
 .scorebar{height:3px;background:var(--panel-2);border:1px solid var(--line);border-radius:2px;margin-top:7px;overflow:hidden}
@@ -228,13 +246,13 @@ pre.log{background:var(--log-bg);border:1px solid var(--line);border-radius:var(
   <div class="hrow">
     <div class="wordmark"><svg class="mark" viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><rect x="3" y="3" width="5" height="18" rx="1"/><rect x="10" y="3" width="5" height="18" rx="1" opacity=".55"/><rect x="17" y="6" width="4" height="15" rx="1" opacity=".3"/></svg>Corpus <em>Ledger</em></div>
     <div class="sub">Personal RAG — management console · :8052</div>
-    <div class="statuses">
-      <span><span class="dot" id="dot-manage"></span>manage</span>
-      <span><span class="dot" id="dot-rag"></span>query api :8051</span>
+    <div class="hctrl">
+      <span class="st"><span class="dot" id="dot-manage"></span>manage</span>
+      <span class="st"><span class="dot" id="dot-rag"></span>query api :8051</span>
       <button class="btn" id="rag-restart" title="Kill + relaunch the warm query API so it serves the current indexes. Ready again in ~1–3 min (models + indexes reload). Settings has an auto-restart-after-index-jobs toggle.">⟳ restart :8051</button>
+      <button class="btn" id="desc-toggle" title="Description mode: show inline explainers under the Ledger, Ingest and Query sections">ⓘ descriptions</button>
+      <button class="btn" id="theme-toggle" aria-label="Cycle themes"></button>
     </div>
-    <button class="btn" id="desc-toggle" title="Description mode: show inline explainers under every Ingest / Query section">ⓘ descriptions</button>
-    <button class="btn" id="theme-toggle" aria-label="Cycle themes"></button>
   </div>
   <nav id="nav">
     <button data-tab="ledger" class="on">Ledger</button>
@@ -256,6 +274,7 @@ pre.log{background:var(--log-bg);border:1px solid var(--line);border-radius:var(
     <div class="stat"><div class="k">Chroma vectors</div><div class="v"><div class="skel" style="width:60%"></div></div></div>
     <div class="stat"><div class="k">On disk</div><div class="v"><div class="skel" style="width:40%"></div></div></div>
   </div>
+  <div class="desc" style="margin-top:12px"><b>How to read this shelf:</b> the <b>JSONL chunk files are the source of truth</b> — everything else is derived from them. <b>Chroma vectors</b> = the dense (semantic) index; <b>Index health</b> compares it against the sparse (BM25 keyword) index recorded at its last build — <b>✓ in sync</b> means both indexes describe the same corpus, <b>✗ drifted</b> means one moved without the other (fix: <i>Rebuild BM25</i> in Ingest → Quick actions, then restart :8051). The JSONL count normally sits a few chunks ABOVE the vector count — known duplicates are skipped at embedding time, which is expected, not drift.</div>
   <div class="grid g2">
     <div class="panel">
       <h2>Domains</h2>
@@ -286,7 +305,8 @@ pre.log{background:var(--log-bg);border:1px solid var(--line);border-radius:var(
       <input type="file" id="filepick" multiple style="display:none">
       <div id="upload-busy" style="display:none;margin-top:10px"><svg class="reel" viewBox="0 0 24 24"><circle class="b" cx="12" cy="12" r="9"/><circle class="a" cx="12" cy="12" r="6"/></svg>Uploading…</div>
       <table style="margin-top:12px"><tbody id="inbox-rows"><tr><td class="empty">Inbox is empty.</td></tr></tbody></table>
-      <div class="row" style="margin-top:10px">
+      <label class="f" style="margin-top:14px">Default-lane batch settings <span class="hint" style="margin:0;display:inline;text-transform:none;letter-spacing:0">(apply to every PDF the default lane ingests)</span></label>
+      <div class="row" style="margin-top:6px">
         <input id="inbox-domain" placeholder="domain (opt): swe / ml / nlp…" style="width:190px" title="Stamped on every chunk of this batch — feeds domain scope routing. Inbox files have no course folder, so they land 'general' otherwise.">
         <input id="inbox-tags" placeholder="tags (opt): agentic, python" style="flex:1;min-width:150px" title="Comma-separated. Stamped on every chunk — searchable and boosted at retrieval when a tag appears in the query.">
         <select id="inbox-chunking" style="width:190px" title="How OVERSIZED sections are split. heading = paragraph packing (default). fixed = strict sliding window — for scanned/OCR PDFs whose paragraph structure is noise. document = element-aware: code blocks, tables and lists are never cut internally. none = no splitting (whole section = one chunk; embeddings truncate very long text).">
@@ -294,7 +314,7 @@ pre.log{background:var(--log-bg);border:1px solid var(--line);border-radius:var(
       </div>
       <div class="row" style="margin-top:10px">
         <button class="btn primary" id="btn-ingest-inbox">Ingest inbox now</button>
-        <span class="hint" style="margin:0">server-side lane: dup-check → ingest (archives to <span class="mono">_ingested</span>) → append</span>
+        <span class="hint" style="margin:0">dup-check → ingest (archives to <span class="mono">_ingested</span>) → append</span>
       </div>
     </div>
     <div class="panel">
@@ -376,6 +396,7 @@ pre.log{background:var(--log-bg);border:1px solid var(--line);border-radius:var(
       <option value="recalibrate">recalibrate_courses</option>
       <option value="eval">eval</option>
     </select>
+    <div class="hint" id="job-kind-hint" style="margin:6px 0 0"></div>
 
     <div id="jf-ingest_pdfs" class="jform">
       <div class="grid g2">
@@ -560,6 +581,15 @@ pre.log{background:var(--log-bg);border:1px solid var(--line);border-radius:var(
         <option value="mint-light">theme: Material mint light</option>
       </select>
       <label class="chk" title="Show inline explainers under every Ingest / Query section"><input type="checkbox" id="set-descs">description mode</label>
+    </div>
+    <div style="margin-top:16px"><label class="f">Custom theme (CSS variables) — import / export</label>
+      <textarea id="thm-css" rows="6" style="width:100%;font-family:var(--mono);font-size:12px;margin-top:6px" spellcheck="false" placeholder='[data-theme="custom"]{&#10;  --bg:#101010; --panel:#181818; --amber:#E8A33D; …&#10;}'></textarea>
+      <div class="row" style="margin-top:8px">
+        <button class="btn" id="thm-export" title="Write the ACTIVE theme's variables into the box (and clipboard) as a ready-to-edit CSS block">Export current → CSS</button>
+        <button class="btn primary" id="thm-apply" title="Save the pasted variables as the 'custom' theme (stored in this browser) and switch to it">Apply as custom theme</button>
+        <button class="btn" id="thm-remove" title="Delete the stored custom theme and fall back to Ledger dark">Remove custom</button>
+      </div>
+      <div class="hint" style="margin-top:6px">Paste <span class="mono">--var: value;</span> pairs, with or without the <span class="mono">[data-theme="custom"]{…}</span> wrapper — Export shows every variable name the console uses. Variables you omit inherit from Ledger dark. The custom theme joins the header cycle and the select above.</div>
     </div>
   </div>
 
@@ -1020,15 +1050,20 @@ async function loadOverview(){
     $("#dot-manage").className="dot ok";
     $("#dot-rag").className="dot "+(o.rag_api.ready?"ok":"bad");
     const denseN=typeof o.chroma_count==="number"?o.chroma_count:null;
-    const sparseHtml=o.sparse_count==null
-      ?`<div class="v">?<br><small>next rebuild writes the count sidecar</small></div>`
-      :`<div class="v">${fmt(o.sparse_count)}<br><small>${denseN==null?"dense unknown"
-        :(denseN===o.sparse_count?"= dense ✓":`≠ dense (${fmt(denseN)}) — rebuild BM25 + restart :8051`)}</small></div>`;
+    let healthHtml;
+    if(o.sparse_count==null)
+      healthHtml=`<div class="v" style="font-size:20px">unknown<br><small>the next BM25 rebuild records its count and this card starts checking</small></div>`;
+    else if(denseN==null)
+      healthHtml=`<div class="v" style="font-size:20px">unknown<br><small>ChromaDB unavailable — sparse holds ${fmt(o.sparse_count)}</small></div>`;
+    else if(denseN===o.sparse_count)
+      healthHtml=`<div class="v" style="color:var(--green)">✓ in sync<br><small>both indexes hold ${fmt(o.sparse_count)} chunks</small></div>`;
+    else
+      healthHtml=`<div class="v" style="color:var(--red)">✗ drifted<br><small>dense ${fmt(denseN)} vs sparse ${fmt(o.sparse_count)} — run <b>Rebuild BM25</b> (Ingest → Quick actions), then restart :8051</small></div>`;
     $("#stats").innerHTML=`
       <div class="stat"><div class="k">Chunks (JSONL)</div><div class="v">${fmt(o.chunks)}</div></div>
       <div class="stat"><div class="k">Documents</div><div class="v">${fmt(o.files)}</div></div>
       <div class="stat"><div class="k">Chroma vectors</div><div class="v">${fmt(o.chroma_count)}</div></div>
-      <div class="stat"><div class="k">BM25 docs <small>${o.sparse_built?("· "+esc(o.sparse_built.slice(0,10))):""}</small></div>${sparseHtml}</div>
+      <div class="stat" title="Are the two derived indexes telling the same story? Compares the dense (ChromaDB) vector count with the sparse (BM25) document count recorded when the sparse index was last built."><div class="k">Index health <small>${o.sparse_built?("· checked "+esc(o.sparse_built.slice(0,10))):""}</small></div>${healthHtml}</div>
       <div class="stat"><div class="k">On disk</div><div class="v">${gb(o.disk.chroma_db+o.disk.bm25_index+o.disk.jsonl_total)}<br><small>chroma ${gb(o.disk.chroma_db)} · bm25 ${gb(o.disk.bm25_index)}</small></div></div>`;
     const doms=Object.entries(o.by_domain), max=Math.max(...doms.map(d=>d[1]),1);
     const domTotal=doms.reduce((a,d)=>a+d[1],0)||1;
@@ -1244,11 +1279,23 @@ $$("#tab-ingest [data-quick]").forEach(b=>b.onclick=async()=>{
   try{await api("/api/jobs",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(map[q])});
     toast("Job queued — see Jobs tab")}catch(e){toast(e.message,1)}
 });
+const JOB_KIND_HINTS={
+  ingest_pdfs:"Extract + chunk vault PDFs (text layer, OCR fallback) into a JSONL. Scope with include/exclude paths or the Books filters; --pages trims front/back matter. Follow with index --append.",
+  ingest_notebooks:"Parse .ipynb/.py/.R/.Rmd — code cells, markdown cells and (optionally) outputs become chunks. Owns the notebook formats; other languages go to ingest-code.",
+  ingest_code:"Raw source files (.js/.ts/.sql/.go/.java/…) language-fenced into chunks. Agent-project roots are skipped unless an include path names them.",
+  index_append:"Upsert one chunk JSONL into ChromaDB (dense) and auto-rebuild the sparse index. Idempotent by doc_id — safe to re-run.",
+  index_rebuild:"Full dense rebuild from chunks.jsonl — heavy (re-embeds everything). Only for disaster recovery or an embedding-model change.",
+  rebuild_bm25:"Re-derive the sparse BM25 index from ALL chunk JSONLs (no embedding model involved). The fix for an ✗ drifted Index-health card.",
+  recalibrate:"Re-run path-based course detection over existing metadata (no re-embed). Dry-run reports; wet run updates ChromaDB and needs a BM25 rebuild after.",
+  eval:"Score the golden-query suite. retrieval_only runs offline in minutes; full mode needs the generation endpoint up.",
+};
 $("#job-kind").onchange=()=>{const k=$("#job-kind").value;
   $$(".jform").forEach(f=>f.style.display="none");
   const f=$("#jf-"+k);if(f)f.style.display="block";
+  $("#job-kind-hint").textContent=JOB_KIND_HINTS[k]||"";
   if(k==="index_append")$("#p-append-file").innerHTML=state.jsonls.map(j=>`<option>data/${esc(j)}</option>`).join("");
 };
+$("#job-kind-hint").textContent=JOB_KIND_HINTS[$("#job-kind").value]||"";
 $("#btn-queue").onclick=async()=>{
   const k=$("#job-kind").value;let params={};
   if(k==="ingest_pdfs")params={include_path:$("#p-include").value||undefined,exclude_path:$("#p-exclude").value||undefined,
@@ -1581,23 +1628,70 @@ async function runQuery(retrieveOnly){
 $("#q-ask").onclick=()=>runQuery(false);
 $("#q-search").onclick=()=>runQuery(true);
 
-/* ---------- themes (4-way, persisted) + description mode ---------- */
+/* ---------- themes (4 built-in + optional custom) + description mode ---------- */
 const THEMES=[["dark","☾ ledger dark"],["light","☀ ledger light"],
               ["mint-dark","☾ mint dark"],["mint-light","☀ mint light"]];
+const THEME_VARS=["bg","panel","panel-2","line","ink","ink-dim","ink-faint",
+  "amber","amber-dim","blue","red","green","btn-primary-ink","log-bg",
+  "skel-mid","td-line","row-sel","row-hover","bar-border","glow"];
 const themeBtn=$("#theme-toggle");
+function customThemeCss(){return localStorage.getItem("ledger-custom-theme")||""}
+function themeList(){return customThemeCss()?THEMES.concat([["custom","◆ custom"]]):THEMES}
+function injectCustomTheme(){
+  let el=document.getElementById("custom-theme-style");
+  const css=customThemeCss();
+  if(!css){if(el)el.remove();return}
+  if(!el){el=document.createElement("style");el.id="custom-theme-style";document.head.appendChild(el)}
+  el.textContent=css;
+}
+function renderThemeOptions(){
+  const sel=$("#set-theme");if(!sel)return;
+  const cur=document.documentElement.dataset.theme;
+  const names={dark:"Ledger dark (warm paper)",light:"Ledger light (parchment)",
+    "mint-dark":"Material mint dark","mint-light":"Material mint light",custom:"Custom (imported CSS)"};
+  sel.innerHTML=themeList().map(([k])=>`<option value="${k}"${k===cur?" selected":""}>theme: ${names[k]||k}</option>`).join("");
+}
 function applyTheme(t){
-  if(!THEMES.some(([k])=>k===t))t="dark";
+  const L=themeList();
+  if(!L.some(([k])=>k===t))t="dark";
   document.documentElement.dataset.theme=t;
   localStorage.setItem("ledger-theme",t);
-  themeBtn.textContent=THEMES.find(([k])=>k===t)[1];
-  const nxt=THEMES[(THEMES.findIndex(([k])=>k===t)+1)%THEMES.length];
+  themeBtn.textContent=L.find(([k])=>k===t)[1];
+  const nxt=L[(L.findIndex(([k])=>k===t)+1)%L.length];
   themeBtn.title="Theme: click to switch to "+nxt[1].slice(2);
-  const sel=$("#set-theme");if(sel)sel.value=t;
+  renderThemeOptions();
 }
 themeBtn.onclick=()=>{
-  const i=THEMES.findIndex(([k])=>k===document.documentElement.dataset.theme);
-  applyTheme(THEMES[(i+1)%THEMES.length][0]);
+  const L=themeList(),i=L.findIndex(([k])=>k===document.documentElement.dataset.theme);
+  applyTheme(L[(i+1)%L.length][0]);
 };
+function normalizeCustomCss(raw){
+  let body=(raw||"").trim();
+  const m=body.match(/\{([\s\S]*)\}/);           // strip any selector wrapper
+  if(m)body=m[1];
+  if(!/--[\w-]+\s*:/.test(body))return null;
+  return `[data-theme="custom"]{${body}}`;
+}
+$("#thm-export").onclick=()=>{
+  const cs=getComputedStyle(document.documentElement);
+  const css=`[data-theme="custom"]{\n`+THEME_VARS.map(v=>`  --${v}: ${cs.getPropertyValue("--"+v).trim()};`).join("\n")+`\n}`;
+  $("#thm-css").value=css;
+  if(navigator.clipboard)navigator.clipboard.writeText(css).catch(()=>{});
+  toast("Active theme exported to the box (and clipboard)");
+};
+$("#thm-apply").onclick=()=>{
+  const css=normalizeCustomCss($("#thm-css").value);
+  if(!css){toast("No CSS variables found — paste --var: value; pairs (use Export as a template).",1);return}
+  localStorage.setItem("ledger-custom-theme",css);
+  injectCustomTheme();applyTheme("custom");
+  toast("Custom theme applied ✓ (stored in this browser)");
+};
+$("#thm-remove").onclick=()=>{
+  localStorage.removeItem("ledger-custom-theme");
+  if(document.documentElement.dataset.theme==="custom")applyTheme("dark");
+  injectCustomTheme();renderThemeOptions();toast("Custom theme removed");
+};
+injectCustomTheme();
 applyTheme(document.documentElement.dataset.theme||"dark");
 const descBtn=$("#desc-toggle");
 function applyDescs(on){
