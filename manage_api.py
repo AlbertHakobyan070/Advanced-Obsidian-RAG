@@ -468,6 +468,29 @@ def _worker() -> None:
             job.ended = time.time()
             _PROCS.pop(jid, None)
             log.info("job %s %s (rc=%s)", jid, job.status, job.returncode)
+            # Opt-in autopilot: after a SUCCESSFUL index-changing job, restart
+            # the warm query API so it serves the new state. The flag is read
+            # fresh from disk so the Settings toggle applies immediately.
+            if (job.status == "done"
+                    and job.kind in ("index_append", "index_rebuild",
+                                     "rebuild_bm25")):
+                try:
+                    auto = load_config().get("webui.auto_restart_rag", False)
+                except Exception:
+                    auto = False
+                if str(auto).lower() == "true":
+                    try:
+                        info = _restart_rag_api()
+                        msg = (f"\n[manage_api] auto-restarted :{info['port']} "
+                               f"(pid {info['killed_pid']} -> {info['new_pid']}) "
+                               f"— webui.auto_restart_rag is on\n")
+                    except Exception as e:
+                        msg = f"\n[manage_api] auto-restart failed: {e}\n"
+                    try:
+                        with open(job.log_file, "ab") as lf:
+                            lf.write(msg.encode())
+                    except OSError:
+                        pass
 
 
 threading.Thread(target=_worker, daemon=True, name="job-worker").start()
@@ -633,6 +656,18 @@ def overview() -> dict:
     except Exception as e:
         chroma_count = f"unavailable ({type(e).__name__})"
 
+    # Sparse count from the build-time sidecar (never unpickle the payload
+    # here — that's a multi-GB RAM spike on the 16 GB box).
+    sparse_count = sparse_built = None
+    try:
+        meta_p = Path(str(CFG.path("paths.bm25_index")) + ".meta.json")
+        if meta_p.exists():
+            sm = json.loads(meta_p.read_text(encoding="utf-8"))
+            sparse_count = sm.get("count")
+            sparse_built = sm.get("built_at")
+    except Exception:
+        pass
+
     def _size(p: Path) -> int:
         if p.is_file():
             return p.stat().st_size
@@ -654,6 +689,8 @@ def overview() -> dict:
         "by_domain": dict(sorted(by_domain.items(), key=lambda x: -x[1])),
         "by_jsonl": dict(sorted(by_jsonl.items(), key=lambda x: -x[1])),
         "chroma_count": chroma_count,
+        "sparse_count": sparse_count,
+        "sparse_built": sparse_built,
         "disk": {
             "chroma_db": _size(CFG.path("paths.chroma_dir")),
             "bm25_index": _size(CFG.path("paths.bm25_index")),
@@ -1407,6 +1444,9 @@ EDITABLE_SETTINGS: dict[str, dict] = {
                                      "label": "Generation model id"},
     "webui.inbox_dir":              {"kind": "str",  "restart": ":8052",
                                      "label": "Inbox folder (vault-relative)"},
+    "webui.auto_restart_rag":       {"kind": "enum", "restart": "none (read per job)",
+                                     "values": ["true", "false"],
+                                     "label": "Auto-restart :8051 after index-changing jobs"},
 }
 
 
@@ -1515,6 +1555,73 @@ def settings_update(body: SettingsIn) -> dict:
                     + "; ".join(sorted(restarts))
                     + ". Changing the embedding model REQUIRES a full re-embed "
                       "of the corpus (main.py index) before search works again."}
+
+
+# ---- service restart lane (:8051) ----
+
+def _rag_port() -> int:
+    from urllib.parse import urlparse
+    return urlparse(RAG_API).port or 8051
+
+
+def _pid_on_port(port: int) -> int | None:
+    out = subprocess.run(["netstat", "-ano", "-p", "TCP"],
+                         capture_output=True, text=True).stdout
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 5 and parts[3] == "LISTENING" \
+                and parts[1].endswith(f":{port}"):
+            return int(parts[4])
+    return None
+
+
+_RESTART_LOCK = threading.Lock()
+
+
+def _restart_rag_api() -> dict:
+    """Kill whatever listens on the query-API port and relaunch serve_api
+    detached, inheriting THIS console's environment (rag.bat sets the HF
+    cache vars — a console started bare would hand :8051 a broken env, which
+    is exactly the failure the launcher comments warn about). Windows-only:
+    the Docker deployment restarts via the container, not this lane."""
+    if os.name != "nt":
+        raise RuntimeError("service restart is the Windows lane; in Docker "
+                           "restart the container instead")
+    port = _rag_port()
+    with _RESTART_LOCK:
+        old_pid = _pid_on_port(port)
+        if old_pid:
+            subprocess.run(["taskkill", "/PID", str(old_pid), "/F"],
+                           capture_output=True)
+            for _ in range(20):                      # wait for the port to free
+                if _pid_on_port(port) is None:
+                    break
+                time.sleep(0.5)
+        log_path = ROOT / "logs" / "serve_api_8051.out.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        lf = open(log_path, "ab")
+        flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "uvicorn", "serve_api:app",
+             "--host", "127.0.0.1", "--port", str(port)],
+            cwd=str(ROOT), stdout=lf, stderr=subprocess.STDOUT,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+            creationflags=flags)
+    log.info("restarted :%d (old pid %s -> new pid %d)", port, old_pid, proc.pid)
+    return {"port": port, "killed_pid": old_pid, "new_pid": proc.pid}
+
+
+@app.post("/api/service/restart")
+def service_restart() -> dict:
+    """Restart the warm query API. The pipeline reloads indexes + models from
+    scratch, so /health flips ready after ~1–3 minutes."""
+    try:
+        info = _restart_rag_api()
+    except (RuntimeError, OSError) as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+    return {"ok": True, **info,
+            "note": "Warm pipeline reloading — poll /health until ready "
+                    "(~1–3 min; models + both indexes load from scratch)."}
 
 
 @app.get("/api/schema")
@@ -1650,6 +1757,13 @@ def api_schema() -> dict:
                            "the embedding model needs a FULL RE-EMBED (ask "
                            "the operator).",
                 "body": {"changes": "{dotted.key: value} from GET editable"}},
+            "POST /api/service/restart": {
+                "permission": "mutating",
+                "purpose": "kill + relaunch the warm query API (:8051) so it "
+                           "serves the current indexes. /health flips ready "
+                           "after ~1-3 min. Windows lane only (Docker: restart "
+                           "the container). webui.auto_restart_rag=true does "
+                           "this automatically after index-changing jobs."},
             "POST /api/jobs": {
                 "permission": "mutating",
                 "purpose": "queue a job. Kinds + params under `job_kinds` below.",

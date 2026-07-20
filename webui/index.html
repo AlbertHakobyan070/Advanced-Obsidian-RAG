@@ -231,6 +231,7 @@ pre.log{background:var(--log-bg);border:1px solid var(--line);border-radius:var(
     <div class="statuses">
       <span><span class="dot" id="dot-manage"></span>manage</span>
       <span><span class="dot" id="dot-rag"></span>query api :8051</span>
+      <button class="btn" id="rag-restart" title="Kill + relaunch the warm query API so it serves the current indexes. Ready again in ~1–3 min (models + indexes reload). Settings has an auto-restart-after-index-jobs toggle.">⟳ restart :8051</button>
     </div>
     <button class="btn" id="desc-toggle" title="Description mode: show inline explainers under every Ingest / Query section">ⓘ descriptions</button>
     <button class="btn" id="theme-toggle" aria-label="Cycle themes"></button>
@@ -521,6 +522,10 @@ pre.log{background:var(--log-bg);border:1px solid var(--line);border-radius:var(
     <p class="hint">Talks straight to the warm query endpoint (:8051). <b>Ask</b> = full RAG answer (needs FreeLLMAPI). <b>Search only</b> = retrieval, no LLM.</p>
     <div class="desc"><b>Search only</b> runs retrieval end-to-end (hybrid dense+BM25 fusion → rerank → E2 expansion) and shows the ranked chunks — free, local, no LLM. <b>Ask</b> adds grounded, cited generation on top. The knob groups: <b>preset</b> bundles everything (code / concept / synthesis); <b>rerank_k / dense_k / sparse_k</b> size the pools; <b>HyDE / HyPE / Omnisearch</b> are extra retrieval lanes; <b>rerank</b> picks the reranking method (cross-encoder = semantic scoring, lexical = model-free term coverage, none = fused order); <b>parents / neighbors</b> are the E2 small-to-big expansions (swap note chunks for full sections · append adjacent PDF pages). "default" on any select = whatever the preset/config says. The retrieval echo under each answer shows what actually ran — full knob documentation lives on the Info tab.</div>
     <textarea id="q-text" rows="2" style="width:100%" placeholder="What do I know about conjugate priors?"></textarea>
+    <div class="row" style="margin-top:8px">
+      <select id="q-history" style="max-width:420px" title="Last 20 queries from this browser — picking one restores the question AND its knob settings."><option value="">history…</option></select>
+      <button class="btn" id="q-history-clear" title="Forget the saved query history">clear</button>
+    </div>
     <div class="row" style="margin-top:10px">
       <select id="q-preset"><option value="">preset: none</option><option>code</option><option>concept</option><option>synthesis</option></select>
       <input id="q-topk" type="number" min="1" max="50" placeholder="rerank_k" style="width:86px" title="rerank_top_k — how many reranked chunks reach the LLM (blank = config default, 7)">
@@ -1014,10 +1019,16 @@ async function loadOverview(){
     state.ragApi=o.rag_api.url; state.jsonls=o.jsonl_files;
     $("#dot-manage").className="dot ok";
     $("#dot-rag").className="dot "+(o.rag_api.ready?"ok":"bad");
+    const denseN=typeof o.chroma_count==="number"?o.chroma_count:null;
+    const sparseHtml=o.sparse_count==null
+      ?`<div class="v">?<br><small>next rebuild writes the count sidecar</small></div>`
+      :`<div class="v">${fmt(o.sparse_count)}<br><small>${denseN==null?"dense unknown"
+        :(denseN===o.sparse_count?"= dense ✓":`≠ dense (${fmt(denseN)}) — rebuild BM25 + restart :8051`)}</small></div>`;
     $("#stats").innerHTML=`
       <div class="stat"><div class="k">Chunks (JSONL)</div><div class="v">${fmt(o.chunks)}</div></div>
       <div class="stat"><div class="k">Documents</div><div class="v">${fmt(o.files)}</div></div>
       <div class="stat"><div class="k">Chroma vectors</div><div class="v">${fmt(o.chroma_count)}</div></div>
+      <div class="stat"><div class="k">BM25 docs <small>${o.sparse_built?("· "+esc(o.sparse_built.slice(0,10))):""}</small></div>${sparseHtml}</div>
       <div class="stat"><div class="k">On disk</div><div class="v">${gb(o.disk.chroma_db+o.disk.bm25_index+o.disk.jsonl_total)}<br><small>chroma ${gb(o.disk.chroma_db)} · bm25 ${gb(o.disk.bm25_index)}</small></div></div>`;
     const doms=Object.entries(o.by_domain), max=Math.max(...doms.map(d=>d[1]),1);
     const domTotal=doms.reduce((a,d)=>a+d[1],0)||1;
@@ -1536,6 +1547,7 @@ function renderResult(){
 
 async function runQuery(retrieveOnly){
   const q=$("#q-text").value.trim();if(!q)return toast("Type a question first",1);
+  saveQueryHistory(q);
   const body={q,include_text:900,hyde:$("#q-hyde").checked,hype:$("#q-hype").checked,
     omnisearch:$("#q-omni").checked};
   const preset=$("#q-preset").value;if(preset)body.preset=preset;
@@ -1644,6 +1656,53 @@ $$(".dgbtn").forEach(b=>b.onclick=()=>{
   $("#dg-query").style.display=b.dataset.dg==="query"?"":"none";
   $("#dg-ingest").style.display=b.dataset.dg==="ingest"?"":"none";
 });
+
+/* ---------- query history (browser-local, last 20) ---------- */
+function qhLoad(){try{return JSON.parse(localStorage.getItem("ledger-qhistory")||"[]")}catch(e){return[]}}
+function qhRender(){
+  const h=qhLoad();
+  $("#q-history").innerHTML=`<option value="">history…</option>`+h.map((e,i)=>
+    `<option value="${i}">${esc(e.q.slice(0,80))}</option>`).join("");
+}
+function saveQueryHistory(q){
+  const entry={q,preset:$("#q-preset").value,topk:$("#q-topk").value,densek:$("#q-densek").value,
+    sparsek:$("#q-sparsek").value,maxtok:$("#q-maxtok").value,hyde:$("#q-hyde").checked,
+    hype:$("#q-hype").checked,omni:$("#q-omni").checked,rerank:$("#q-rerank").value,
+    parent:$("#q-parent").value,neigh:$("#q-neigh").value,at:Date.now()};
+  const h=qhLoad().filter(e=>e.q!==q);h.unshift(entry);
+  localStorage.setItem("ledger-qhistory",JSON.stringify(h.slice(0,20)));qhRender();
+}
+$("#q-history").onchange=e=>{
+  const h=qhLoad(),i=+e.target.value;if(Number.isNaN(i)||!h[i])return;
+  const s=h[i];
+  $("#q-text").value=s.q;$("#q-preset").value=s.preset||"";$("#q-topk").value=s.topk||"";
+  $("#q-densek").value=s.densek||"";$("#q-sparsek").value=s.sparsek||"";$("#q-maxtok").value=s.maxtok||"";
+  $("#q-hyde").checked=!!s.hyde;$("#q-hype").checked=!!s.hype;$("#q-omni").checked=!!s.omni;
+  $("#q-rerank").value=s.rerank||"";$("#q-parent").value=s.parent||"";$("#q-neigh").value=s.neigh||"";
+  e.target.value="";toast("Restored query + knobs from history");
+};
+$("#q-history-clear").onclick=()=>{localStorage.removeItem("ledger-qhistory");qhRender();toast("history cleared")};
+qhRender();
+
+/* ---------- restart :8051 (manual lane; Settings has the auto toggle) ---------- */
+$("#rag-restart").onclick=async()=>{
+  if(!confirm("Restart the query API (:8051)?\n\nIn-flight queries are dropped; the warm pipeline reloads models + indexes (~1–3 min until ready)."))return;
+  const b=$("#rag-restart");b.disabled=true;b.textContent="⟳ restarting…";
+  const reset=()=>{b.disabled=false;b.textContent="⟳ restart :8051"};
+  try{
+    const r=await api("/api/service/restart",{method:"POST"});
+    toast(`:${r.port} relaunched (pid ${r.new_pid}) — waiting for ready…`);
+    $("#dot-rag").className="dot bad";
+    const t0=Date.now();
+    const poll=setInterval(async()=>{
+      try{const h=await fetch(state.ragApi+"/health").then(x=>x.json());
+        if(h.ready){clearInterval(poll);reset();
+          $("#dot-rag").className="dot ok";toast("query API ready ✓");return}}catch(e){}
+      if(Date.now()-t0>300000){clearInterval(poll);reset();
+        toast("still not ready after 5 min — check logs\\serve_api_8051.err.log",1)}
+    },5000);
+  }catch(e){toast(e.message,1);reset()}
+};
 
 /* ---------- boot ---------- */
 (async()=>{

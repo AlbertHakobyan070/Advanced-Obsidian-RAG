@@ -191,3 +191,13 @@ def test_persist_section_keys_section_aware(tmp_path):
     assert "model: auto" in text                      # other sections untouched
     with pytest.raises(ValueError):                   # unknown leaf -> refuse
         _persist_section_keys(cfg, {"generation.nope": "x"})
+
+
+def test_write_sparse_meta_sidecar(tmp_path):
+    from src.embeddings.embedder import write_sparse_meta
+    import json
+    pkl = tmp_path / "bm25_index.pkl"
+    meta = write_sparse_meta(pkl, 173606)
+    assert meta.name == "bm25_index.pkl.meta.json"
+    data = json.loads(meta.read_text(encoding="utf-8"))
+    assert data["count"] == 173606 and data["built_at"]

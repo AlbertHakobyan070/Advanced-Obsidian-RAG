@@ -249,6 +249,7 @@ webui:
   #   python -m uvicorn manage_api:app --host 127.0.0.1 --port 8052
   port: 8052                                 # 8051 = query API, 8501 = Streamlit
   rag_api: "http://127.0.0.1:8051"           # the query endpoint the console talks to
+  auto_restart_rag: false                    # restart :8051 automatically after index-changing jobs
   # Browser uploads land INSIDE the vault here (created if missing), so the
   # normal ingest passes pick them up with --include-path "Inbox":
   inbox_dir: "00 – AUA_DS/Other/Inbox"

@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import pickle
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
@@ -172,8 +173,21 @@ def build_sparse_union(chunks_file: Path, bm25_index: Path,
     bm25_index.parent.mkdir(parents=True, exist_ok=True)
     with open(bm25_index, "wb") as f:
         pickle.dump(payload, f)
+    write_sparse_meta(bm25_index, len(ids))
     log.info("Sparse index rebuilt over union: %d docs", len(ids))
     return len(ids)
+
+
+def write_sparse_meta(bm25_index: Path, count: int) -> Path:
+    """Sidecar next to the pickle with the doc count + build time, so health
+    checks can report the sparse count WITHOUT unpickling the multi-GB payload
+    (which would spike RAM on the 16 GB box)."""
+    meta_path = Path(str(bm25_index) + ".meta.json")
+    meta_path.write_text(json.dumps({
+        "count": count,
+        "built_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }), encoding="utf-8")
+    return meta_path
 
 
 # ---------------------------------------------------------------------------

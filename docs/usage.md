@@ -117,6 +117,12 @@ Open **http://127.0.0.1:8052**. Tabs:
 - **Info** — an in-app diagram of the whole pipeline with a query/ingestion toggle and a
   per-knob influence table.
 
+Ops niceties: the header's **⟳ restart** button relaunches the warm query API in one
+click (and `webui.auto_restart_rag` in Settings does it automatically after every
+successful index-changing job); the Ledger shows a **dense = sparse health verdict**
+(the BM25 count comes from a sidecar written at build time — no giant unpickle); and
+the Query tab keeps a restorable **history** of your last 20 queries with their knobs.
+
 ## For agents
 
 `manage_api` exposes `GET /api/schema` — a machine-readable, permission-tiered map of
