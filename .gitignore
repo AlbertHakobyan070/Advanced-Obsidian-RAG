@@ -1,5 +1,10 @@
 # Secrets — never commit. Ship .env.example instead.
+# `.env` alone matches ONLY that exact name: a copy like `.env.bak` or
+# `.env.local` would have been committable. Ignore every variant, then
+# re-admit the one file that is meant to ship.
 .env
+.env.*
+!.env.example
 *.key
 
 # Data & indexes — rebuildable artifacts, hundreds of MB to GB

@@ -1,5 +1,5 @@
 """
-manage_api.py — Corpus management console (backend) for Personal RAG.
+manage_api.py — Corpus management console (backend) for the personal RAG.
 
 Everything serve_api.py deliberately is NOT: ingest, index, OCR passes,
 document search/inspection, deletion, uploads — driven from a browser at
@@ -68,7 +68,7 @@ RAG_API = CFG.get("webui.rag_api", "http://127.0.0.1:8051")
 COLLECTION = CFG.get("paths.collection_name", "obsidian_vault")
 PAGE = 5000                      # ChromaDB paging batch (see module docstring)
 
-app = FastAPI(title="Personal RAG — Management Console", version="0.1.0")
+app = FastAPI(title="the personal RAG — Management Console", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
@@ -1582,16 +1582,30 @@ EDITABLE_SETTINGS: dict[str, dict] = {
                                      "label": "Chroma collection name"},
     "embedding.local_model":        {"kind": "str",  "restart": ":8051",
                                      "label": "Embedding model (HF id or local path)"},
+    # Free text on purpose (any HF cross-encoder id works); the console offers
+    # the known-good ones as suggestions with their measured cost.
     "retrieval.cross_encoder_model": {"kind": "str", "restart": ":8051",
                                      "label": "Cross-encoder rerank model"},
+    "retrieval.cross_encoder_max_length": {"kind": "str", "restart": ":8051",
+                                     "label": "Cross-encoder max tokens per pair"},
+    "retrieval.cross_encoder_device": {"kind": "enum", "restart": ":8051",
+                                     "values": ["auto", "cpu", "cuda", "cuda:0", "cuda:1"],
+                                     "label": "Cross-encoder device"},
     "retrieval.rerank_mode":        {"kind": "enum", "restart": ":8051",
                                      "values": ["cross_encoder", "lexical", "none"],
                                      "label": "Default rerank method"},
     "parser.chunking":              {"kind": "enum", "restart": ":8052",
                                      "values": ["heading", "fixed", "document", "none"],
                                      "label": "Default chunking strategy"},
+    # Values are filled in at request time from the `providers:` registry —
+    # see _provider_choices(). Switching this rewrites generation.model too
+    # (see settings_update), because a provider and a stale model id from the
+    # previous provider is the one combination that fails at call time.
+    "generation.provider":          {"kind": "enum", "restart": ":8051",
+                                     "values": [],
+                                     "label": "Generation backend (providers: registry)"},
     "generation.base_url":          {"kind": "str",  "restart": ":8051",
-                                     "label": "Generation endpoint (OpenAI-compatible)"},
+                                     "label": "Generation endpoint (legacy providers only)"},
     "generation.model":             {"kind": "str",  "restart": ":8051",
                                      "label": "Generation model id"},
     "webui.inbox_dir":              {"kind": "str",  "restart": ":8052",
@@ -1600,6 +1614,37 @@ EDITABLE_SETTINGS: dict[str, dict] = {
                                      "values": ["true", "false"],
                                      "label": "Auto-restart :8051 after index-changing jobs"},
 }
+
+
+def _provider_choices(disk_cfg) -> tuple[list[str], list[dict]]:
+    """Selectable generation backends + their status, for the Settings tab.
+
+    Returns (names, details). Names = the `providers:` registry plus the
+    reserved legacy names, so the dropdown can never strand an existing config
+    on a value it cannot re-select.
+
+    details carries `key_present` — whether the env var each provider names is
+    actually set — because "I switched to MiniMax and it 500s" is almost always
+    an unset key. The key VALUE is never read or returned, only its presence.
+    """
+    from src.llm.llm_client import LLMClient
+
+    registry = disk_cfg.get("providers", {}) or {}
+    names = [n for n in registry if n not in LLMClient.RESERVED_PROVIDERS]
+    details = []
+    for name in names:
+        spec = registry[name] or {}
+        env = spec.get("api_key_env")
+        details.append({
+            "name": name,
+            "kind": spec.get("kind", "openai"),
+            "base_url": spec.get("base_url"),
+            "model": spec.get("model"),
+            "api_key_env": env,
+            "key_optional": bool(spec.get("api_key_optional")),
+            "key_present": bool(os.environ.get(env)) if env else True,
+        })
+    return names + list(LLMClient.RESERVED_PROVIDERS), details
 
 
 def _persist_section_keys(cfg_path: Path, changes: dict[str, Any]) -> list[str]:
@@ -1654,11 +1699,32 @@ def settings() -> dict:
     # CFG is stale, and the Settings tab must show what's ON DISK.
     from src.utils.config_loader import load_config as _load
     disk_cfg = _load()
+    provider_names, provider_details = _provider_choices(disk_cfg)
+    # Reranker suggestions + whether torch can actually reach a GPU. The device
+    # dropdown offering "cuda" on a CPU-only torch build would be a trap, so the
+    # console reports what torch really sees rather than what the box has.
+    from src.retrieval.reranker import KNOWN_RERANKERS
+    try:
+        import torch
+        gpu = {"torch": torch.__version__,
+               "cuda_build": torch.version.cuda,
+               "available": bool(torch.cuda.is_available()),
+               "devices": [torch.cuda.get_device_name(i)
+                           for i in range(torch.cuda.device_count())]
+               if torch.cuda.is_available() else []}
+    except Exception as e:                       # torch missing/broken
+        gpu = {"torch": None, "cuda_build": None, "available": False,
+               "devices": [], "error": str(e)}
     editable = {}
     for key, spec in EDITABLE_SETTINGS.items():
         editable[key] = {**spec, "value": disk_cfg.get(key)}
+    editable["generation.provider"]["values"] = provider_names
     return {
         "rag_api": RAG_API,
+        "providers": provider_details,
+        "judge_provider": disk_cfg.get("eval.judge.provider"),
+        "rerankers": [{"id": k, **v} for k, v in KNOWN_RERANKERS.items()],
+        "gpu": gpu,
         "vault_path": str(CFG.get("pdf.vault_path") or CFG.get("parser.vault_path")),
         "inbox_dir": CFG.get("webui.inbox_dir", "00 – AUA_DS/Other/Inbox"),
         "jsonl_files": [p.name for p in chunk_files()],
@@ -1673,13 +1739,20 @@ def settings_update(body: SettingsIn) -> dict:
     """Persist whitelisted config values into config.yaml (comment-preserving,
     section-aware). Nothing hot-applies: the response lists which services to
     restart. Vault path must exist; enums are validated; unknown keys 400."""
+    from src.utils.config_loader import load_config as _load
+    disk_cfg = _load()
+    provider_names, _ = _provider_choices(disk_cfg)
+
     changes: dict[str, Any] = {}
     restarts: set[str] = set()
+    notes: list[str] = []
     for key, value in body.changes.items():
         spec = EDITABLE_SETTINGS.get(key)
         if not spec:
             return JSONResponse({"ok": False, "error": f"unknown setting {key!r}"},
                                 status_code=400)
+        if key == "generation.provider":          # enum filled at request time
+            spec = {**spec, "values": provider_names}
         sval = str(value).strip()
         if not sval:
             return JSONResponse({"ok": False, "error": f"{key}: empty value"},
@@ -1696,17 +1769,37 @@ def settings_update(body: SettingsIn) -> dict:
         # without a restart, and rewriting an identical value is harmless.
         changes[key] = sval
         restarts.add(spec["restart"])
+    # Switching backend without switching model sends the OLD provider's model
+    # id to the NEW endpoint, which fails at call time with a confusing 4xx.
+    # Carry the new provider's default model along unless the caller set one.
+    new_provider = changes.get("generation.provider")
+    if new_provider and "generation.model" not in changes:
+        spec = (disk_cfg.get("providers", {}) or {}).get(new_provider) or {}
+        default_model = spec.get("model")
+        if default_model and default_model != disk_cfg.get("generation.model"):
+            changes["generation.model"] = str(default_model)
+            restarts.add(EDITABLE_SETTINGS["generation.model"]["restart"])
+            notes.append(f"generation.model set to {default_model!r} to match "
+                         f"provider {new_provider!r}")
+        env = spec.get("api_key_env")
+        if env and not spec.get("api_key_optional") and not os.environ.get(env):
+            notes.append(f"WARNING: {env} is not set in this environment — "
+                         f"{new_provider} will fail until you export it "
+                         f"(or add it to .env)")
+
     if not changes:
         return {"ok": True, "written": [], "note": "nothing changed"}
     try:
         written = _persist_section_keys(ROOT / "config.yaml", changes)
     except ValueError as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
-    return {"ok": True, "written": written,
-            "note": "Saved to config.yaml. Restart to apply: "
-                    + "; ".join(sorted(restarts))
-                    + ". Changing the embedding model REQUIRES a full re-embed "
-                      "of the corpus (main.py index) before search works again."}
+    note = ("Saved to config.yaml. Restart to apply: "
+            + "; ".join(sorted(restarts))
+            + ". Changing the embedding model REQUIRES a full re-embed "
+              "of the corpus (main.py index) before search works again.")
+    if notes:
+        note += "  |  " + "  |  ".join(notes)
+    return {"ok": True, "written": written, "note": note}
 
 
 # ---- folder browser (Settings path pickers) ----
@@ -1970,8 +2063,8 @@ def api_schema() -> dict:
 
     Every operation carries a `permission` tier the calling agent MUST honor:
       * read       — safe, no confirmation needed (stats, search, status, logs)
-      * mutating   — changes the index; ask the operator first (ingest/append/retag/OCR)
-      * destructive— removes content; ALWAYS confirm with the operator, echo exactly
+      * mutating   — changes the index; ask the author first (ingest/append/retag/OCR)
+      * destructive— removes content; ALWAYS confirm with the author, echo exactly
                      what will be deleted, and never run unprompted.
     This is a POLICY the agent enforces (the local API has no auth) — the tiers
     exist so a toolkit/skill can gate calls. See the rag-ops skill.
@@ -1983,7 +2076,7 @@ def api_schema() -> dict:
         "query_api": RAG_API,
         "permission_tiers": {
             "read": "safe; no confirmation",
-            "mutating": "changes the index; ask the operator before running",
+            "mutating": "changes the index; ask the author before running",
             "destructive": "removes content; ALWAYS confirm, echo the exact "
                            "targets, never run unprompted",
         },

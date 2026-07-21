@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark light">
-<title>Corpus Ledger — RAG Management Console</title>
+<title>Corpus Ledger — the personal RAG</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='3' y='3' width='5' height='18' rx='1' fill='%23E8A33D'/%3E%3Crect x='10' y='3' width='5' height='18' rx='1' fill='%238A6423'/%3E%3Crect x='17' y='6' width='4' height='15' rx='1' fill='%23A99F8F'/%3E%3C/svg%3E">
 <script>/* theme + fonts are applied BEFORE first paint to avoid a flash of the wrong look */
 document.documentElement.dataset.theme=localStorage.getItem("ledger-theme")||"dark";
@@ -357,7 +357,7 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
 <header>
   <div class="hrow">
     <div class="wordmark"><svg class="mark" viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><rect x="3" y="3" width="5" height="18" rx="1"/><rect x="10" y="3" width="5" height="18" rx="1" opacity=".55"/><rect x="17" y="6" width="4" height="15" rx="1" opacity=".3"/></svg>Corpus <em>Ledger</em></div>
-    <div class="sub">Personal RAG — management console · :8052</div>
+    <div class="sub">the personal RAG — management console · :8052</div>
     <div class="hctrl">
       <span class="st"><span class="dot" id="dot-manage"></span>manage</span>
       <span class="st"><span class="dot" id="dot-rag"></span>query api :8051</span>
@@ -739,6 +739,8 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
     <p class="hint">Saved values are written into config.yaml in place (comments preserved). <b>Nothing hot-applies</b> — the save response tells you which services to restart. Point these at a different vault / index pair to run this console against another RAG.</p>
     <div class="desc">Typical setups: <b>another vault</b> = change the vault root AND give it its own Chroma dir + BM25 pickle + chunks JSONL (each corpus needs its own index trio — mixing them corrupts nothing but retrieves nonsense). <b>Embedding model</b>: changing it makes every existing vector incompatible — you must re-embed the whole corpus (<code>main.py index</code>) before search works again; the cross-encoder and generation settings are safe to swap freely. Enum defaults (rerank / chunking) only set the <i>config default</i>; per-call overrides in Query/Ingest always win.</div>
     <div id="set-fields" class="grid g2" style="margin-top:10px"><div class="skel"></div></div>
+    <div id="set-rerankers" style="margin-top:16px"></div>
+    <div id="set-providers" style="margin-top:16px"></div>
     <div class="row" style="margin-top:14px">
       <button class="btn primary" id="set-save">Save changes</button>
       <button class="btn" id="set-reload" title="Discard edits and re-read current values">Reload</button>
@@ -2215,11 +2217,33 @@ async function loadSettings(){
       const id="cfg-"+key.replace(/\./g,"-");
       const badge=`<span class="hint" style="margin:0;font-size:11px">restart ${esc(f.restart)}</span>`;
       const browse=BROWSE_KEYS[key]?`<button class="btn icon set-browse" data-for="${id}" data-mode="${BROWSE_KEYS[key]}" title="${BROWSE_KEYS[key]==="dir"?"Pick this folder":"Pick the folder (the filename is kept)"}">📁</button>`:"";
+      /* The reranker field stays free text (any HF cross-encoder id works) but
+         offers the known-good ones as a datalist, each labelled with its real
+         cost — swapping in a 568M model without knowing it is ~20x slower on
+         CPU is the mistake this is here to prevent. */
+      const dl=key==="retrieval.cross_encoder_model"&&(s.rerankers||[]).length
+        ?`<datalist id="${id}-list">${s.rerankers.map(r=>`<option value="${esc(r.id)}">${esc(r.label||"")}</option>`).join("")}</datalist>`:"";
+      const listAttr=dl?` list="${id}-list"`:"";
       const ctrl=f.kind==="enum"
         ?`<select id="${id}" data-key="${esc(key)}">${f.values.map(v=>`<option${v===String(f.value)?" selected":""}>${esc(v)}</option>`).join("")}</select>`
-        :`<div class="row" style="flex-wrap:nowrap;gap:6px"><input id="${id}" data-key="${esc(key)}" value="${esc(String(f.value??""))}" style="flex:1" spellcheck="false">${browse}</div>`;
+        :`<div class="row" style="flex-wrap:nowrap;gap:6px"><input id="${id}" data-key="${esc(key)}"${listAttr} value="${esc(String(f.value??""))}" style="flex:1" spellcheck="false">${browse}</div>${dl}`;
       return `<div><label class="f">${esc(f.label)} <span class="mono" style="font-size:11px;color:var(--ink-faint)">${esc(key)}</span></label>${ctrl}${badge}</div>`;
     }).join("");
+    renderProviders(s);
+    renderRerankers(s);
+    /* Switching backend must switch the model with it: a provider plus the
+       PREVIOUS provider's model id is the one combination that fails at call
+       time. Fill it in visibly here so the change is reviewable before saving
+       (the backend carries the same default if an API caller omits it). */
+    const provSel=document.getElementById("cfg-generation-provider");
+    const modelIn=document.getElementById("cfg-generation-model");
+    if(provSel&&modelIn){
+      provSel.onchange=()=>{
+        const p=(s.providers||[]).find(x=>x.name===provSel.value);
+        if(p&&p.model)modelIn.value=p.model;
+        renderProviders(s,provSel.value);
+      };
+    }
     $$(".set-browse").forEach(b=>b.onclick=async()=>{
       const input=document.getElementById(b.dataset.for);
       const cur=(input.value||"").replace(/\//g,"\\");
@@ -2234,6 +2258,53 @@ async function loadSettings(){
       }else input.value=posix;
     });
   }catch(e){$("#set-fields").innerHTML=`<span style="color:var(--red)">${esc(e.message)}</span>`}
+}
+
+/* Reranker picker help + what torch can ACTUALLY reach. The device dropdown
+   lists cuda options unconditionally, so this panel exists to say plainly when
+   torch is a CPU-only build — otherwise picking "cuda" silently falls back to
+   CPU and the only symptom is a query that takes 20x longer. */
+function renderRerankers(s){
+  const box=$("#set-rerankers");if(!box)return;
+  const list=s.rerankers||[],g=s.gpu||{};
+  const cur=(s.editable&&s.editable["retrieval.cross_encoder_model"])
+    ?String(s.editable["retrieval.cross_encoder_model"].value??""):"";
+  const gpuLine=g.available
+    ?`<span class="pill done">GPU available — ${esc((g.devices||[]).join(", "))}</span>`
+    :`<span class="pill">CPU only — torch ${esc(String(g.torch||"?"))}${g.cuda_build?"":" (no CUDA build)"}</span>`;
+  box.innerHTML=`<h3 style="margin:0 0 6px">Reranker <span class="hint" style="margin:0;display:inline;font-weight:400">— cross-encoder that reorders the fused candidates</span></h3>
+    <p class="hint" style="margin:0 0 8px">${gpuLine} &nbsp; Any HF cross-encoder id works; the field suggests these. A bigger reranker is not automatically better <b>on your corpus</b> — label <code>expected_source_files</code> in the golden set and compare with <code>main.py eval --retrieval-only</code> before switching.</p>
+    ${list.map(r=>`<div class="vault-row${r.id===cur?" cur":""}">
+      <div style="flex:1;min-width:0"><span class="nm">${esc(r.id)}</span>${r.id===cur?' <span class="pill done" style="margin-left:6px">active</span>':""}
+      <div class="pth">${esc(r.label||"")}</div></div></div>`).join("")}`;
+}
+
+/* Provider registry status. Shows WHICH env var each backend needs and whether
+   it is set in the server's environment — never the key itself. An unset key is
+   the usual reason a freshly-switched provider 500s, and it is invisible
+   otherwise. */
+function renderProviders(s,sel){
+  const box=$("#set-providers");if(!box)return;
+  const list=s.providers||[];
+  const cur=sel||(s.editable&&s.editable["generation.provider"]?String(s.editable["generation.provider"].value??""):"");
+  if(!list.length){box.innerHTML="";return}
+  const rows=list.map(p=>{
+    const active=p.name===cur;
+    const key=!p.api_key_env
+      ?`<span class="hint" style="margin:0">keyless</span>`
+      :(p.key_present
+        ?`<span class="pill done">${esc(p.api_key_env)} set</span>`
+        :`<span class="pill${p.key_optional?"":" failed"}">${esc(p.api_key_env)} ${p.key_optional?"unset (optional)":"NOT set"}</span>`);
+    return `<div class="vault-row${active?" cur":""}">
+      <div style="flex:1;min-width:0">
+        <span class="nm">${esc(p.name)}</span>${active?' <span class="pill done" style="margin-left:6px">active</span>':""}
+        <div class="pth">${esc(p.base_url||"(sdk default)")} · ${esc(p.model||"—")} · ${esc(p.kind)}</div>
+      </div>${key}</div>`;
+  }).join("");
+  box.innerHTML=`<h3 style="margin:0 0 6px">Generation backends <span class="hint" style="margin:0;display:inline;font-weight:400">— the <code>providers:</code> registry</span></h3>
+    <p class="hint" style="margin:0 0 8px">Keys are read from environment variables (or <code>.env</code>), never stored in config.yaml. Set one and restart :8051.
+    The eval judge is separate: <code>eval.judge.provider</code> in config.yaml${s.judge_provider?` (currently <b>${esc(String(s.judge_provider))}</b>)`:" (unset — the judge reuses the generation backend)"}.</p>
+    ${rows}`;
 }
 
 /* ---------- vault switcher (Obsidian-style) ---------- */

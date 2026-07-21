@@ -29,9 +29,45 @@ embedding:
   batch_size: 100
   dimensions: 384
 
+# ---------------------------------------------------------------------------
+# Named LLM backends. Any role (generation / eval.judge / ...) points at one by
+# name. Add an entry for anything speaking an OpenAI-compatible
+# /v1/chat/completions or an Anthropic-compatible endpoint.
+#
+# SECRETS NEVER LIVE HERE — `api_key_env` is the NAME of an environment
+# variable. Put the value in .env (gitignored) or export it in your shell.
+#
+# `kind` is the WIRE PROTOCOL (openai | anthropic), not the vendor.
+# RESERVED: never name an entry openai / anthropic / local — those always take
+# the pre-registry code path so older configs keep resolving the same way.
+#
+# Note: a consumer SUBSCRIPTION is usually not API access. ChatGPT Plus grants
+# no platform.openai.com quota and X Premium grants no x.ai quota; both need
+# separately-billed API keys. Check your provider before assuming otherwise.
+# ---------------------------------------------------------------------------
+providers:
+  freellmapi:
+    kind: openai
+    base_url: "http://localhost:3001/v1"
+    model: "auto"
+    api_key_env: FREELLMAPI_API_KEY
+    api_key_optional: true
+  minimax:
+    kind: openai
+    base_url: "https://api.minimax.io/v1"
+    model: "MiniMax-M2"
+    api_key_env: MINIMAX_API_KEY
+  kobold:
+    kind: openai
+    base_url: "http://localhost:5001/v1"
+    model: "gemma-4-E4B-it-Q8_k"
+    api_key_env: null
+
 generation:
+  # A `providers:` name or a reserved legacy name (openai | anthropic | local).
+  # Change `model` whenever you change this.
   provider: openai
-  base_url: "http://localhost:3001/v1"
+  base_url: "http://localhost:3001/v1"   # legacy providers only
   model: "auto"
   temperature: 0.1
   max_tokens: 2500
@@ -43,7 +79,16 @@ retrieval:
   rrf_k: 60
   rerank_top_k: 7
   rerank_mode: cross_encoder                # cross_encoder | lexical | none
+  # Any HF cross-encoder id. Bigger rerankers score better on public benchmarks
+  # but cost far more per query — measure before switching:
+  #   cross-encoder/ms-marco-MiniLM-L-6-v2   22M params   fast   (default)
+  #   BAAI/bge-reranker-base                 278M params  medium
+  #   BAAI/bge-reranker-v2-m3                568M params  slow on CPU (~20x),
+  #                                          multilingual, 8k context, GPU
+  #                                          strongly recommended
   cross_encoder_model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  cross_encoder_max_length: 512     # bge-* accept up to 8192; longer = slower
+  cross_encoder_device: auto        # auto | cpu | cuda | cuda:0 | cuda:1
   use_hyde: true
   # If a query mentions a course/domain, bias retrieval toward it
   metadata_boost: true
@@ -187,6 +232,21 @@ retrieval:
     model: "gemma-4-E4B-it-Q8_k"            # whatever /v1/models reports
     # NOTE: KoboldCPP context length is set at LAUNCH (--contextsize),
     #       NOT per request. Launch with --contextsize 8192 or higher.
+
+# Golden-query eval suite (eval/eval_runner.py — `python main.py eval`).
+# Tier 1 (retrieval) and the groundedness floor need nothing but the index;
+# the judge tier reuses the `generation` client above.
+eval:
+  ngram_n: 2                    # content-word n-gram size for the deterministic
+                                # groundedness floor. 1 = lenient (bag of words),
+                                # 3 = strict (near-verbatim). 2 is the balance.
+  judge:
+    # Leave empty to reuse the generation client (self-grading — the runner
+    # warns). Name a `providers:` entry to judge with a different backend.
+    provider: null
+    model: null
+    temperature: 0.0
+    max_tokens: 700             # per LLM-as-judge call (rubric JSON is small)
 
 logging:
   level: INFO                               # DEBUG | INFO | WARNING | ERROR

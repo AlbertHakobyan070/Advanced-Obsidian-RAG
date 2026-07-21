@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-main.py — CLI entry point for Personal RAG.
+main.py — CLI entry point for the personal RAG.
 
     python main.py index                      # build dense + sparse indexes from chunks.jsonl
     python main.py query "What is ARIMA?"      # one-shot question
@@ -317,7 +317,7 @@ def cmd_chat(args):
     from src.pipeline import RAGPipeline
 
     rag = RAGPipeline.from_config(cfg)
-    print("Personal RAG — interactive mode. Type 'exit' or Ctrl-C to quit.\n")
+    print("the personal RAG — interactive mode. Type 'exit' or Ctrl-C to quit.\n")
     try:
         while True:
             q = input("❓ ").strip()
@@ -333,10 +333,20 @@ def cmd_chat(args):
 def cmd_eval(args):
     cfg = load_config(args.config)
     _bootstrap_logging(cfg)
-    from eval.eval_runner import run_eval
+    from eval.eval_runner import apply_judge_scores, run_eval
+
+    # Merging external judge scores is a pure post-process on an existing
+    # results file — it must not build the pipeline or re-run any query.
+    if getattr(args, "judge_import", None):
+        apply_judge_scores(cfg, results_path=args.out,
+                           scores_path=args.judge_import)
+        return
 
     run_eval(cfg, golden_path=args.golden, out_path=args.out,
-             retrieval_only=getattr(args, "retrieval_only", False))
+             retrieval_only=getattr(args, "retrieval_only", False),
+             judge=getattr(args, "judge", False),
+             limit=getattr(args, "limit", None),
+             judge_export=getattr(args, "judge_export", None))
 
 
 def cmd_serve(args):
@@ -522,8 +532,23 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--golden", default="eval/golden_queries.yaml")
     e.add_argument("--out", default="eval/results.json")
     e.add_argument("--retrieval-only", action="store_true", dest="retrieval_only",
-                   help="Skip generation (no LLM needed): keyword recall is "
-                        "measured over the retrieved chunks — minutes, offline")
+                   help="Tier 1 only, no LLM needed: keyword recall is measured "
+                        "over the retrieved chunks — minutes, offline")
+    e.add_argument("--judge", action="store_true",
+                   help="Add the LLM-as-judge pass (answer correctness vs the "
+                        "golden set's gold_answer + model-scored groundedness). "
+                        "Advisory, costs one extra LLM call per question; "
+                        "ignored with --retrieval-only")
+    e.add_argument("--limit", type=int, default=None, metavar="N",
+                   help="Score only the first N questions (smoke runs)")
+    e.add_argument("--judge-export", dest="judge_export", metavar="PATH",
+                   help="Also write a JSONL bundle (question, answer, cited "
+                        "chunks) for an EXTERNAL judge — a human or a model "
+                        "with no access to this machine — to grade")
+    e.add_argument("--judge-import", dest="judge_import", metavar="PATH",
+                   help="Merge an external judge's scores JSONL into the "
+                        "results file named by --out and rebuild the "
+                        "scorecard. Runs no queries")
     e.set_defaults(func=cmd_eval)
 
     sub.add_parser("serve", help="Launch the Streamlit app").set_defaults(func=cmd_serve)

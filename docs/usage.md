@@ -141,6 +141,12 @@ Open **http://127.0.0.1:8052**. Tabs:
   Chroma / BM25 / chunks paths, embedding + cross-encoder models, default rerank &
   chunking, generation endpoint. Saves rewrite `config.yaml` in place (comments
   preserved); nothing hot-applies — the response says which service to restart.
+  Two panels sit under the fields: **Generation backends**, listing the
+  `providers:` registry with each backend's endpoint/model and whether its API-key
+  environment variable is set (never the value); and **Reranker**, which suggests
+  known-good cross-encoders with their measured cost and states what PyTorch can
+  actually reach — a `cuda` device on a CPU-only torch build would otherwise fail
+  silently into a much slower path.
 - **Info** — an in-app diagram of the whole pipeline with a query/ingestion toggle and a
   per-knob influence table.
 

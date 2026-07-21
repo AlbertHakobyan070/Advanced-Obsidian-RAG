@@ -1,10 +1,10 @@
 # Advanced Obsidian RAG
 
-**Grounded, cited question-answering over a personal knowledge base of markdown
-notes, textbooks, lecture PDFs, and notebooks** — built for the case where a
-wrong-but-confident answer is worse than none. Ask a question in your own words
-and get an answer assembled *only* from your own materials, with inline `[n]`
-citations and a per-answer confidence line.
+**Grounded, cited question-answering over a large personal Obsidian vault** — built
+for real interview and exam preparation, where a wrong-but-confident answer is worse
+than none. Ask a question in your own words and get an answer assembled *only* from
+your own notes, textbooks, homework and notebooks, with inline `[n]` citations and a
+per-answer confidence line.
 
 <p>
 <img alt="Python 3.11" src="https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white">
@@ -15,67 +15,91 @@ citations and a per-answer confidence line.
 <img alt="Local first" src="https://img.shields.io/badge/Runs-Free%20%2F%20Local-2ea44f">
 </p>
 
-> **Index it once, query it forever.** A full retrieval-augmented pipeline that
-> turns a folder of markdown notes, PDFs, scanned books, and notebooks into a
-> search system you can talk to. Every claim is traceable to a source you
-> already trust, and the answer says *"I don't have this"* instead of inventing
-> when your materials are silent on a topic.
+> **Scale:** ~170,000 retrieval chunks across **4,400+ documents** — markdown lecture
+> notes, 280+ textbooks, lecture PDFs, passed homework, Jupyter/R notebooks and
+> scripts, and OCR'd scanned books — spanning **24+ courses** and **9 knowledge
+> domains**, all served from **~4 GB** of prebuilt indexes on a laptop.
+>
+> **Runs entirely on free / local infrastructure:** CPU embeddings, on-disk vector +
+> sparse indexes, and *any* OpenAI-compatible endpoint for generation (a local model
+> server, a free-tier proxy, or a cloud API — one config line).
 
 ---
 
 ## Why this exists
 
-A general chatbot answers from the open web. This system indexes *your*
-documents — your notes, your textbooks, your scanned books, your notebooks —
-and answers strictly from them, so every claim traces back to a source you
-already trust and a wrong-but-confident answer is impossible.
+General-purpose chatbots answer from the open web; they can't tell you what *your*
+professor emphasised, how *your* homework solved a problem, or which page of *your*
+textbook covers a proof. This system indexes a personal knowledge vault and answers
+strictly from it — so every claim is traceable to a source you already trust, and the
+answer says *"I don't have this"* instead of inventing when the vault is silent.
 
-It is a full pipeline, not a wrapper: hybrid retrieval, query expansion,
-intent-aware scope routing, a dedicated code lane, cross-encoder reranking,
-grounded generation with a citation-audit pass, a management console, an
-agent-facing API, and a reproducible evaluation suite.
-
-## How a document ingestion takes place
-
-<img width="1017" height="787" alt="Ingestion pipeline diagram" src="https://github.com/user-attachments/assets/2b05a9b2-a494-4041-8ce8-23bff68a3ae6" />
-
+It is a full pipeline, not a wrapper: hybrid retrieval, query expansion, intent-aware
+scope routing, a dedicated code lane, cross-encoder reranking, grounded generation
+with a citation-audit pass, a management console, an agent-facing API, and a
+reproducible evaluation suite.
 
 ## How a query flows
 
-<img width="1146" height="1034" alt="Query pipeline diagram" src="https://github.com/user-attachments/assets/2c2881e0-2764-44b2-a879-f3618a841e52" />
+```mermaid
+flowchart TD
+    Q["Question"] --> R{Intent routing}
+    R -->|prose| H["HyDE query expansion<br/>(LLM drafts a hypothetical answer to embed)"]
+    R -->|code intent| C0["Skip HyDE · widen pool · open code lane"]
+    H --> HY["Hybrid retrieval"]
+    C0 --> HY
+    HY --> D["Dense · ChromaDB<br/>bge-small-en-v1.5"]
+    HY --> S["Sparse · bm25s"]
+    HY --> SL["Scope lanes<br/>domain / path / file-type filters"]
+    HY --> CL["Code lane<br/>.ipynb / .py / .R / .sql / …"]
+    D --> RRF["Reciprocal Rank Fusion (k=60)<br/>+ metadata boosts"]
+    S --> RRF
+    SL --> RRF
+    CL --> RRF
+    RRF --> RR["Cross-encoder rerank<br/>ms-marco-MiniLM → top-k"]
+    RR --> EX["Optional small-to-big<br/>context expansion"]
+    EX --> G["Grounded generation<br/>answer + [n] citations + confidence"]
+    G --> V["Optional second-pass<br/>citation verification"]
+```
 
-
-Every stage is swappable from `config.yaml`. Solid path = always on; the rest
-are optional lanes that open only when the query calls for them.
+Every stage is swappable from `config.yaml`. Solid path = always on; the rest are
+optional lanes that open only when the query calls for them.
 
 ## What makes retrieval good here
 
-- **Hybrid dense + sparse, fused by RRF.** Dense embeddings (bge-small-en-v1.5)
-  catch paraphrase and meaning; BM25 catches exact terminology, symbols, and
-  rare names. Reciprocal Rank Fusion combines them with a downstream
-  cross-encoder deciding final order — no fragile score normalisation.
-- **Intent-aware scope routing.** Queries that name a domain, content type, or
-  library ("in my statistics lectures", "in the tech books") open *filtered*
-  lanes toward the right material. Routing is *soft*: scoped chunks get
-  guaranteed seats in the candidate pool, but the reranker still makes the
-  final call — a bad hint can never empty your results. Both dictionaries are
-  config-only; extend them without touching code.
-- **A dedicated code lane.** Code/notebook chunks are a tiny fraction of a
-  typical corpus, so for a query like *"show me a complex ggplot from my
-  code"* a prose-oriented pipeline buries them under textbook pages that
-  merely mention the keyword. Detecting code intent, skipping HyDE, widening
-  the pool, and reserving a filtered lane for script/notebook chunks brings
-  the user's own code back to the top.
-- **Cross-encoder reranking** re-scores the fused candidates against the
-  actual query for precision at the top.
-- **Grounded, cited generation** answers from the retrieved excerpts only,
-  emits inline `[n]` citations and a confidence line, and can run a second
-  pass that verifies each citation actually supports its sentence.
+- **Hybrid dense + sparse, fused by RRF.** Dense embeddings (bge-small-en-v1.5) catch
+  paraphrase and meaning; BM25 catches exact terminology, symbols, and rare names.
+  Reciprocal Rank Fusion combines them with a downstream cross-encoder deciding final
+  order — no fragile score normalisation.
+- **Intent-aware scope routing.** Queries that name a domain or content type ("in my
+  statistics lectures", "in the tech books", "my NLP homework") open *filtered* lanes
+  toward the right material. Routing is *soft*: scoped chunks get guaranteed seats in
+  the candidate pool, but the reranker still makes the final call — a bad hint can
+  never empty your results. Both dictionaries are config-only; extend them without
+  touching code.
+- **A dedicated code lane.** Code/notebook chunks are a tiny fraction of the corpus, so
+  for a query like *"show me a complex ggplot from my code"* a prose-oriented pipeline
+  buries them under textbook pages that merely mention the keyword. Detecting code
+  intent, skipping HyDE, widening the pool, and reserving a filtered lane for
+  script/notebook chunks brings the user's own code back to the top.
+- **Cross-encoder reranking** re-scores the fused candidates against the actual query
+  for precision at the top. The model is swappable (`retrieval.cross_encoder_model`,
+  with a picker in the console) — any HF cross-encoder works, and
+  `cross_encoder_device` pins it to a GPU when one is available. Bigger is not
+  automatically better: `BAAI/bge-reranker-v2-m3` scores higher on public
+  benchmarks, but measured here it cost **~22× the CPU latency** while reordering
+  roughly half the top-5 **without a measured quality win on this corpus** — the
+  default stays MiniLM-L6 until labelled `expected_source_files` in the golden set
+  say otherwise. That comparison is exactly what `recall@k` and `MRR` in the eval
+  suite are for.
+- **Grounded, cited generation** answers from the retrieved excerpts only, emits
+  inline `[n]` citations and a confidence line, and can run a second pass that verifies
+  each citation actually supports its sentence.
 
 ## Tuning without restarts
 
-Named retrieval **presets** live in `config.yaml` and are selectable per query
-— the warm pipeline is never mutated:
+Named retrieval **presets** live in `config.yaml` and are selectable per query — the
+warm pipeline is never mutated:
 
 ```yaml
 retrieval:
@@ -103,39 +127,85 @@ so results are always explainable.
 | Surface | Port | What it's for |
 |---|---|---|
 | **Query API** (`serve_api`) | `:8051` | Warm FastAPI endpoint — `/query`, `/search`, `/config`, `/history` (recent calls with their knobs + retrieval echo, for agents iterating on hyperparameters). |
-| **Corpus Ledger console** (`manage_api`) | `:8052` | Visual management: Query (rendered md + LaTeX answers *and* sources), Documents (search / filter / retag / delete), Vault browser, Ingest (per-file settings with **destination folders** — files move to their vault home before parsing, so indexed paths stay stable; web import as `.md` or printed `.pdf`; previews), Jobs, Settings (theme presets + font pickers, vault switcher, config surface with folder pickers), and an **Info** tab that diagrams the whole pipeline in-app. |
+| **Corpus Ledger console** (`manage_api`) | `:8052` | Visual management: Query (rendered md + LaTeX answers *and* sources), Documents (search / filter / retag / delete), Vault browser, Ingest (per-file settings with **destination folders** — files move to their vault home before parsing, so indexed paths stay stable; web import as `.md` or printed `.pdf`; previews), Jobs, Settings (theme presets + font pickers, Obsidian-style vault switcher, config surface with folder pickers), and an **Info** tab that diagrams the whole pipeline in-app. |
 
 The console's import lane pulls online sources straight into the corpus pipeline:
 fetch a URL as **markdown** (via `markitdown`, with `crawl4ai` / `scrapling` /
 `requests` backends) or as a **printed PDF** of the fully rendered page (headless
-Chromium — LaTeX, tables and highlighted code preserved), preview the result (PDF
-page numbers guide OCR-range picking), then promote it into the normal ingest flow.
+Chromium — LaTeX, tables and highlighted code preserved), preview the result (PDF page
+numbers guide OCR-range picking), then promote it into the normal ingest flow.
 
-## Evaluation — example setup
+## Evaluation — honest by design
 
-The repo ships a **small illustrative golden suite** (`eval/golden_queries.yaml`,
-six queries across three categories — conceptual, exam-like, code) so the
-runner is exercised out of the box:
+A 94-question, exam-grounded suite (`eval/golden_queries.yaml`) scored automatically in
+three tiers, each one clear about what it can and cannot prove. Every run writes a JSON
+result and a markdown scorecard side by side under `eval/`, and **every metric reports
+the number of questions it was actually scored over** — a metric with no ground truth in
+the golden set reports `not scored`, never a confident zero.
+
+| Tier | Metrics | Needs |
+|---|---|---|
+| **1 · Retrieval** | hit-rate@k (expected domain in top-k), **MRR** (rank of the first correct-domain hit), **recall@k** over expected source files, **scope precision / recall** (when the query names a domain, does the auto-router fire, and is it right?), course-routing accuracy | nothing but the index — runs offline in minutes |
+| **2 · Answer** | keyword recall, **citation validity** (`[n]` markers that actually resolve to a retrieved doc), **groundedness floor**, citation support (second-pass auditor), answered rate | generation endpoint |
+| **3 · Calibration** | correctness bucketed by the answer's own HIGH/MEDIUM/LOW line, plus the HIGH−LOW `gap` | generation endpoint |
+
+The **groundedness floor** is the part I'd defend in an interview: it is deterministic
+and needs no LLM. For each cited sentence it measures content-word n-gram overlap with
+the chunk that sentence points at, and reports the worst-scoring sentence by name. High
+overlap doesn't prove a claim is right — but *low* overlap means a sentence barely
+resembles the source it cites, which is the exact shape of a fabricated citation. It
+also catches dangling markers (a `[9]` against a top-7 context), which the generator
+otherwise drops silently.
+
+An optional `--judge` tier adds LLM-as-judge answer correctness against a `gold_answer`
+label. It is explicitly labelled **advisory**: a language model grading a language model
+is useful for ranking two runs against each other, not as ground truth — and when a
+question has no gold answer, the judge's correctness score is *discarded* rather than
+recorded, because a model grading its own output against no reference measures nothing.
+
+Everything else here is an *automatic proxy*. Keyword recall checks that expected terms
+appear, not that the explanation is correct; hit-rate checks the domain, not the exact
+passage. They exist to **catch regressions**, not to certify faithfulness — that job
+belongs to the citation auditor, the per-answer confidence line, and ultimately reading
+the cited source.
 
 ```bash
-python main.py eval --retrieval-only      # offline regression, no LLM, runs in minutes
+python main.py eval --retrieval-only     # tier 1 only: offline, minutes, no LLM
+python main.py eval                      # all three tiers
+python main.py eval --judge              # + the advisory LLM-judge pass
 ```
 
-| Metric | What it measures |
-|---|---|
-| **Keyword recall** | Fraction of `expect_keywords` that appear in the top-k chunks (or in the answer, full run). |
-| **Retrieval hit** | Whether the expected `domain` metadata value landed in the top-k. |
-| **Course hit** *(optional)* | Whether the #1 source's `course_name` metadata matches `expect_course` (only if you populated `parser.course_taxonomy` in `config.yaml`). |
-| **Citation support** *(full run)* | Fraction of cited sources the second-pass auditor marked supported. |
-| **Confidence / Answered** *(full run)* | Distribution of HIGH/MEDIUM/LOW and the fraction of non-punting answers. |
+The judge does not have to be a model this machine can call. `--judge-export`
+writes a JSONL bundle (question, answer, and the text of the chunks the answer
+actually cited) that any external grader — a human, or a stronger model in
+another session — can score; `--judge-import` merges the scores back and
+rebuilds every tier. A partial scores file is refused rather than quietly
+averaged over the subset it happened to cover.
 
-These are deliberately framed as **automatic proxy metrics**. Keyword recall
-checks that expected terms *appear* — not that the explanation is correct;
-retrieval hit checks the domain, not the exact passage. They exist to **catch
-regressions**, not to certify faithfulness — that job belongs to the
-second-pass citation auditor, the per-answer confidence line, and ultimately
-reading the cited source. Replace the shipped example with your own golden
-set (30-100 queries written from your corpus) for serious regression work.
+## Swapping the LLM backend
+
+Generation, HyDE and the eval judge each resolve through a **provider registry**
+in `config.yaml`, so the backend is a one-word change and different roles can
+run on different providers (generate locally, judge with something stronger):
+
+```yaml
+providers:
+  minimax:
+    kind: openai                       # the wire protocol, not the vendor
+    base_url: "https://api.minimax.io/v1"
+    model: "MiniMax-M2"
+    api_key_env: MINIMAX_API_KEY       # the NAME of an env var
+generation:
+  provider: minimax
+```
+
+Anything exposing an OpenAI-compatible `/v1/chat/completions` or an
+Anthropic-compatible endpoint drops in this way. **Keys are never stored in
+`config.yaml`** — a provider names the environment variable that holds its key,
+and the console's Settings tab shows which providers have their key set without
+ever displaying the value. Switching provider there rewrites the model id to
+match, since a new endpoint plus the old provider's model id is the failure
+mode you'd otherwise hit at call time.
 
 ## Quickstart
 
@@ -155,11 +225,9 @@ python main.py ingest-pdfs                       # -> data/pdf_chunks.jsonl
 python main.py ingest-notebooks                  # -> data/ipynb_chunks.jsonl
 python main.py ingest-code --include-path "src"  # -> data/code_chunks.jsonl
 python main.py index --append data/pdf_chunks.jsonl
-python main.py index --append data/ipynb_chunks.jsonl
-python main.py index --append data/code_chunks.jsonl
 
 # 4. Ask
-python main.py query "Explain the central limit theorem from my notes"
+python main.py query "How did I implement knowledge distillation in my capstone?"
 python main.py chat                              # interactive REPL
 
 # 5. Serve
@@ -170,10 +238,9 @@ python -m uvicorn manage_api:app --host 127.0.0.1 --port 8052  # Corpus Ledger c
 python main.py eval --retrieval-only             # fast offline regression
 ```
 
-Full local-only setup (no cloud key) is in [`RUN_LOCAL.md`](RUN_LOCAL.md); the
-day-to-day usage cookbook is in [`MANUAL.md`](MANUAL.md); the **documentation
-site** (architecture, API, operations, Docker deployment) is under [`docs/`](docs/)
-and builds with MkDocs:
+Full local-only setup (no cloud key) is in [`RUN_LOCAL.md`](RUN_LOCAL.md); day-to-day
+usage is in [`MANUAL.md`](MANUAL.md); the **documentation site** (architecture, API,
+operations, Docker deployment) is under [`docs/`](docs/) and builds with MkDocs:
 
 ```bash
 pip install mkdocs-material
@@ -183,9 +250,9 @@ mkdocs serve        # http://127.0.0.1:8000
 ## Run it anywhere with Docker
 
 The project ships a self-contained Docker bundle that runs both services plus a
-generation backend with **two commands** — no Python, no venv, no path surgery —
-and mounts your vault so the full console (including the Vault browser and
-Ingest) works on a second machine:
+generation backend with **two commands** — no Python, no venv, no path surgery — and
+mounts your vault so the full console (including the Vault browser and Ingest) works on
+a second machine:
 
 ```bash
 docker compose up --build -d     # query API :8051 · console :8052 · generation :3001
@@ -205,39 +272,32 @@ webui/index.html                    # the console front-end
 app.py                              # optional Streamlit interface
 src/
   ingestion/   # obsidian_parser, pdf_loader (OCR-capable), ipynb_loader, code_loader, ocr_vlm
-  embeddings/  # embedder - builds ChromaDB + bm25s from chunk JSONL
+  embeddings/  # embedder — builds ChromaDB + bm25s from chunk JSONL
   retrieval/   # retriever (hybrid + RRF + code lane), reranker, hyde, scope, context_expand
-  generation/  # generator - grounded answers + citation verification
+  generation/  # generator — grounded answers + citation verification
   llm/         # unified OpenAI-compatible / local client
   prompts/     # versioned YAML prompt templates + loader
   utils/       # config_loader (comment-preserving persistence), logger
   pipeline.py  # wires the query path together
-eval/          # golden suite (illustrative example) + runner
+eval/          # 94-question golden suite, tiered runner + pure metric layer (metrics.py)
 tests/         # pytest suite (chunking, jobs, loaders)
 docs/          # MkDocs documentation site
 ```
 
 ## Design notes
 
-- **Content-addressed IDs.** `doc_id = sha256(source_file + text[:500])[:16]` —
-  re-ingesting is idempotent; changing chunk *text* orphans vectors (there's a
-  swap playbook for that), while metadata-only fixes go through an in-place
-  retag with no re-embedding.
-- **JSONL is the source of truth**; the vector DB and the sparse pickle are
-  *derived* and rebuildable from it. Readers stream and split on `"\n"` only,
-  so exotic Unicode inside chunk text can never shred a record.
-- **Paged maintenance.** At this corpus size every scan/update/delete pages the
-  vector store in bounded batches, so maintenance scripts stay within a modest
-  RAM budget.
-- **Graceful degradation.** If the generation endpoint is down, the API returns
-  a readable error object (not a 500) so callers can relay the cause, and
-  retrieval-only still works.
-- **Configurable course taxonomy.** All course-name and domain mappings
-  (course codes, folder names, abbreviations, daily-note conventions) live in
-  `parser.course_taxonomy` in `config.yaml` — the pipeline ships with sensible
-  generic defaults; you populate the entries for your own institution / corpus.
+- **Content-addressed IDs.** `doc_id = sha256(source_file + text[:500])[:16]` — re-ingesting
+  is idempotent; changing chunk *text* orphans vectors (there's a swap playbook for that),
+  while metadata-only fixes go through an in-place retag with no re-embedding.
+- **JSONL is the source of truth**; the vector DB and the sparse pickle are *derived*
+  and rebuildable from it. Readers stream and split on `"\n"` only, so exotic Unicode
+  inside chunk text can never shred a record.
+- **Paged maintenance.** At this corpus size every scan/update/delete pages the vector
+  store in bounded batches, so maintenance scripts stay within a modest RAM budget.
+- **Graceful degradation.** If the generation endpoint is down, the API returns a
+  readable error object (not a 500) so callers can relay the cause, and retrieval-only
+  still works.
 
-Deliberately **not** implemented: weighted RRF. It was evaluated and skipped —
-the downstream cross-encoder already absorbs the benefit once the right chunks
-are in the pool, and per-lane weights only re-introduce a tuning burden for
-gains within noise.
+Deliberately **not** implemented: weighted RRF. It was evaluated and skipped — the
+downstream cross-encoder already absorbs the benefit once the right chunks are in the
+pool, and per-lane weights only re-introduce a tuning burden for gains within noise.

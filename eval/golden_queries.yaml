@@ -1,20 +1,63 @@
 # ============================================================
-#  Golden query eval suite — Personal RAG
-#  94 questions: the original 30 conceptual seeds, plus exam-like
+#  Golden query eval suite — the personal RAG
+#  100 questions: the original 30 conceptual seeds, plus exam-like
 #  questions modeled on ACTUAL exam/PSS/quiz samples found in the
 #  vault (DS206 SQL midterms, RL midterm samples + tree-MDP worked
-#  examples, MA quizzes, NLP PSS/HWs, Armenian History midterm Q&As),
-#  plus own-code / problem-situation queries against the author's real
-#  assignments and projects.
+#  examples, MA quizzes, NLP PSS/HWs), plus own-code / problem-situation
+#  queries against the author's real assignments and projects.
 #
-#  Each query has:
+#  Session 16: history questions removed; the suite is now entirely
+#  data-science/technical. Two NLP questions were rewritten to drop a
+#  language-specific framing while keeping their technical substance.
+#  Eight questions were added to balance the thin domains (viz/prog/db/
+#  math/ts/stats) — every one probed against the live index first, so
+#  none of them is a question the corpus cannot answer.
+#
+#  REQUIRED per query:
 #    question        — what the user asks
-#    domain          — expected domain tag (for retrieval hit-rate)
+#    domain          — expected domain tag (hit-rate@k, MRR, scope routing)
 #    expect_keywords — terms a correct answer should contain (recall proxy)
-#    expect_course   — (optional) course the top source should come from
 #
-#  Run:  python main.py eval                      (full, needs the LLM)
-#        python main.py eval --retrieval-only     (minutes, offline)
+#  OPTIONAL — each one switches on a metric; ABSENT means the metric is not
+#  scored for that query (reported as null with its coverage count, never as
+#  a zero). Add them incrementally; nothing breaks while they are missing.
+#
+#    expect_course         course the #1 source should come from. Auto-skipped
+#                          entirely when the corpus has no course metadata.
+#    expected_source_files list of vault paths (or trailing fragments, e.g.
+#                          "NLP/Lecture 3.md") that SHOULD be retrieved →
+#                          enables recall@k. Matching ignores case, slash
+#                          direction and dash flavour, so an en-dash in the
+#                          real path still matches a typed hyphen.
+#    expect_scope          domains the auto scope-router SHOULD fire on — set
+#                          this only when the QUESTION TEXT actually names a
+#                          domain ("in my NLP homework", "using SQL"). It is
+#                          NOT the same as `domain`: most questions ("Explain
+#                          the bias-variance tradeoff") name no domain at all,
+#                          and a silent router is correct for those. Enables
+#                          scope_recall; without it recall is not scored,
+#                          while scope precision + fire-rate still are.
+#    gold_answer           reference answer in prose → enables the LLM-judge
+#                          correctness score (`--judge`). Without it the judge
+#                          still scores groundedness, and its correctness
+#                          number is DISCARDED — a model grading its own
+#                          output against no reference measures nothing.
+#
+#  Run:  python main.py eval                      (all tiers, needs the LLM)
+#        python main.py eval --retrieval-only     (tier 1, minutes, offline)
+#        python main.py eval --judge              (adds the advisory judge tier)
+#        python main.py eval --limit 5            (smoke run)
+#
+#  Example of a fully-labelled entry:
+#    - question: "What is knowledge distillation?"
+#      domain: nlp
+#      expect_keywords: ["teacher", "student", "soft"]
+#      expect_course: "Capstone"
+#      expected_source_files: ["Capstone/distillation notes.md"]
+#      gold_answer: >
+#        A large teacher model's soft output distribution is used as the
+#        training target for a smaller student, transferring the teacher's
+#        learned class similarities rather than just the hard labels.
 # ============================================================
 
 queries:
@@ -202,9 +245,9 @@ queries:
   - question: "How does multi-head attention differ from single-head attention?"
     domain: nlp
     expect_keywords: ["multi-head", "attention"]
-  - question: "How does BPE tokenization work, and how did I train custom tokenizers for Armenian?"
+  - question: "How does BPE tokenization work, and how did I train a custom tokenizer in my NLP coursework?"
     domain: nlp
-    expect_keywords: ["BPE", "token", "Armenian"]
+    expect_keywords: ["BPE", "token", "vocabulary"]
     expect_course: "Natural Language Processing"
   - question: "How did I initialize the embeddings of new tokens when grafting a modified tokenizer (goal 3)?"
     domain: nlp
@@ -221,9 +264,9 @@ queries:
   - question: "What techniques make LLM inference faster?"
     domain: nlp
     expect_keywords: ["cache", "inference"]
-  - question: "How did my capstone restore punctuation of Armenian participial clauses as a sequence-labeling task?"
+  - question: "How did my capstone frame punctuation restoration as a sequence-labeling task?"
     domain: nlp
-    expect_keywords: ["punctuation", "sequence labeling", "Armenian"]
+    expect_keywords: ["punctuation", "sequence labeling", "token"]
     expect_course: "Capstone"
 
   # ============================================================
@@ -327,18 +370,6 @@ queries:
     expect_keywords: ["BFS", "DFS", "queue"]
 
   # ============================================================
-  #  EXAM-LIKE — Armenian History (midterm Q&As are in the corpus)
-  # ============================================================
-  - question: "What do my Armenian History midterm answers say about the Armenian Genocide?"
-    domain: general
-    expect_keywords: ["Armenian", "1915"]
-    expect_course: "Armenian History"
-  - question: "Summarize a key theme from my Armenian History quiz preparation notes."
-    domain: general
-    expect_keywords: ["Armenia"]
-    expect_course: "Armenian History"
-
-  # ============================================================
   #  CODING / ML PROBLEM SITUATIONS — own-code queries
   # ============================================================
   - question: "How did I compute a running total per department with window functions in my BI assignment?"
@@ -382,3 +413,59 @@ queries:
     domain: ml
     expect_keywords: ["report", "reward"]
     expect_course: "Reinforcement Learning"
+
+  # ============================================================
+  #  SESSION 16 — domain balance pass.
+  #  The suite skewed ml/nlp (44 of 92); these fill the thin domains.
+  #  Each was probed against the live index before being added: all hit
+  #  their expected domain with full keyword coverage in the retrieved
+  #  pool. expect_course is set ONLY where the #1 source really carries
+  #  that course tag — two questions retrieve correct-but-untagged files
+  #  (a metadata gap, not a routing failure), so they omit it rather
+  #  than bake in a guaranteed miss.
+  # ============================================================
+
+  # ---- Data Visualization ----
+  - question: "What is the grammar of graphics, and how do ggplot2 layers build up a plot?"
+    domain: viz
+    expect_keywords: ["ggplot", "aes", "geom", "layer"]
+    expect_course: "Data Visualization"
+  - question: "How do you visualize PCA results together with clusters?"
+    domain: viz
+    expect_keywords: ["PCA", "cluster", "component", "variance"]
+    expect_course: "Data Visualization"
+
+  # ---- Data Structures & Algorithms ----
+  - question: "What is an AVL tree and how does it stay balanced?"
+    domain: prog
+    expect_keywords: ["balance", "rotation", "height"]
+    expect_course: "Data Structures & Algorithms"
+  - question: "How does merge sort work and why is its complexity n log n?"
+    domain: prog
+    expect_keywords: ["merge", "divide", "recursion"]
+
+  # ---- Databases ----
+  - question: "What makes a decomposition lossless, and how does that differ from dependency preservation?"
+    domain: db
+    expect_keywords: ["lossless", "decomposition", "dependency"]
+    expect_course: "Databases & Data Engineering"
+
+  # ---- Calculus (the math questions were all linear algebra / root-finding;
+  #      nothing covered series, which is the bulk of the Calculus 2 material)
+  - question: "How do you test a series for convergence, and what does the ratio test tell you?"
+    domain: math
+    expect_keywords: ["series", "converge", "ratio"]
+    expect_course: "Calculus / Multivariable"
+
+  # ---- Time Series ----
+  - question: "What does the seasonal component of a SARIMA model capture?"
+    domain: ts
+    expect_keywords: ["seasonal", "SARIMA", "differencing"]
+    expect_course: "Time Series & Forecasting"
+
+  # ---- Probability (stats was all inference; the Ross probability-models
+  #      material — stochastic processes — had no question at all)
+  - question: "What defines a Poisson process and what are its key properties?"
+    domain: stats
+    expect_keywords: ["poisson", "rate", "independent"]
+    expect_course: "Statistics & Inference"
