@@ -335,6 +335,17 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
             argv.append("--save-figures")
         if prm.get("exts"):
             argv += ["--exts", str(prm["exts"])]
+        if prm.get("include_path"):
+            argv += ["--include-path", str(prm["include_path"])]
+        if prm.get("include_files"):
+            argv += ["--include-files", _files_csv(prm["include_files"])]
+        if prm.get("force_domain"):
+            argv += ["--force-domain", str(prm["force_domain"])]
+        if prm.get("force_tags"):
+            tags = prm["force_tags"]
+            if isinstance(tags, (list, tuple)):
+                tags = ",".join(str(t) for t in tags)
+            argv += ["--force-tags", str(tags)]
         return argv
     if kind == "ingest_code":
         argv = [py, "main.py", "ingest-code"]
@@ -348,6 +359,13 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
             argv += ["--include-files", _files_csv(prm["include_files"])]
         if prm.get("exts"):
             argv += ["--exts", str(prm["exts"])]
+        if prm.get("force_domain"):
+            argv += ["--force-domain", str(prm["force_domain"])]
+        if prm.get("force_tags"):
+            tags = prm["force_tags"]
+            if isinstance(tags, (list, tuple)):
+                tags = ",".join(str(t) for t in tags)
+            argv += ["--force-tags", str(tags)]
         return argv
     if kind == "ingest_md":
         # Scoped md parse (inbox md lane): include filter + own output are
@@ -364,6 +382,13 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
             if prm["chunking"] not in ("heading", "fixed", "document", "none"):
                 raise ValueError("chunking must be heading|fixed|document|none")
             argv += ["--chunking", prm["chunking"]]
+        if prm.get("force_domain"):
+            argv += ["--force-domain", str(prm["force_domain"])]
+        if prm.get("force_tags"):
+            tags = prm["force_tags"]
+            if isinstance(tags, (list, tuple)):
+                tags = ",".join(str(t) for t in tags)
+            argv += ["--force-tags", str(tags)]
         return argv
     if kind == "fetch_web":
         urls = prm.get("urls") or []
@@ -610,7 +635,7 @@ class ImportPromoteIn(BaseModel):
 
 
 class CustomGroupIn(BaseModel):
-    kind: str                                # pdf | code | md
+    kind: str                                # pdf | code | md | nb
     files: list[str] = Field(min_length=1)   # inbox filenames in this group
     chunking: Optional[str] = None           # heading|fixed|document|none
     ocr_engine: Optional[str] = None         # pdf groups only
@@ -1345,8 +1370,8 @@ def ingest_custom(body: CustomIngestIn) -> dict:
     problems = []
     dests: dict[int, tuple[Path, str]] = {}
     for gi, g in enumerate(body.groups):
-        if g.kind not in ("pdf", "code", "md"):
-            problems.append(f"group {gi}: kind must be pdf|code|md")
+        if g.kind not in ("pdf", "code", "md", "nb"):
+            problems.append(f"group {gi}: kind must be pdf|code|md|nb")
         if g.chunking and g.chunking not in ("heading", "fixed", "document", "none"):
             problems.append(f"group {gi}: bad chunking {g.chunking!r}")
         if g.ocr_engine and g.ocr_engine not in ("auto", "tesseract", "vlm", "none"):
@@ -1393,13 +1418,16 @@ def ingest_custom(body: CustomIngestIn) -> dict:
                 dest_abs, dest_rel = dests[gi]
                 names = _move_to_dest(names, dest_abs)
                 scope_rel = dest_rel
+            gdomain = g.domain.strip().lower() if g.domain else None
+            gtags = [t.strip().lstrip("#").lower() for t in g.tags if t.strip()] or None
             if g.kind == "md":
                 # one scoped parse per md file (path-substring scope)
                 for fi, name in enumerate(names):
                     out = f"data/inbox_{ts}_g{gi}f{fi}_md_chunks.jsonl"
                     jobs.append(enqueue("ingest_md", {
                         "include_path": f"{scope_rel}/{name}",
-                        "output": out, "chunking": g.chunking}))
+                        "output": out, "chunking": g.chunking,
+                        "force_domain": gdomain, "force_tags": gtags}))
                     jobs.append(enqueue("index_append", {"file": out}))
                 continue
             out = g.output or f"data/inbox_{ts}_g{gi}_{g.kind}_chunks.jsonl"
@@ -1420,9 +1448,17 @@ def ingest_custom(body: CustomIngestIn) -> dict:
                     params["force_tags"] = [t.strip().lstrip("#").lower()
                                             for t in g.tags if t.strip()]
                 jobs.append(enqueue("ingest_pdfs", params))
+            elif g.kind == "nb":                         # .ipynb/.py/.R/.Rmd
+                params = {"include_path": scope_rel, "include_files": names,
+                          "output": out, "force_domain": gdomain,
+                          "force_tags": gtags}
+                if g.exts:
+                    params["exts"] = g.exts
+                jobs.append(enqueue("ingest_notebooks", params))
             else:                                        # code
                 params = {"include_path": scope_rel, "include_files": names,
-                          "output": out}
+                          "output": out, "force_domain": gdomain,
+                          "force_tags": gtags}
                 if g.exts:
                     params["exts"] = g.exts
                 jobs.append(enqueue("ingest_code", params))
@@ -2021,10 +2057,13 @@ def api_schema() -> dict:
                            "ingest (pdf/code/md kinds, each with its own "
                            "params) + an append per group. Same 409 dup guard "
                            "as the inbox lane.",
-                "body": {"groups": "[{kind: pdf|code|md, files: [names], "
+                "body": {"groups": "[{kind: pdf|code|md|nb, files: [names], "
                                    "chunking?, ocr_engine?, pages?, domain?, "
                                    "tags?, exts?, output?, dest_dir? "
-                                   "(vault-relative; move-then-ingest)}]",
+                                   "(vault-relative; move-then-ingest)}]. "
+                                   "nb = .ipynb/.py/.R/.Rmd via ingest_notebooks; "
+                                   "domain/tags now stamp every kind, not just "
+                                   "pdf.",
                          "force": "bool"}},
             "POST /api/inbox/delete": {
                 "permission": "mutating",
@@ -2147,21 +2186,31 @@ def api_schema() -> dict:
             "ingest_notebooks": {
                 "permission": "mutating",
                 "params": {"output": "data/*.jsonl", "no_outputs": "bool",
-                           "save_figures": "bool", "exts": ".ipynb,.py,..."},
-                "note": "owns .ipynb/.py/.R/.Rmd"},
+                           "save_figures": "bool", "exts": ".ipynb,.py,...",
+                           "include_path": "substr (file-scoped custom jobs)",
+                           "include_files": "list[str] (exact filenames)",
+                           "force_domain": "str", "force_tags": "csv or list"},
+                "note": "owns .ipynb + .py + .R + .Rmd — it has the Python "
+                        "ast/`# %%` cell splitter, which raw code ingestion "
+                        "lacks (that is WHY .py/.R live here, not in "
+                        "ingest_code). File-scopable since session 15."},
             "ingest_code": {
                 "permission": "mutating",
                 "params": {"output": "data/*.jsonl", "include_path": "substr",
                            "exclude_path": "substr",
                            "include_files": "list[str] (exact filenames)",
-                           "exts": ".js,.ts,.sql,..."},
-                "note": "every language ingest_notebooks doesn't cover; agent-"
-                        "project roots need an include_path to be scoped in"},
+                           "exts": ".js,.ts,.sql,...",
+                           "force_domain": "str", "force_tags": "csv or list"},
+                "note": "every language ingest_notebooks doesn't cover "
+                        "(.js/.ts/.sql/.go/.java/.c/.cpp/.rs/… — NOT "
+                        ".py/.R/.ipynb/.Rmd); agent-project roots need an "
+                        "include_path to be scoped in"},
             "ingest_md": {
                 "permission": "mutating",
                 "params": {"include_path": "substr (REQUIRED)",
                            "output": "data/*.jsonl (REQUIRED, never chunks.jsonl)",
-                           "chunking": "heading|fixed|document|none"},
+                           "chunking": "heading|fixed|document|none",
+                           "force_domain": "str", "force_tags": "csv or list"},
                 "note": "SCOPED markdown parse (inbox md lane); guarded so the "
                         "vault-wide chunks.jsonl can never be clobbered"},
             "fetch_web": {

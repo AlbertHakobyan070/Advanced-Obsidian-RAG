@@ -54,6 +54,7 @@ from src.ingestion.obsidian_parser import (
     COURSE_MAP,
     split_large_chunk,
     build_context_header,
+    apply_forced_meta,
 )
 # Reuse the script gate so "skip Armenian" behaves identically everywhere.
 from src.ingestion.pdf_loader import detect_script, should_skip_script
@@ -223,6 +224,13 @@ class CodeLoader:
         self.skip_roots = (set(skip_roots) if skip_roots is not None
                            else set(_DEFAULT_SKIP_ROOTS))
         self.max_file_bytes = max_file_bytes
+        # Per-file / batch metadata overrides (inbox lane): scoped files carry
+        # no course-folder path, so path-derived domain is "general". These
+        # stamp every chunk this run — metadata only, doc_ids unaffected.
+        self.force_domain: str | None = None
+        self.force_tags: list[str] = []
+
+        self.include_files: set[str] | None = None
 
         self.stats = {
             "files_found": 0,
@@ -432,6 +440,8 @@ class CodeLoader:
                         dupes += 1
                         continue
                     seen_ids.add(ch.doc_id)
+                    if self.force_domain or self.force_tags:
+                        apply_forced_meta(ch.metadata, self.force_domain, self.force_tags)
                     out_f.write(json.dumps(ch.to_dict(), ensure_ascii=False) + "\n")
                     written += 1
         if dupes:

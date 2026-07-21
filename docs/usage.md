@@ -9,9 +9,9 @@ They share one pipeline and one config.
 python main.py index                       # build indexes from data/*.jsonl
 python main.py index --append <file>.jsonl # add a source family (auto-rebuilds sparse)
 python main.py ingest-pdfs [--pages "1-50,60"] [--chunking heading|fixed|document|none] [--include-files "a.pdf,b.pdf"]
-python main.py ingest-notebooks
-python main.py ingest-code --include-path "<subtree>" [--include-files "x.sql"]
-python main.py ingest-md --include-path "<scope>" --output data/<name>.jsonl   # scoped md parse (guarded)
+python main.py ingest-notebooks [--include-path "<scope>"] [--include-files "a.py,b.ipynb"] [--force-domain ml] [--force-tags "a,b"]
+python main.py ingest-code --include-path "<subtree>" [--include-files "x.sql"] [--force-domain swe] [--force-tags "a,b"]
+python main.py ingest-md --include-path "<scope>" --output data/<name>.jsonl [--force-domain nlp] [--force-tags "a,b"]  # scoped md parse (guarded)
 python main.py fetch-web --urls "https://…" [--backend auto|requests|crawl4ai|scrapling] [--format md|pdf]
 python main.py convert-files --files "report.docx" [--ocr-pages "1-4,9"]       # markitdown → .md
 python main.py query "<question>" [--preset code|concept|synthesis] [--top-k N] [--max-tokens N]
@@ -111,22 +111,24 @@ Open **http://127.0.0.1:8052**. Tabs:
   metadata-only, no re-embed), and **delete** from the index.
 - **Vault** — browse the mounted vault tree read-only.
 - **Ingest** — a three-step flow: **1 · Add documents** (upload to the inbox; **every
-  routable type — pdf, md, code — rides a `default | custom` lane**, and every file can
-  carry its **own ⚙ settings** — domain / tags / chunking / OCR / pages for PDFs,
-  chunking for markdown — plus a **destination folder** for any kind: the file *moves to
-  its vault home when the job is queued, before parsing*, so the index records the final
-  path (blank = stays in the inbox, archives to `_ingested`); 👁 previews any md/PDF,
-  with PDF page numbers visible for OCR-range picking); **2 · Fetch & convert** (pull web
-  links as `.md` via markitdown **or as a printed `.pdf`** of the rendered page via
-  headless Chromium — LaTeX/tables/code intact; convert any upload —
-  pdf/docx/pptx/xlsx/html — to `.md`, with optional per-page OCR; outputs stage in
-  `_converted` with preview until promoted); **3 · Jobs designer** — one card per queued
-  job: files sharing identical effective settings batch together, differing ⚙ settings
-  split automatically; review the plan preview, then **Queue the plan** (everything
-  shown) or one lane at a time (*custom only* / *default only*). Vault-wide passes live
-  under **Advanced** in the same panel — same serial queue, whole-vault scope (Books
-  folders are scoped with the include/exclude path fields; the CLI's only/skip-Books
-  flags remain for terminal use).
+  routable type — pdf, md, code, notebook — rides a `default | custom` lane**, and every
+  file can carry its **own ⚙ settings** — domain and tags for all kinds, chunking for
+  pdf/md, OCR engine and page subset for PDFs — plus a **destination folder**: the file
+  *moves to its vault home when the job is queued, before parsing*, so the index records
+  the final path (blank = stays in the inbox, archives to `_ingested`). The **batch
+  defaults** (domain / tags / chunking / destination, each with a 📁 picker) fill in for
+  any file without its own ⚙ value. 👁 previews any md/PDF, with PDF page numbers visible
+  for OCR-range picking); **2 · Fetch & convert** (pull web links as `.md` via markitdown
+  **or as a printed `.pdf`** of the rendered page via headless Chromium —
+  LaTeX/tables/code intact; convert any upload — pdf/docx/pptx/xlsx/html — to `.md`, with
+  optional per-page OCR; outputs stage in `_converted` with preview until promoted);
+  **3 · Jobs designer** — one **card per queued job** (kind badge, lane, file chips,
+  effective-settings line): files sharing identical effective settings batch together,
+  differing ⚙ settings split automatically; then **Queue the plan** (everything shown) or
+  one lane at a time (*custom only* / *default only*). Vault-wide passes live under
+  **Advanced** in the same panel. Routing is kind-aware: `.py`/`.R`/`.ipynb`/`.Rmd` go to
+  the **notebook** lane (`ingest-notebooks` owns them — it has the Python
+  `ast`/`# %%` cell splitter), while `.js`/`.ts`/`.sql`/`.go`/… go to the **code** lane.
 - **Jobs** — watch long-running ingest / maintenance jobs.
 - **Settings** — appearance with **dark and light preset shelves**: the built-in themes
   (the warm Ledger pair + **Material mint** dark/light) plus your own **saved presets** —

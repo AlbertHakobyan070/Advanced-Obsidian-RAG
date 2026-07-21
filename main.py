@@ -149,6 +149,15 @@ def cmd_ingest_notebooks(args):
         loader.save_figures = True
     if args.exts:
         loader.exts = {e.strip().lower() for e in args.exts.split(",") if e.strip()}
+    if getattr(args, "include_path", None):
+        loader.include_path = args.include_path
+    if getattr(args, "include_files", None):
+        loader.include_files = {f.strip() for f in args.include_files.split(",") if f.strip()}
+    if getattr(args, "force_domain", None):
+        loader.force_domain = args.force_domain.strip().lower()
+    if getattr(args, "force_tags", None):
+        loader.force_tags = [t.strip().lstrip("#").lower()
+                             for t in args.force_tags.split(",") if t.strip()]
     out = loader.ingest_vault()
     print(f"\n✅ Notebook/code chunks written to {out}")
     print(f"   Now run: python main.py index --append {out}")
@@ -173,6 +182,11 @@ def cmd_ingest_code(args):
                                 for f in args.include_files.split(",") if f.strip()}
     if args.exts:
         loader.exts = {e.strip().lower() for e in args.exts.split(",") if e.strip()}
+    if getattr(args, "force_domain", None):
+        loader.force_domain = args.force_domain.strip().lower()
+    if getattr(args, "force_tags", None):
+        loader.force_tags = [t.strip().lstrip("#").lower()
+                             for t in args.force_tags.split(",") if t.strip()]
     out = loader.ingest_vault()
     if loader.stats["chunks_total"] == 0:
         print("\n❌ 0 code chunks produced — no matching files in scope "
@@ -201,6 +215,13 @@ def cmd_ingest_md(args):
     if not docs:
         print("\n❌ 0 markdown chunks produced — no matching .md files in scope.")
         sys.exit(3)
+    fd = (args.force_domain or "").strip().lower() or None
+    ft = [t.strip().lstrip("#").lower()
+          for t in (args.force_tags or "").split(",") if t.strip()]
+    if fd or ft:
+        from src.ingestion.obsidian_parser import apply_forced_meta
+        for d in docs:
+            apply_forced_meta(d.metadata, fd, ft)
     parser.export_jsonl(docs, args.output)
     print(f"\n✅ {len(docs)} markdown chunks written to {args.output}")
     print(f"   Now run: python main.py index --append {args.output}")
@@ -402,6 +423,15 @@ def build_parser() -> argparse.ArgumentParser:
                          "and link them via metadata (default OFF)")
     nb.add_argument("--exts", default=None,
                     help="Comma-separated subset, e.g. '.ipynb,.py' (default: all four)")
+    nb.add_argument("--include-path", default=None, metavar="SUBSTR",
+                    help="Only files whose vault-relative path contains SUBSTR")
+    nb.add_argument("--include-files", default=None, metavar="NAME,NAME",
+                    help="Only process files with these exact filenames "
+                         "(comma-separated; file-scoped custom jobs)")
+    nb.add_argument("--force-domain", default=None, metavar="DOMAIN",
+                    help="Stamp this domain on every chunk (metadata only)")
+    nb.add_argument("--force-tags", default=None, metavar="TAG,TAG",
+                    help="Stamp these #tags on every chunk (metadata only)")
     nb.set_defaults(func=cmd_ingest_notebooks)
 
     code = sub.add_parser("ingest-code",
@@ -421,6 +451,10 @@ def build_parser() -> argparse.ArgumentParser:
                            "(comma-separated; file-scoped custom jobs)")
     code.add_argument("--exts", default=None,
                       help="Comma-separated subset, e.g. '.js,.ts,.sql' (default: all mapped)")
+    code.add_argument("--force-domain", default=None, metavar="DOMAIN",
+                      help="Stamp this domain on every chunk (metadata only)")
+    code.add_argument("--force-tags", default=None, metavar="TAG,TAG",
+                      help="Stamp these #tags on every chunk (metadata only)")
     code.set_defaults(func=cmd_ingest_code)
 
     mdp = sub.add_parser("ingest-md",
@@ -436,6 +470,10 @@ def build_parser() -> argparse.ArgumentParser:
                      help="How oversized sections split (default: parser.chunking)")
     mdp.add_argument("--vault", default=None, metavar="PATH",
                      help="Override vault root")
+    mdp.add_argument("--force-domain", default=None, metavar="DOMAIN",
+                     help="Stamp this domain on every chunk (metadata only)")
+    mdp.add_argument("--force-tags", default=None, metavar="TAG,TAG",
+                     help="Stamp these #tags on every chunk (metadata only)")
     mdp.set_defaults(func=cmd_ingest_md)
 
     fw = sub.add_parser("fetch-web",

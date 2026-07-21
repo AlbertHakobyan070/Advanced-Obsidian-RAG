@@ -62,6 +62,7 @@ from src.ingestion.obsidian_parser import (
     COURSE_MAP,
     split_large_chunk,
     build_context_header,
+    apply_forced_meta,
 )
 # Reuse the script gate from pdf_loader so "skip Armenian" behaves identically.
 from src.ingestion.pdf_loader import detect_script, should_skip_script
@@ -182,9 +183,21 @@ class NotebookLoader:
         save_figures: bool = False,
         figures_dir: Path | None = None,
         exts: set[str] | None = None,
+        include_path: str | None = None,
+        include_files: set[str] | None = None,
     ):
         self.vault_path = Path(vault_path)
         self.output_file = Path(output_file)
+        # Scoping (file-routable custom jobs; None = whole vault, the classic
+        # behavior). include_path = a path substring; include_files = exact
+        # filenames. Both mirror code_loader's scoping so the designer can route
+        # individual .py/.R/.ipynb/.Rmd files just like it routes code.
+        self.include_path = include_path
+        self.include_files = include_files
+        # Per-file / batch metadata overrides (inbox lane), stamped at write —
+        # metadata only, doc_ids unaffected. Same shape as the other loaders.
+        self.force_domain: str | None = None
+        self.force_tags: list[str] = []
         self.min_chunk = min_chunk
         self.max_chunk = max_chunk
         self.overlap = overlap
@@ -248,11 +261,16 @@ class NotebookLoader:
             "site-packages", "node_modules", "__pycache__",
             "_Backups",
         }
+        inc = (self.include_path or "").replace("\\", "/").lower() or None
         found = []
         for f in self.vault_path.rglob("*"):
             if f.suffix.lower() not in self.exts:
                 continue
             if any(part in skip_parts for part in f.parts):
+                continue
+            if self.include_files is not None and f.name not in self.include_files:
+                continue
+            if inc and inc not in f.relative_to(self.vault_path).as_posix().lower():
                 continue
             found.append(f)
         self.stats["files_found"] = len(found)
@@ -554,6 +572,8 @@ class NotebookLoader:
                         dupes += 1
                         continue
                     seen_ids.add(ch.doc_id)
+                    if self.force_domain or self.force_tags:
+                        apply_forced_meta(ch.metadata, self.force_domain, self.force_tags)
                     out_f.write(json.dumps(ch.to_dict(), ensure_ascii=False) + "\n")
                     written += 1
         if dupes:

@@ -904,6 +904,22 @@ def build_context_header(heading_stack: list[str], file_meta: dict) -> str:
     return "[" + " | ".join(parts) + "]\n"
 
 
+def apply_forced_meta(meta: dict, force_domain: str | None,
+                      force_tags: list[str] | None) -> None:
+    """Stamp a batch/per-file domain + tags onto a chunk's metadata IN PLACE.
+    Metadata only — chunk text is untouched, so doc_ids are unaffected. Shared
+    by every loader so inbox files (which carry no course-folder path, hence no
+    path-derived domain) can still be routed to a domain and tagged at ingest.
+    """
+    if force_domain:
+        meta["domain"] = force_domain
+    if force_tags:
+        have = meta.get("tags") or []
+        if isinstance(have, str):
+            have = [t.strip() for t in have.split(",") if t.strip()]
+        meta["tags"] = have + [t for t in force_tags if t not in have]
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Parent sections (E2 small-to-big: match small chunks, generate from
 # the enclosing section). Children carry parent_id in METADATA ONLY —
