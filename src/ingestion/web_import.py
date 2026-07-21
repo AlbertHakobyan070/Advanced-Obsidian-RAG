@@ -130,22 +130,37 @@ def _print_pdf(url: str, dest: Path) -> None:
     Keeps the site's own rendering — LaTeX (KaTeX/MathJax), tables, syntax-
     highlighted code — which markdown conversion necessarily flattens."""
     try:
-        from playwright.sync_api import sync_playwright
+        from playwright.sync_api import Error as PWError, sync_playwright
     except ImportError as e:
         raise RuntimeError(
             "PDF fetch needs playwright — pip install playwright && "
             "python -m playwright install chromium") from e
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch()
-        try:
-            page = browser.new_page(viewport={"width": 1280, "height": 1024})
-            page.goto(url, wait_until="networkidle", timeout=90_000)
-            page.wait_for_timeout(1500)       # late math/highlight rendering
-            page.pdf(path=str(dest), format="A4", print_background=True,
-                     margin={"top": "14mm", "bottom": "14mm",
-                             "left": "12mm", "right": "12mm"})
-        finally:
-            browser.close()
+    try:
+        with sync_playwright() as pw:
+            try:
+                browser = pw.chromium.launch()
+            except PWError as e:
+                # The single most common failure in a fresh env: the browser
+                # binary was never downloaded, or it lives at a path the
+                # process can't see (PLAYWRIGHT_BROWSERS_PATH). Say exactly that
+                # instead of surfacing a raw "chromium error".
+                raise RuntimeError(
+                    "headless Chromium is not available — run "
+                    "`python -m playwright install chromium`. If it is already "
+                    "installed elsewhere, point PLAYWRIGHT_BROWSERS_PATH at that "
+                    f"cache before launching. (playwright said: {e})") from e
+            try:
+                page = browser.new_page(viewport={"width": 1280, "height": 1024})
+                page.goto(url, wait_until="networkidle", timeout=90_000)
+                page.wait_for_timeout(1500)   # late math/highlight rendering
+                page.pdf(path=str(dest), format="A4", print_background=True,
+                         margin={"top": "14mm", "bottom": "14mm",
+                                 "left": "12mm", "right": "12mm"})
+            finally:
+                browser.close()
+    except Exception:
+        dest.unlink(missing_ok=True)          # never leave a partial PDF staged
+        raise
 
 
 def fetch_urls(urls: list[str], dest_dir: Path, backend: str = "auto",
