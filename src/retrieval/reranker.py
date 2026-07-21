@@ -25,7 +25,7 @@ from src.utils.logger import get_logger
 log = get_logger(__name__)
 
 
-RERANK_MODES = ("cross_encoder", "lexical", "none")
+RERANK_MODES = ("cross_encoder", "http", "lexical", "none")
 
 _TOKEN_RE = re.compile(r"[a-z0-9_]+")
 
@@ -75,7 +75,9 @@ KNOWN_RERANKERS = {
 class Reranker:
     def __init__(self, model_name: str, top_k: int = 7,
                  mode: str = "cross_encoder", max_length: int = 512,
-                 device: str | None = None):
+                 device: str | None = None,
+                 http_url: str | None = None, http_model: str | None = None,
+                 http_timeout: int = 120):
         self.model_name = model_name
         self.top_k = top_k
         if mode not in RERANK_MODES:
@@ -89,6 +91,14 @@ class Reranker:
         self.device = (device or "").strip().lower() or None
         if self.device == "auto":
             self.device = None
+        # mode="http": the model is served OUT OF PROCESS behind an
+        # OpenAI-style /v1/rerank endpoint (llama-server --reranking
+        # --pooling rank). Same shape as the VLM-OCR lane, and the reason it
+        # exists: llama.cpp compiles its own sm_61 kernels, so a big reranker
+        # runs on GPUs that modern PyTorch wheels no longer support.
+        self.http_url = (http_url or "").rstrip("/")
+        self.http_model = http_model or model_name
+        self.http_timeout = int(http_timeout)
         self._model = None
 
     # Back-compat: some call sites check .enabled
@@ -109,7 +119,50 @@ class Reranker:
             mode=mode,
             max_length=cfg.get("retrieval.cross_encoder_max_length", 512),
             device=cfg.get("retrieval.cross_encoder_device", "auto"),
+            http_url=cfg.get("retrieval.rerank_http.base_url"),
+            http_model=cfg.get("retrieval.rerank_http.model"),
+            http_timeout=cfg.get("retrieval.rerank_http.timeout", 120),
         )
+
+    # ---- http lane -----------------------------------------------------
+
+    def _rerank_http(self, query: str, docs: list[RetrievedDoc],
+                     k: int) -> list[RetrievedDoc]:
+        """Score via an external /v1/rerank endpoint (llama-server et al).
+
+        Deliberately NOT fail-soft: if the endpoint is configured and down, a
+        silent fall-through to fused order would quietly change what the model
+        answers from while every log line still said "reranked". The caller
+        can pick mode="lexical" per call if it wants a model-free path.
+        """
+        import httpx
+
+        if not self.http_url:
+            raise ValueError(
+                "rerank_mode='http' needs retrieval.rerank_http.base_url "
+                "(e.g. http://127.0.0.1:8101/v1)")
+        payload = {"model": self.http_model, "query": query,
+                   "documents": [d.text for d in docs], "top_n": len(docs)}
+        r = httpx.post(f"{self.http_url}/rerank", json=payload,
+                       timeout=self.http_timeout)
+        r.raise_for_status()
+        data = r.json()
+        # llama.cpp returns {"results":[{"index":i,"relevance_score":x},...]}
+        results = data.get("results")
+        if not isinstance(results, list):
+            raise ValueError(f"unexpected /rerank response keys: {sorted(data)}")
+        for item in results:
+            i = item.get("index")
+            score = item.get("relevance_score", item.get("score"))
+            if i is None or score is None or not (0 <= i < len(docs)):
+                raise ValueError(f"bad /rerank result entry: {item}")
+            docs[i].rerank_score = float(score)
+        if any(d.rerank_score is None for d in docs):
+            raise ValueError("/rerank did not score every document")
+        reranked = sorted(docs, key=lambda d: d.rerank_score, reverse=True)
+        log.info("http-reranked %d candidates -> top %d via %s",
+                 len(docs), k, self.http_url)
+        return reranked[:k]
 
     def _get_model(self):
         if self._model is None:
@@ -142,6 +195,9 @@ class Reranker:
         if m == "none" or not docs:
             # No reranking — just truncate the fused ranking.
             return docs[:k]
+
+        if m == "http":
+            return self._rerank_http(query, docs, k)
 
         if m == "lexical":
             terms = _TOKEN_RE.findall(query.lower())

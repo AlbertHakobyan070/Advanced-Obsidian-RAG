@@ -1178,6 +1178,42 @@ document.addEventListener("keydown",e=>{if(e.key==="Escape")closeModal()});
 /* Preview a staged/inbox file. PDFs open in the browser's viewer (page
    numbers visible — that's how OCR page ranges get picked); markdown renders
    with the same md+LaTeX pipeline as answers. */
+/* "Which pages need OCR?" — read-only scan of a staged PDF. Reports the
+   textless page ranges (copy straight into the ⚙ OCR-pages box / --pages) so
+   nobody has to scroll a 700-page book to find the scanned plates. Verdicts
+   use the SAME threshold the ingest path uses, so what it flags is exactly
+   what ingestion would treat as scanned. */
+async function ocrScan(name,where){
+  openModal(`OCR scan — ${name}`,`<div class="skel"></div><div class="skel" style="width:70%"></div>`);
+  try{
+    const r=await api("/api/import/ocr_scan?"+new URLSearchParams({name,where}));
+    if(!r.ok)throw new Error(r.error||"scan failed");
+    const kindLabel={born_digital:["done","born-digital — no OCR needed"],
+                     fully_scanned:["failed","fully scanned — OCR the whole file"],
+                     mixed:["run","mixed — OCR only the ranges below"]}[r.kind]||["","?"];
+    const rows=(r.pages||[]).filter(p=>p.verdict!=="ok").slice(0,120).map(p=>
+      `<tr><td class="mono">${p.page}</td>
+       <td><span class="pill ${p.verdict==="needs_ocr"?"failed":"run"}">${esc(p.verdict)}</span></td>
+       <td class="mono" style="text-align:right">${p.chars}</td>
+       <td>${p.has_images?"🖼":""}</td>
+       <td class="pth">${esc(p.sample||"")}</td></tr>`).join("");
+    openModal(`OCR scan — ${name}`,`
+      <div class="row" style="gap:8px;align-items:center;margin-bottom:10px">
+        <span class="pill ${kindLabel[0]}">${esc(kindLabel[1])}</span>
+        <span class="hint" style="margin:0">${r.page_count} pages · threshold ${r.threshold} chars</span>
+      </div>
+      <div><label class="f">Needs OCR — ${r.n_needs_ocr} page(s), ${r.pct_needs_ocr}%</label>
+        <input class="mono" readonly value="${esc(r.needs_ocr_spec||"(none)")}"
+               onclick="this.select()" style="width:100%"></div>
+      <div style="margin-top:8px"><label class="f">Sparse — ${r.n_sparse} page(s), worth eyeballing (captions / dividers)</label>
+        <input class="mono" readonly value="${esc(r.sparse_spec||"(none)")}"
+               onclick="this.select()" style="width:100%"></div>
+      <p class="hint" style="margin-top:8px">Click a box to select, then paste into the file's ⚙ <b>OCR pages</b> field (or <code>--pages</code>). Use 👁 to eyeball a page before spending an OCR pass on it.${r.pages_truncated?" Per-page rows below are capped; the ranges above are complete.":""}</p>
+      ${rows?`<table class="tbl"><thead><tr><th>page</th><th>verdict</th><th style="text-align:right">chars</th><th>img</th><th>first text on the page</th></tr></thead><tbody>${rows}</tbody></table>`
+            :`<div class="empty">Every page has extractable text.</div>`}`);
+  }catch(e){openModal(`OCR scan — ${name}`,`<span style="color:var(--red)">${esc(e.message)}</span>`)}
+}
+
 async function previewFile(name,where){
   const url="/api/import/file?"+new URLSearchParams({name,where});
   if(name.toLowerCase().endsWith(".pdf")){
@@ -1382,6 +1418,7 @@ async function loadInbox(){
         nb:"domain / tags / destination"}[k]||"destination";
       const cog=routable?`<button class="btn icon ibx-cfg${hasCfg?" on":""}" data-name="${esc(f.name)}" title="Per-file settings for THIS file only: ${cogTitle} — overrides the batch defaults">⚙</button>`:"";
       const eye=(k==="pdf"||k==="md")?`<button class="btn icon ibx-view" data-name="${esc(f.name)}" title="Preview this file (PDFs show page numbers — pick OCR / --pages ranges from here)">👁</button>`:"";
+      const scan=(k==="pdf")?`<button class="btn icon ibx-scan" data-name="${esc(f.name)}" title="Which pages need OCR? Scans the PDF and reports the textless page ranges — no scrolling, no OCR run">🔎</button>`:"";
       // →md conversion is for pdf + office/web docs (docx/pptx/xlsx/html); code
       // and notebooks have their own lanes and gain nothing from markitdown.
       const conv=(k==="pdf"||k==="other")?`<button class="btn icon ibx-conv" data-name="${esc(f.name)}" title="Convert to markdown via markitdown into _converted (optional OCR pages from the Fetch & convert panel)">→md</button>`:"";
@@ -1409,13 +1446,14 @@ async function loadInbox(){
         </td></tr>`:"";
       return `<tr><td>${esc(f.name)}${hasCfg?' <span class="pill" style="font-size:10px" title="has its own settings">⚙</span>':""}</td>
         <td style="text-align:right" class="mono">${gb(f.bytes)}</td>
-        <td>${sel}</td><td style="text-align:right;white-space:nowrap">${cog}${eye}${conv}
+        <td>${sel}</td><td style="text-align:right;white-space:nowrap">${cog}${eye}${scan}${conv}
         <button class="btn icon ibx-del" data-name="${esc(f.name)}" title="Remove this file from the inbox (disk only — the index is untouched)">✕</button></td></tr>${cfgRow}`;
     }).join(""):`<tr><td class="empty">Inbox is empty.</td></tr>`;
     $$(".ibx-route").forEach(s=>s.onchange=()=>{state.route[s.dataset.name]=s.value;renderPlan()});
     $$(".ibx-cfg").forEach(b=>b.onclick=()=>{
       state.cfgOpen[b.dataset.name]=!state.cfgOpen[b.dataset.name];rerenderInbox()});
     $$(".ibx-view").forEach(b=>b.onclick=()=>previewFile(b.dataset.name,"inbox"));
+    $$(".ibx-scan").forEach(b=>b.onclick=()=>ocrScan(b.dataset.name,"inbox"));
     const bindCfg=(cls,key,ev)=>$$(cls).forEach(el=>el[ev||"oninput"]=()=>{
       const n=el.dataset.name;
       state.fileCfg[n]={...fileCfg(n),[key]:el.value};renderPlan()});
@@ -1615,10 +1653,20 @@ async function loadConverted(){
        <td style="text-align:right" class="mono">${gb(f.bytes)}</td>
        <td style="text-align:right;white-space:nowrap">
        <button class="btn icon fx-view" data-name="${esc(f.name)}" title="Preview (PDFs show page numbers for OCR / --pages picking)">👁</button>
+       ${(f.ext||"")===".pdf"?`<button class="btn icon fx-scan" data-name="${esc(f.name)}" title="Which pages need OCR? Reports the textless page ranges so you don't scroll the book yourself">🔎</button>`:""}
+       <button class="btn icon fx-dl" data-name="${esc(f.name)}" title="Download the raw file — keep it without ingesting">⤓</button>
        <button class="btn fx-promote" data-name="${esc(f.name)}" title="Move into the inbox uploads list for ingestion">promote</button>
        <button class="btn icon fx-del" data-name="${esc(f.name)}" title="Delete this staged conversion">✕</button></td></tr>`).join("")
       :`<tr><td class="empty">Nothing staged.</td></tr>`;
     $$(".fx-view").forEach(b=>b.onclick=()=>previewFile(b.dataset.name,"converted"));
+    /* Raw download: a fetched page you want to KEEP but not index shouldn't
+       have to go through promote+ingest to get out of the staging pool. */
+    $$(".fx-dl").forEach(b=>b.onclick=()=>{
+      const u="/api/import/file?"+new URLSearchParams(
+        {name:b.dataset.name,where:"converted",download:"1"});
+      const a=document.createElement("a");a.href=u;a.download=b.dataset.name;
+      document.body.appendChild(a);a.click();a.remove();});
+    $$(".fx-scan").forEach(b=>b.onclick=()=>ocrScan(b.dataset.name,"converted"));
     $$(".fx-promote").forEach(b=>b.onclick=async()=>{
       try{const r=await api("/api/import/promote",{method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({names:[b.dataset.name]})});

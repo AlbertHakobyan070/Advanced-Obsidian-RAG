@@ -82,18 +82,47 @@ class VLMOCR:
 
     @classmethod
     def from_config(cls, cfg: Config) -> "VLMOCR":
-        key_env = cfg.get("pdf.vlm_ocr.api_key_env", "OPENAI_API_KEY")
+        """Resolve the vision endpoint, optionally through a named preset.
+
+        Each OCR model wants its OWN prompt and dpi — DeepSeek-OCR needs the
+        llama.cpp `<__media__>` marker because it has no chat template of its
+        own, PaddleOCR-VL and GLM-OCR do not. Keeping those bundled per model
+        in `pdf.vlm_ocr_presets` means switching engine is one word instead of
+        four hand-edited keys that fail confusingly when mismatched.
+
+        Precedence: an explicitly-set `pdf.vlm_ocr.<key>` always wins over the
+        preset, so an existing config keeps behaving exactly as before.
+        """
+        presets = cfg.get("pdf.vlm_ocr_presets", {}) or {}
+        name = cfg.get("pdf.vlm_ocr.preset")
+        spec: dict = {}
+        if name:
+            if name not in presets:
+                raise ValueError(
+                    f"pdf.vlm_ocr.preset = {name!r} is not in "
+                    f"pdf.vlm_ocr_presets. Known: {sorted(presets)}")
+            spec = presets[name] or {}
+            log.info("VLM-OCR preset %r -> model=%s dpi=%s",
+                     name, spec.get("model"), spec.get("dpi"))
+
+        def pick(key, default):
+            explicit = cfg.get(f"pdf.vlm_ocr.{key}")
+            if explicit is not None:
+                return explicit
+            return spec.get(key, default)
+
+        key_env = pick("api_key_env", "OPENAI_API_KEY")
         return cls(
-            base_url=cfg.get("pdf.vlm_ocr.base_url", "http://127.0.0.1:8100/v1"),
-            model=cfg.get("pdf.vlm_ocr.model", "Unlimited-OCR"),
+            base_url=pick("base_url", "http://127.0.0.1:8100/v1"),
+            model=pick("model", "Unlimited-OCR"),
             api_key=cfg.secret(key_env) if key_env else None,
-            prompt=cfg.get("pdf.vlm_ocr.prompt", "<image>document parsing."),
-            dpi=int(cfg.get("pdf.vlm_ocr.dpi", 200)),
-            timeout=float(cfg.get("pdf.vlm_ocr.timeout", 300)),
-            max_tokens=int(cfg.get("pdf.vlm_ocr.max_tokens", 8192)),
-            temperature=float(cfg.get("pdf.vlm_ocr.temperature", 0.0)),
-            max_pages_per_pdf=cfg.get("pdf.vlm_ocr.max_pages_per_pdf", None),
-            max_edge_px=cfg.get("pdf.vlm_ocr.max_edge_px", None),
+            prompt=pick("prompt", "<image>document parsing."),
+            dpi=int(pick("dpi", 200)),
+            timeout=float(pick("timeout", 300)),
+            max_tokens=int(pick("max_tokens", 8192)),
+            temperature=float(pick("temperature", 0.0)),
+            max_pages_per_pdf=pick("max_pages_per_pdf", None),
+            max_edge_px=pick("max_edge_px", None),
         )
 
     # ---- endpoint ----

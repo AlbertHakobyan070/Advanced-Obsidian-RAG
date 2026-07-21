@@ -88,6 +88,84 @@ def test_lexical_and_none_modes_need_no_model():
     assert r2._model is None
 
 
+class FakeResp:
+    def __init__(self, payload, status=200):
+        self._p, self.status_code = payload, status
+
+    def json(self):
+        return self._p
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+def test_http_mode_scores_from_the_endpoint(monkeypatch):
+    """The GPU lane: a reranker served out-of-process via /v1/rerank."""
+    import httpx
+    sent = {}
+
+    def fake_post(url, json=None, timeout=None):
+        sent["url"], sent["json"] = url, json
+        # deliberately out of order + not index-sorted, like llama.cpp
+        return FakeResp({"results": [
+            {"index": 2, "relevance_score": 0.9},
+            {"index": 0, "relevance_score": 0.1},
+            {"index": 1, "relevance_score": 0.5},
+        ]})
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    r = Reranker(model_name="bge-reranker-v2-m3", mode="http", top_k=2,
+                 http_url="http://127.0.0.1:8101/v1", http_model="bge")
+    out = r.rerank("q", docs("alpha", "beta", "gamma"))
+    assert sent["url"] == "http://127.0.0.1:8101/v1/rerank"
+    assert sent["json"]["model"] == "bge"
+    assert sent["json"]["documents"] == ["alpha", "beta", "gamma"]
+    assert [d.text for d in out] == ["gamma", "beta"]      # 0.9, 0.5
+    assert out[0].rerank_score == 0.9
+    assert r._model is None                                # nothing local loaded
+
+
+def test_http_mode_without_a_url_fails_loudly():
+    r = Reranker(model_name="x", mode="http")
+    with pytest.raises(ValueError, match="rerank_http.base_url"):
+        r.rerank("q", docs("a", "b"))
+
+
+def test_http_mode_rejects_a_partial_scoring(monkeypatch):
+    """A reranker that scores only some documents must not silently pass.
+
+    llama.cpp has had rerank bugs (ggml-org/llama.cpp#16407); half-scored
+    results would otherwise reorder on garbage while the log said 'reranked'.
+    """
+    import httpx
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: FakeResp(
+        {"results": [{"index": 0, "relevance_score": 0.7}]}))
+    r = Reranker(model_name="x", mode="http", http_url="http://h/v1")
+    with pytest.raises(ValueError, match="did not score every document"):
+        r.rerank("q", docs("a", "b", "c"))
+
+
+def test_http_mode_rejects_a_malformed_response(monkeypatch):
+    import httpx
+    monkeypatch.setattr(httpx, "post", lambda *a, **k: FakeResp({"data": []}))
+    r = Reranker(model_name="x", mode="http", http_url="http://h/v1")
+    with pytest.raises(ValueError, match="unexpected /rerank response"):
+        r.rerank("q", docs("a"))
+
+
+def test_http_config_resolves():
+    r = Reranker.from_config(cfg_of({"retrieval": {
+        "rerank_mode": "http",
+        "rerank_http": {"base_url": "http://127.0.0.1:8101/v1/",
+                        "model": "bge-reranker-v2-m3", "timeout": 90},
+    }}))
+    assert r.mode == "http"
+    assert r.http_url == "http://127.0.0.1:8101/v1"      # trailing / stripped
+    assert r.http_model == "bge-reranker-v2-m3"
+    assert r.http_timeout == 90
+
+
 def test_per_call_mode_override_still_works():
     d = docs("alpha beta", "beta gamma")
     r = Reranker(model_name="BAAI/bge-reranker-v2-m3", mode="cross_encoder")

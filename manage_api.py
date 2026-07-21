@@ -1269,10 +1269,15 @@ def import_converted() -> dict:
 
 
 @app.get("/api/import/file")
-def import_file(name: str, where: str = "converted"):
+def import_file(name: str, where: str = "converted", download: int = 0):
     """Serve one staged/inbox file for in-console preview (md rendered
     client-side; pdf shown in the browser's viewer with page numbers — that's
-    how you pick OCR page ranges). Plain filenames only; read-only."""
+    how you pick OCR page ranges). Plain filenames only; read-only.
+
+    download=1 sends it as an attachment instead: a fetched page you want to
+    KEEP but not index (save the .md/.pdf and move on) shouldn't have to go
+    through the ingest flow to get out of the staging pool.
+    """
     if Path(name).name != name or not name:
         return JSONResponse({"error": "plain filenames only"}, status_code=400)
     base = {"converted": _converted_dir(), "inbox": _inbox()}.get(where)
@@ -1285,8 +1290,45 @@ def import_file(name: str, where: str = "converted"):
                             status_code=404)
     media = "application/pdf" if p.suffix.lower() == ".pdf" else \
             "text/markdown; charset=utf-8"
+    if download:
+        # octet-stream so the browser saves rather than renders the .md
+        return FileResponse(p, media_type="application/octet-stream",
+                            filename=p.name,
+                            content_disposition_type="attachment")
     return FileResponse(p, media_type=media,
                         content_disposition_type="inline")
+
+
+@app.get("/api/import/ocr_scan")
+def import_ocr_scan(name: str, where: str = "converted", limit: int = 400) -> dict:
+    """Which pages of a staged PDF need OCR? Read-only report, no OCR run.
+
+    Saves scrolling a 700-page book by hand: returns the page ranges with no
+    extractable text (paste straight into --pages / the ⚙ OCR range box), the
+    'sparse' middle ground worth eyeballing, and a per-page sample so you can
+    confirm a flagged page really is a scan before spending an OCR pass on it.
+
+    Uses the SAME threshold the ingest path uses, so its verdict matches what
+    ingestion would actually do.
+    """
+    if Path(name).name != name or not name:
+        return {"ok": False, "error": "plain filenames only"}
+    base = {"converted": _converted_dir(), "inbox": _inbox()}.get(where)
+    if base is None:
+        return {"ok": False, "error": "where must be converted|inbox"}
+    p = base / name
+    if not p.is_file() or p.suffix.lower() != ".pdf":
+        return {"ok": False, "error": f"not a staged PDF: {name}"}
+    from src.ingestion.ocr_scan import scan_pdf
+    try:
+        rep = scan_pdf(p, threshold=int(CFG.get("pdf.skip_scanned_threshold", 50)))
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    # Per-page rows are only for eyeballing; cap them so a 900-page book does
+    # not ship a megabyte of JSON into the browser. The ranges are complete.
+    rep["pages_truncated"] = len(rep["pages"]) > limit
+    rep["pages"] = rep["pages"][:limit]
+    return {"ok": True, **rep}
 
 
 @app.post("/api/import/fetch")
