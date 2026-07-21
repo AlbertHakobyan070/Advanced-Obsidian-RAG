@@ -38,5 +38,7 @@ markitdown[pdf,docx,pptx,xlsx]   # any-file -> markdown converter (import lane)
 # after installing run:  python -m playwright install chromium
 # (on this machine rag.bat pins PLAYWRIGHT_BROWSERS_PATH to the G: cache).
 crawl4ai==0.9.2
-scrapling==0.4.11
+# the [fetchers] extra is REQUIRED — bare scrapling imports but its Fetcher
+# dies on missing curl_cffi/browserforge at call time
+scrapling[fetchers]==0.4.11
 playwright==1.61.0

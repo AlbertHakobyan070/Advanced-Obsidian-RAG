@@ -110,28 +110,35 @@ Open **http://127.0.0.1:8052**. Tabs:
 - **Documents** — search, `#tag` filter, **retag** (domain / course / tags —
   metadata-only, no re-embed), and **delete** from the index.
 - **Vault** — browse the mounted vault tree read-only.
-- **Ingest** — a three-step flow: **1 · Add documents** (upload to the inbox; every file
-  can carry its **own ⚙ settings** — domain / tags / chunking, and OCR engine / page
-  subset for PDFs — or inherit the batch defaults; 👁 previews any md/PDF, with PDF page
-  numbers visible for OCR-range picking); **2 · Fetch & convert** (pull web links as
-  `.md` via markitdown **or as a printed `.pdf`** of the rendered page via headless
-  Chromium — LaTeX/tables/code intact; convert any upload — pdf/docx/pptx/xlsx/html — to
-  `.md`, with optional per-page OCR; outputs stage in `_converted` with preview until
-  promoted); **3 · Jobs designer** — route each file `default | custom`; files sharing
-  identical settings batch into one job, files with different ⚙ settings split into
-  separate jobs automatically; review the live plan preview, then *Ingest custom jobs* /
-  *Ingest all* / *Ingest inbox only*. Vault-wide passes live under **Advanced** in the
-  same panel — same serial queue, whole-vault scope.
+- **Ingest** — a three-step flow: **1 · Add documents** (upload to the inbox; **every
+  routable type — pdf, md, code — rides a `default | custom` lane**, and every file can
+  carry its **own ⚙ settings** — domain / tags / chunking / OCR / pages for PDFs,
+  chunking for markdown — plus a **destination folder** for any kind: the file *moves to
+  its vault home when the job is queued, before parsing*, so the index records the final
+  path (blank = stays in the inbox, archives to `_ingested`); 👁 previews any md/PDF,
+  with PDF page numbers visible for OCR-range picking); **2 · Fetch & convert** (pull web
+  links as `.md` via markitdown **or as a printed `.pdf`** of the rendered page via
+  headless Chromium — LaTeX/tables/code intact; convert any upload —
+  pdf/docx/pptx/xlsx/html — to `.md`, with optional per-page OCR; outputs stage in
+  `_converted` with preview until promoted); **3 · Jobs designer** — one card per queued
+  job: files sharing identical effective settings batch together, differing ⚙ settings
+  split automatically; review the plan preview, then **Queue the plan** (everything
+  shown) or one lane at a time (*custom only* / *default only*). Vault-wide passes live
+  under **Advanced** in the same panel — same serial queue, whole-vault scope (Books
+  folders are scoped with the include/exclude path fields; the CLI's only/skip-Books
+  flags remain for terminal use).
 - **Jobs** — watch long-running ingest / maintenance jobs.
 - **Settings** — appearance with **dark and light preset shelves**: the built-in themes
   (the warm Ledger pair + **Material mint** dark/light) plus your own **saved presets** —
   export the active theme as CSS variables, tweak, save under a name, rename or delete
-  from its chip; an Obsidian-style **vault switcher** that remembers every vault ever
-  opened together with its own path/index settings and swaps the whole set atomically;
-  and the editable config surface with **📁 folder pickers**: vault root, Chroma / BM25 /
-  chunks paths, embedding + cross-encoder models, default rerank & chunking, generation
-  endpoint. Saves rewrite `config.yaml` in place (comments preserved); nothing
-  hot-applies — the response says which service to restart.
+  from its chip; **font pickers** for headings / body / mono (system serif and sans
+  choices like Times New Roman, Georgia, Arial — or any installed font by name; applied
+  over every theme, browser-local); an Obsidian-style **vault switcher** that remembers
+  every vault ever opened together with its own path/index settings and swaps the whole
+  set atomically; and the editable config surface with **📁 folder pickers**: vault root,
+  Chroma / BM25 / chunks paths, embedding + cross-encoder models, default rerank &
+  chunking, generation endpoint. Saves rewrite `config.yaml` in place (comments
+  preserved); nothing hot-applies — the response says which service to restart.
 - **Info** — an in-app diagram of the whole pipeline with a query/ingestion toggle and a
   per-knob influence table.
 

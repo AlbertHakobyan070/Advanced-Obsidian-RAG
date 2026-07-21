@@ -583,6 +583,11 @@ class InboxIngestIn(BaseModel):
     # jobs designer routes its custom files elsewhere and sends the rest here).
     # None/empty = the whole inbox, the classic behavior.
     files: Optional[list[str]] = None
+    # Optional vault-relative destination folder: files are MOVED there BEFORE
+    # the ingest job runs, so source_file (and therefore doc_ids) match the
+    # file's final home — moving after ingest would orphan the indexed path.
+    # Unset = classic behavior (stay in the inbox, archive to _ingested).
+    dest_dir: Optional[str] = None
 
 
 class InboxDeleteIn(BaseModel):
@@ -614,6 +619,10 @@ class CustomGroupIn(BaseModel):
     tags: list[str] = Field(default_factory=list)  # pdf groups only
     exts: Optional[str] = None               # code groups only (".sql,.js")
     output: Optional[str] = None             # override the timestamped JSONL
+    # Vault-relative destination: the group's files MOVE there before the
+    # ingest job runs (source_file/doc_ids match the final home). Unset =
+    # files stay in the inbox.
+    dest_dir: Optional[str] = None
 
 
 class CustomIngestIn(BaseModel):
@@ -1106,10 +1115,31 @@ def ingest_inbox(body: InboxIngestIn) -> dict:
     # second, and same-name outputs would make the batches clobber each other
     out = (f"data/inbox_{time.strftime('%Y%m%d_%H%M%S')}"
            f"_{uuid.uuid4().hex[:4]}_chunks.jsonl")
+    # Validate the enums BEFORE any file moves — a 400 after moving would
+    # strand files in the destination with nothing queued for them.
+    if body.ocr_engine and body.ocr_engine not in ("auto", "tesseract", "vlm", "none"):
+        return JSONResponse({"ok": False,
+                             "error": "ocr_engine must be auto|tesseract|vlm|none"},
+                            status_code=400)
+    if body.chunking and body.chunking not in ("heading", "fixed", "document", "none"):
+        return JSONResponse({"ok": False,
+                             "error": "chunking must be heading|fixed|document|none"},
+                            status_code=400)
+    names = [f.name for f in pdfs]
+    moved_to = None
+    if body.dest_dir:
+        # Move FIRST so source_file/doc_ids carry the final path; no archive
+        # step afterwards — the destination IS the file's home.
+        try:
+            dest_abs, dest_rel = _resolve_vault_dest(body.dest_dir)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        names = _move_to_dest(names, dest_abs)
+        include_rel, moved_to = dest_rel, dest_rel
     params: dict[str, Any] = {"include_path": include_rel, "output": out,
-                              "no_images": True, "archive_processed": True}
-    if subset is not None:
-        params["include_files"] = [f.name for f in pdfs]
+                              "no_images": True,
+                              "archive_processed": body.dest_dir is None,
+                              "include_files": names}
     if body.ocr_engine:
         params["ocr_engine"] = body.ocr_engine
     if body.chunking:
@@ -1125,13 +1155,49 @@ def ingest_inbox(body: InboxIngestIn) -> dict:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
     j2 = enqueue("index_append", {"file": out})
     return {"ok": True,
-            "files": [f.name for f in pdfs],
+            "files": names,
+            "moved_to": moved_to,
             "non_pdfs_ignored": non_pdfs,
             "forced_past_conflicts": conflicts if body.force else [],
             "output": out,
             "jobs": [j1.public(), j2.public()],
             "note": "index --append rebuilds the sparse index itself; restart "
                     "serve_api (:8051) once the append job finishes."}
+
+
+# ---- destination-folder support (move BEFORE ingest, doc_id-stable) ----
+
+def _resolve_vault_dest(dest_dir: str) -> tuple[Path, str]:
+    """Validate a vault-relative destination folder; create it if missing.
+    Returns (absolute_path, vault_relative_posix). Rejects escapes."""
+    vault = _vault_root().resolve()
+    rel = (dest_dir or "").strip().replace("\\", "/").strip("/")
+    if not rel:
+        raise ValueError("empty destination")
+    if ".." in rel.split("/") or re.match(r"^([A-Za-z]:|/)", rel):
+        raise ValueError(f"destination must be vault-relative: {dest_dir!r}")
+    dest = (vault / rel).resolve()
+    if not str(dest).lower().startswith(str(vault).lower()):
+        raise ValueError("destination escapes the vault")
+    dest.mkdir(parents=True, exist_ok=True)
+    return dest, dest.relative_to(vault).as_posix()
+
+
+def _move_to_dest(names: list[str], dest: Path) -> list[str]:
+    """Move inbox files into their destination folder (collision-safe rename).
+    Returns the FINAL filenames — ingest jobs must scope on these."""
+    inbox = _inbox()
+    final: list[str] = []
+    for name in names:
+        src = inbox / name
+        tgt = dest / name
+        for i in itertools.count(2):
+            if not tgt.exists():
+                break
+            tgt = dest / f"{src.stem} ({i}){src.suffix}"
+        shutil.move(str(src), str(tgt))
+        final.append(tgt.name)
+    return final
 
 
 # ---- inbox housekeeping + import lane (fetch / convert / promote) ----
@@ -1277,12 +1343,22 @@ def ingest_custom(body: CustomIngestIn) -> dict:
     have = {f.name for f in inbox.iterdir() if f.is_file()}
 
     problems = []
+    dests: dict[int, tuple[Path, str]] = {}
     for gi, g in enumerate(body.groups):
         if g.kind not in ("pdf", "code", "md"):
             problems.append(f"group {gi}: kind must be pdf|code|md")
+        if g.chunking and g.chunking not in ("heading", "fixed", "document", "none"):
+            problems.append(f"group {gi}: bad chunking {g.chunking!r}")
+        if g.ocr_engine and g.ocr_engine not in ("auto", "tesseract", "vlm", "none"):
+            problems.append(f"group {gi}: bad ocr_engine {g.ocr_engine!r}")
         for n in g.files:
             if n not in have:
                 problems.append(f"group {gi}: {n!r} is not in the inbox")
+        if g.dest_dir:
+            try:
+                dests[gi] = _resolve_vault_dest(g.dest_dir)
+            except ValueError as e:
+                problems.append(f"group {gi}: {e}")
     if problems:
         return JSONResponse({"ok": False, "error": "bad plan",
                              "problems": problems}, status_code=400)
@@ -1310,20 +1386,28 @@ def ingest_custom(body: CustomIngestIn) -> dict:
     jobs = []
     try:
         for gi, g in enumerate(body.groups):
+            # Destination groups move their files FIRST (doc_ids carry the
+            # final path); scope the jobs on the destination + final names.
+            scope_rel, names = include_rel, list(g.files)
+            if gi in dests:
+                dest_abs, dest_rel = dests[gi]
+                names = _move_to_dest(names, dest_abs)
+                scope_rel = dest_rel
             if g.kind == "md":
                 # one scoped parse per md file (path-substring scope)
-                for fi, name in enumerate(g.files):
+                for fi, name in enumerate(names):
                     out = f"data/inbox_{ts}_g{gi}f{fi}_md_chunks.jsonl"
                     jobs.append(enqueue("ingest_md", {
-                        "include_path": f"{include_rel}/{name}",
+                        "include_path": f"{scope_rel}/{name}",
                         "output": out, "chunking": g.chunking}))
                     jobs.append(enqueue("index_append", {"file": out}))
                 continue
             out = g.output or f"data/inbox_{ts}_g{gi}_{g.kind}_chunks.jsonl"
             if g.kind == "pdf":
                 params: dict[str, Any] = {
-                    "include_path": include_rel, "include_files": g.files,
-                    "output": out, "no_images": True, "archive_processed": True}
+                    "include_path": scope_rel, "include_files": names,
+                    "output": out, "no_images": True,
+                    "archive_processed": gi not in dests}
                 if g.chunking:
                     params["chunking"] = g.chunking
                 if g.ocr_engine:
@@ -1337,7 +1421,7 @@ def ingest_custom(body: CustomIngestIn) -> dict:
                                             for t in g.tags if t.strip()]
                 jobs.append(enqueue("ingest_pdfs", params))
             else:                                        # code
-                params = {"include_path": include_rel, "include_files": g.files,
+                params = {"include_path": scope_rel, "include_files": names,
                           "output": out}
                 if g.exts:
                     params["exts"] = g.exts
@@ -1926,7 +2010,11 @@ def api_schema() -> dict:
                          "domain": "str? (stamped on the batch)",
                          "tags": "list[str]?",
                          "files": "list[str]? (restrict to these inbox PDFs; "
-                                  "unset = whole inbox)"}},
+                                  "unset = whole inbox)",
+                         "dest_dir": "str? vault-relative folder — files MOVE "
+                                     "there BEFORE ingest (doc_ids carry the "
+                                     "final path); unset = stay in inbox, "
+                                     "archive to _ingested"}},
             "POST /api/ingest_custom": {
                 "permission": "mutating",
                 "purpose": "custom-jobs designer lane: per-group file-scoped "
@@ -1935,7 +2023,8 @@ def api_schema() -> dict:
                            "as the inbox lane.",
                 "body": {"groups": "[{kind: pdf|code|md, files: [names], "
                                    "chunking?, ocr_engine?, pages?, domain?, "
-                                   "tags?, exts?, output?}]",
+                                   "tags?, exts?, output?, dest_dir? "
+                                   "(vault-relative; move-then-ingest)}]",
                          "force": "bool"}},
             "POST /api/inbox/delete": {
                 "permission": "mutating",

@@ -6,8 +6,10 @@
 <meta name="color-scheme" content="dark light">
 <title>Corpus Ledger — RAG Management Console</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='3' y='3' width='5' height='18' rx='1' fill='%23E8A33D'/%3E%3Crect x='10' y='3' width='5' height='18' rx='1' fill='%238A6423'/%3E%3Crect x='17' y='6' width='4' height='15' rx='1' fill='%23A99F8F'/%3E%3C/svg%3E">
-<script>/* theme is applied BEFORE first paint to avoid a flash of the wrong palette */
-document.documentElement.dataset.theme=localStorage.getItem("ledger-theme")||"dark";</script>
+<script>/* theme + fonts are applied BEFORE first paint to avoid a flash of the wrong look */
+document.documentElement.dataset.theme=localStorage.getItem("ledger-theme")||"dark";
+try{const _f=JSON.parse(localStorage.getItem("ledger-fonts")||"{}");
+for(const k of ["disp","body","mono"])if(_f[k])document.documentElement.style.setProperty("--"+k,_f[k]);}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <!-- Answer preview (md + LaTeX). Loaded lazily; the console degrades to raw
@@ -252,12 +254,17 @@ details#customjob-details summary:hover{color:var(--amber)}
 /* asymmetric grids for wide screens (fall back to one column on narrow) */
 .g21{grid-template-columns:2fr 1fr}.g12{grid-template-columns:1fr 1.5fr}
 @media(max-width:1060px){.g21,.g12{grid-template-columns:1fr}}
-/* grouped knob fieldsets (Query tab): label + bordered cluster */
-.fset{border:1px solid var(--line);border-radius:var(--r);padding:8px 12px 10px;background:var(--panel-2)}
-.fset .fset-t{font:11px var(--mono);color:var(--ink-dim);text-transform:uppercase;letter-spacing:.08em;margin:0 0 6px}
-.fset .row{gap:8px}
-.fsets{display:flex;gap:12px;flex-wrap:wrap;align-items:stretch;margin-top:10px}
-.fsets .fset{flex:1;min-width:240px}
+/* grouped knob fieldsets (Query tab): label + bordered cluster.
+   Sized to CONTENT (flex:0 1 auto) — stretched boxes read as wasted space. */
+.fset{border:1px solid var(--line);border-radius:var(--r);padding:6px 10px 8px;background:var(--panel-2)}
+.fset .fset-t{font:11px var(--mono);color:var(--ink-dim);text-transform:uppercase;letter-spacing:.08em;margin:0 0 5px}
+.fset .row{gap:8px;flex-wrap:nowrap}
+.fsets{display:flex;gap:10px;flex-wrap:wrap;align-items:stretch;margin-top:10px}
+.fsets .fset{flex:0 1 auto}
+/* inputs inside flex rows must be allowed to shrink, never push neighbors */
+.row input,.row select{min-width:0}
+/* numeric knob inputs: wide enough for their placeholder + the spinner */
+input.num{width:112px}
 /* per-file inbox settings: the tuck-under row */
 tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding:10px 12px}
 tr.fcfg .row{gap:8px}
@@ -372,14 +379,14 @@ button.btn.icon.on{border-color:var(--amber);color:var(--amber)}
       <table style="margin-top:12px"><tbody id="inbox-rows"><tr><td class="empty">Inbox is empty.</td></tr></tbody></table>
       <label class="f" style="margin-top:14px">Batch defaults <span class="hint" style="margin:0;display:inline;text-transform:none;letter-spacing:0">(inherited by every file WITHOUT its own ⚙ settings)</span></label>
       <div class="row" style="margin-top:6px">
-        <input id="inbox-domain" placeholder="domain (opt): swe / ml / nlp…" style="width:190px" title="Stamped on every chunk — feeds domain scope routing. Inbox files have no course folder, so they land 'general' otherwise. Per-file ⚙ settings override this.">
-        <input id="inbox-tags" placeholder="tags (opt): agentic, python" style="flex:1;min-width:150px" title="Comma-separated. Stamped on every chunk — searchable and boosted at retrieval when a tag appears in the query. Per-file ⚙ settings override this.">
-        <select id="inbox-chunking" style="width:190px" title="How OVERSIZED sections are split. heading = paragraph packing (default). fixed = strict sliding window — for scanned/OCR PDFs whose paragraph structure is noise. document = element-aware: code blocks, tables and lists are never cut internally. none = no splitting (whole section = one chunk; embeddings truncate very long text).">
+        <input id="inbox-domain" placeholder="domain (opt): swe / ml / nlp…" style="width:200px" title="Stamped on every chunk — feeds domain scope routing. Inbox files have no course folder, so they land 'general' otherwise. Per-file ⚙ settings override this.">
+        <input id="inbox-tags" placeholder="tags (opt): agentic, python" style="flex:0 1 260px" title="Comma-separated. Stamped on every chunk — searchable and boosted at retrieval when a tag appears in the query. Per-file ⚙ settings override this.">
+        <select id="inbox-chunking" style="width:180px" title="How OVERSIZED sections are split. heading = paragraph packing (default). fixed = strict sliding window — for scanned/OCR PDFs whose paragraph structure is noise. document = element-aware: code blocks, tables and lists are never cut internally. none = no splitting (whole section = one chunk; embeddings truncate very long text).">
           <option value="">chunking: heading</option><option value="fixed">chunking: fixed</option><option value="document">chunking: document</option><option value="none">chunking: none</option></select>
       </div>
       <div class="row" style="margin-top:10px">
-        <button class="btn primary" id="btn-ingest-inbox" title="Standard lane for every default-routed PDF: dup-check → ingest → append. Files with different ⚙ settings are batched separately, automatically.">Ingest inbox now</button>
-        <span class="hint" style="margin:0">dup-check → ingest (archives to <span class="mono">_ingested</span>) → append</span>
+        <button class="btn primary" id="btn-ingest-inbox" title="Queue every default-routed file (pdf / md / code) with the batch settings — same as the designer's 'default only'. Files with different ⚙ settings batch separately, automatically.">Ingest inbox now</button>
+        <span class="hint" style="margin:0">dup-check → ingest → append · files with a ⚙ destination move to their vault home; the rest archive to <span class="mono">_ingested</span></span>
       </div>
     </div>
     <div class="panel">
@@ -406,10 +413,11 @@ button.btn.icon.on{border-color:var(--amber);color:var(--amber)}
 
   <div class="grid g21">
   <div class="panel">
-    <h2>3 · Jobs designer — route, tune, queue</h2>
-    <p class="hint">Route each inbox file: <b>default</b> = the standard inbox lane (PDFs only), <b>custom</b> = sorted by type into job groups, each file keeping its own ⚙ knobs. The plan preview shows exactly what will queue. Vault-wide passes live under <b>Advanced</b> below — same queue, wider scope.</p>
-    <div class="desc">Custom-routed files sort by type: <b>PDF</b> files carry their ⚙ domain / tags / chunking / OCR engine / page subset (files sharing identical settings batch into one job; different settings split automatically); <b>code</b> files get an extension filter; <b>markdown</b> files run one scoped parse each (metadata from the note's own headings). The <b>global chunking</b> select fills in for custom files without their own ⚙ chunking. Then: <b>Ingest custom jobs</b> queues only the custom groups; <b>Ingest all</b> queues the groups AND the default lane for the remaining PDFs (never double-ingesting); <b>Ingest inbox only</b> is the classic whole-inbox lane. Every group gets its own index-append job, and the same duplicate guard protects all of it. The <b>Advanced</b> form below shares this queue but scopes over the whole vault — its jobs appear in the same plan of record (the Jobs tab).</div>
-    <div id="cg-groups"></div>
+    <h2>3 · Jobs designer — review the plan, then queue</h2>
+    <p class="hint">Every routable file (pdf / md / code) rides one of two lanes: <b>default</b> = batch settings, <b>custom</b> = its own ⚙ tuning. Files sharing identical effective settings batch into one job; different settings split automatically. Read the plan top-to-bottom, then press <b>Queue the plan</b>.</p>
+    <div class="desc">The flow is: <b>1</b> route files in panel 1 (the select shows each file's kind), <b>2</b> tune with ⚙ where needed — domain / tags / chunking / OCR / pages for PDFs, chunking for markdown, plus a <b>destination folder</b> for any kind (the file moves to its vault home when the job is queued, BEFORE parsing, so the index records the final path; blank = stays in the inbox and archives to <code>_ingested</code>), <b>3</b> check the job cards + plan preview here, <b>4</b> queue. <b>Queue the plan</b> runs everything shown; the two smaller buttons queue one lane at a time. PDFs on the default lane pass the duplicate guard of the classic inbox endpoint; md/code metadata comes from headings / paths — retag from Documents afterwards if needed. The <b>Advanced</b> form below shares the same serial queue but scopes over the whole vault.</div>
+    <label class="f" style="margin-top:8px">Job cards <span class="hint" style="margin:0;display:inline;text-transform:none;letter-spacing:0">(one card = one queued job; edit a file's ⚙ to move it between cards)</span></label>
+    <div id="cg-groups" style="margin-top:6px"></div>
     <div class="row" style="margin-top:10px">
       <select id="cg-chunking" title="Fallback chunking for custom files without their own ⚙ chunking. default = each lane's config default. document = element-aware (code/tables/lists never cut). none = no splitting.">
         <option value="">chunking (custom fallback): default</option><option value="heading">chunking: heading</option><option value="fixed">chunking: fixed</option><option value="document">chunking: document</option><option value="none">chunking: none</option></select>
@@ -418,12 +426,13 @@ button.btn.icon.on{border-color:var(--amber);color:var(--amber)}
       <div id="cg-preview" class="note" style="margin-top:6px">Inbox is empty.</div>
     </div>
     <div class="row" style="margin-top:12px">
-      <button class="btn primary" id="cg-ingest-custom" title="Queue the custom groups only (files routed 'default' are left alone).">Ingest custom jobs</button>
-      <button class="btn primary" id="cg-ingest-all" title="Queue the custom groups AND the standard inbox lane for the remaining default-routed PDFs.">Ingest all</button>
-      <button class="btn" id="cg-ingest-inbox" title="Classic whole-inbox lane only (every inbox PDF; custom routing ignored, batch defaults apply).">Ingest inbox only</button>
+      <button class="btn primary" id="cg-queue-plan" title="Queue exactly what the plan preview shows — every lane, every group.">▶ Queue the plan</button>
+      <span class="hint" style="margin:0">or one lane at a time:</span>
+      <button class="btn" id="cg-queue-custom" title="Queue only the custom-routed groups.">custom only</button>
+      <button class="btn" id="cg-queue-default" title="Queue only the default-routed groups (batch settings).">default only</button>
       <span id="cg-msg" class="hint" style="margin:0"></span>
     </div>
-    <div class="note">Custom code/md chunks keep path-derived metadata (inbox files have no course folder) — retag domain/course/tags from Documents afterwards. Notebook files (.ipynb/.py/.R) aren't file-scopable yet — use the ingest-notebooks kind under Advanced.</div>
+    <div class="note">Notebook files (.ipynb/.py/.R) aren't file-scopable yet — use the ingest-notebooks kind under Advanced.</div>
 
     <details id="customjob-details" style="margin-top:16px">
     <summary style="cursor:pointer;font-family:var(--disp);font-weight:600;font-size:16px">Advanced · vault-wide custom job <span class="hint" style="margin:0;display:inline;font-family:var(--body);font-weight:400;font-size:13px">— raw CLI control, whole-vault scopes</span></summary>
@@ -455,12 +464,10 @@ button.btn.icon.on{border-color:var(--amber);color:var(--amber)}
           <select id="p-chunking" title="How OVERSIZED sections are split. heading = paragraph packing that respects the text's structure (the long-standing default). fixed = strict sliding window with even sizes — for OCR'd or wall-of-text PDFs whose paragraph structure is noise. document = element-aware: code blocks, tables and lists never get cut internally. none = no splitting at all (one chunk per section — embeddings truncate very long text). Small sections chunk identically under every mode.">
             <option value="">heading (default)</option><option>fixed</option><option>document</option><option>none</option></select></div>
         <div style="align-self:end" class="row">
-          <label class="chk"><input type="checkbox" id="p-onlybooks">only Books folders</label>
-          <label class="chk"><input type="checkbox" id="p-skipbooks">skip Books folders</label>
           <label class="chk"><input type="checkbox" id="p-noimages" checked>--no-images</label>
         </div>
       </div>
-      <div class="note">"Tech Books" counts as a Books folder (token match) — use <b>only Books</b>, not skip, when targeting it.</div>
+      <div class="note">Books folders: scope them with the Include/Exclude path fields (e.g. include <span class="mono">Tech Books</span>) — the old only/skip-Books toggles are covered by paths now, and the CLI flags still exist for terminal use.</div>
     </div>
 
     <div id="jf-ingest_notebooks" class="jform" style="display:none">
@@ -601,22 +608,19 @@ button.btn.icon.on{border-color:var(--amber);color:var(--amber)}
     <h2>Test console</h2>
     <p class="hint">Talks straight to the warm query endpoint (:8051). <b>Ask</b> = full RAG answer (needs FreeLLMAPI). <b>Search only</b> = retrieval, no LLM.</p>
     <div class="desc"><b>Search only</b> runs retrieval end-to-end (hybrid dense+BM25 fusion → rerank → E2 expansion) and shows the ranked chunks — free, local, no LLM. <b>Ask</b> adds grounded, cited generation on top. The knob groups: <b>preset</b> bundles everything (code / concept / synthesis); <b>rerank_k / dense_k / sparse_k</b> size the pools; <b>HyDE / HyPE / Omnisearch</b> are extra retrieval lanes; <b>rerank</b> picks the reranking method (cross-encoder = semantic scoring, lexical = model-free term coverage, none = fused order); <b>parents / neighbors</b> are the E2 small-to-big expansions (swap note chunks for full sections · append adjacent PDF pages). "default" on any select = whatever the preset/config says. The retrieval echo under each answer shows what actually ran — full knob documentation lives on the Info tab.</div>
-    <textarea id="q-text" rows="2" style="width:100%" placeholder="What do I know about conjugate priors?"></textarea>
-    <div class="row" style="margin-top:8px">
+    <div class="row" style="margin-bottom:8px">
       <select id="q-preset" title="A named bundle of every knob below. Blank = auto (code-intent queries self-apply the code preset)."><option value="">preset: none</option><option>code</option><option>concept</option><option>synthesis</option></select>
       <select id="q-history" style="max-width:420px" title="Last 20 queries from this browser — picking one restores the question AND its knob settings."><option value="">history…</option></select>
       <button class="btn" id="q-history-clear" title="Forget the saved query history">clear</button>
-      <span style="flex:1"></span>
-      <button class="btn" id="q-search" title="Retrieval only — free, local, no LLM. Tune here first.">Search only</button>
-      <button class="btn primary" id="q-ask" title="Full RAG: retrieval + grounded, cited generation (needs FreeLLMAPI).">Ask</button>
     </div>
+    <textarea id="q-text" rows="2" style="width:100%" placeholder="What do I know about conjugate priors?"></textarea>
     <div class="fsets">
       <div class="fset"><div class="fset-t">Pool sizes</div>
         <div class="row">
-          <input id="q-topk" type="number" min="1" max="50" placeholder="rerank_k" style="width:86px" title="rerank_top_k — how many reranked chunks reach the LLM (blank = config default, 7)">
-          <input id="q-densek" type="number" min="1" max="200" placeholder="dense_k" style="width:84px" title="dense_top_k — vector/semantic lane pool size fed INTO RRF fusion (blank = 20). Bigger = wider semantic net.">
-          <input id="q-sparsek" type="number" min="1" max="200" placeholder="sparse_k" style="width:86px" title="sparse_top_k — BM25 keyword lane pool size fed INTO RRF fusion (blank = 20). Bigger = wider keyword net.">
-          <input id="q-maxtok" type="number" min="64" max="8192" step="64" placeholder="max tokens" style="width:100px" title="Cap the answer's output tokens — Ask only (blank = config default, 2500)">
+          <input id="q-topk" class="num" type="number" min="1" max="50" placeholder="rerank_k" title="rerank_top_k — how many reranked chunks reach the LLM (blank = config default, 7)">
+          <input id="q-densek" class="num" type="number" min="1" max="200" placeholder="dense_k" title="dense_top_k — vector/semantic lane pool size fed INTO RRF fusion (blank = 20). Bigger = wider semantic net.">
+          <input id="q-sparsek" class="num" type="number" min="1" max="200" placeholder="sparse_k" title="sparse_top_k — BM25 keyword lane pool size fed INTO RRF fusion (blank = 20). Bigger = wider keyword net.">
+          <input id="q-maxtok" class="num" type="number" min="64" max="8192" step="64" placeholder="max tokens" title="Cap the answer's output tokens — Ask only (blank = config default, 2500)">
         </div>
       </div>
       <div class="fset"><div class="fset-t">Extra lanes</div>
@@ -631,6 +635,12 @@ button.btn.icon.on{border-color:var(--amber);color:var(--amber)}
           <select id="q-rerank" title="Rerank method for this call. cross-encoder = semantic (query,chunk) scoring (the default). lexical = model-free query-term coverage — for exact-keyword hunts. none = keep the fused RRF order as-is."><option value="">rerank: default</option><option value="cross_encoder">rerank: cross-encoder</option><option value="lexical">rerank: lexical</option><option value="none">rerank: none</option></select>
           <select id="q-parent" title="E2 small-to-big: swap matched note chunks for their FULL enclosing section (parents sidecar). default = config/preset (ON in the synthesis preset)."><option value="">parents: default</option><option value="on">parents: on</option><option value="off">parents: off</option></select>
           <select id="q-neigh" title="E2 small-to-big: append adjacent-page PDF chunks as marked supplementary sources. default = config/preset (ON in the synthesis preset)."><option value="">neighbors: default</option><option value="on">neighbors: on</option><option value="off">neighbors: off</option></select>
+        </div>
+      </div>
+      <div class="fset" style="display:flex;align-items:flex-end;border-color:transparent;background:none;padding-left:0">
+        <div class="row">
+          <button class="btn" id="q-search" title="Retrieval only — free, local, no LLM. Tune here first.">Search only</button>
+          <button class="btn primary" id="q-ask" title="Full RAG: retrieval + grounded, cited generation (needs FreeLLMAPI).">Ask</button>
         </div>
       </div>
     </div>
@@ -651,6 +661,13 @@ button.btn.icon.on{border-color:var(--amber);color:var(--amber)}
     <div class="thm-shelf" id="thm-light-shelf"></div>
     <div class="row" style="margin-top:14px">
       <label class="chk" title="Show inline explainers under every Ingest / Query section"><input type="checkbox" id="set-descs">description mode</label>
+    </div>
+    <label class="f" style="margin-top:14px">Fonts <span class="hint" style="margin:0;display:inline;text-transform:none;letter-spacing:0">(browser-local; apply over any theme — "custom…" takes any installed font's name)</span></label>
+    <div class="row" style="margin-top:6px">
+      <select id="font-disp" title="Headings / display font (the wordmark, panel titles)"></select>
+      <select id="font-body" title="Body font (all regular text)"></select>
+      <select id="font-mono" title="Monospace font (code, logs, labels)"></select>
+      <button class="btn" id="font-reset" title="Back to the theme's own fonts (Fraunces / Inter / IBM Plex Mono)">reset fonts</button>
     </div>
     <div style="margin-top:16px"><label class="f">Theme editor — export, tweak, save as preset</label>
       <textarea id="thm-css" rows="6" style="width:100%;font-family:var(--mono);font-size:12px;margin-top:6px" spellcheck="false" placeholder='[data-theme="custom"]{&#10;  --bg:#101010; --panel:#181818; --amber:#E8A33D; …&#10;}'></textarea>
@@ -1259,21 +1276,41 @@ function fileKind(name){
   if(ext===".pdf")return"pdf";if(ext===".md")return"md";
   if(CODE_EXTS.has(ext))return"code";if(NB_EXTS.has(ext))return"nb";return"other";
 }
-const FCFG_EMPTY={domain:"",tags:"",chunking:"",ocr:"",pages:""};
-function fileCfg(name){return state.fileCfg[name]||FCFG_EMPTY}
+const FCFG_EMPTY={domain:"",tags:"",chunking:"",ocr:"",pages:"",dest:""};
+function fileCfg(name){return {...FCFG_EMPTY,...(state.fileCfg[name]||{})}}
 /* effective settings: the file's own ⚙ values, falling back per-field to the
    batch defaults (default lane) or the global custom chunking (custom lane) */
 function effDefault(name){
   const c=fileCfg(name);
   return {domain:(c.domain||$("#inbox-domain").value).trim(),
           tags:(c.tags||$("#inbox-tags").value).trim(),
-          chunking:c.chunking||$("#inbox-chunking").value||""};
+          chunking:c.chunking||$("#inbox-chunking").value||"",
+          dest:c.dest.trim()};
 }
 function effCustomPdf(name){
   const c=fileCfg(name);
   return {domain:c.domain.trim(),tags:c.tags.trim(),
           chunking:c.chunking||$("#cg-chunking").value||"",
-          ocr:c.ocr||"",pages:c.pages.trim()};
+          ocr:c.ocr||"",pages:c.pages.trim(),dest:c.dest.trim()};
+}
+function effMd(name,batch){
+  const c=fileCfg(name);
+  return {chunking:c.chunking||(batch?$("#inbox-chunking").value:$("#cg-chunking").value)||"",
+          dest:c.dest.trim()};
+}
+function effCode(name){return {dest:fileCfg(name).dest.trim()}}
+/* vault-relative folder picker: absolute picker anchored at the vault root,
+   result relativized (destinations must stay inside the vault) */
+async function pickVaultFolder(){
+  const root=(state.vaultPath||"").replace(/\//g,"\\");
+  if(!root){toast("vault path not loaded yet",1);return null}
+  const abs=await pickFolder(root,"Pick a destination folder (inside the vault)");
+  if(!abs)return null;
+  const norm=p=>p.replace(/\\/g,"/").replace(/\/+$/,"").toLowerCase();
+  if(!norm(abs).startsWith(norm(root))){toast("Destination must be INSIDE the vault.",1);return null}
+  const rel=abs.replace(/\\/g,"/").slice(root.replace(/\\/g,"/").replace(/\/+$/,"").length).replace(/^\/+/,"");
+  if(!rel){toast("Pick a folder INSIDE the vault, not the vault root itself.",1);return null}
+  return rel;
 }
 function groupBy(files,keyFn){
   const m=new Map();
@@ -1292,26 +1329,30 @@ async function loadInbox(){
       const k=fileKind(f.name),routable=(k==="pdf"||k==="code"||k==="md");
       const route=state.route[f.name]||"default";
       const cfg=fileCfg(f.name),hasCfg=Object.values(cfg).some(v=>v);
-      const sel=routable?`<select class="ibx-route" data-name="${esc(f.name)}" title="default = standard inbox lane (PDFs only). custom = this file joins its type's custom job group in the designer.">
-          <option value="default"${route==="default"?" selected":""}>default</option>
-          <option value="custom"${route==="custom"?" selected":""}>custom (${k})</option></select>`
+      const sel=routable?`<select class="ibx-route" data-name="${esc(f.name)}" title="Which lane this ${k} file rides: default = batch settings, custom = its own ⚙ tuning. Both queue real ingest jobs for every routable type (pdf / md / code).">
+          <option value="default"${route==="default"?" selected":""}>default · ${k}</option>
+          <option value="custom"${route==="custom"?" selected":""}>custom · ${k}</option></select>`
         :`<span class="hint" style="margin:0" title="${k==="nb"?"notebook files: use the ingest-notebooks kind under Advanced":"convert to .md first (→md), then route the .md"}">${k==="nb"?"notebooks job":"convert first"}</span>`;
-      const cog=(k==="pdf"||k==="md")?`<button class="btn icon ibx-cfg${hasCfg?" on":""}" data-name="${esc(f.name)}" title="Per-file settings: domain / tags / chunking${k==="pdf"?" / OCR engine / page subset":""} — overrides the batch defaults for THIS file only">⚙</button>`:"";
+      const cog=routable?`<button class="btn icon ibx-cfg${hasCfg?" on":""}" data-name="${esc(f.name)}" title="Per-file settings for THIS file only: ${k==="pdf"?"domain / tags / chunking / OCR / pages / destination":k==="md"?"chunking / destination":"destination"} — overrides the batch defaults">⚙</button>`:"";
       const eye=(k==="pdf"||k==="md")?`<button class="btn icon ibx-view" data-name="${esc(f.name)}" title="Preview this file (PDFs show page numbers — pick OCR / --pages ranges from here)">👁</button>`:"";
       const conv=k!=="md"?`<button class="btn icon ibx-conv" data-name="${esc(f.name)}" title="Convert to markdown via markitdown into _converted (optional OCR pages from the Fetch & convert panel)">→md</button>`:"";
       const cfgRow=state.cfgOpen[f.name]?`
         <tr class="fcfg"><td colspan="4">
           <div class="row">
-            <input class="fc-domain" data-name="${esc(f.name)}" placeholder="domain (opt)" value="${esc(cfg.domain)}" style="width:130px" title="force_domain for THIS file (blank = batch default)">
-            <input class="fc-tags" data-name="${esc(f.name)}" placeholder="tags (opt): a, b" value="${esc(cfg.tags)}" style="width:170px" title="force_tags for THIS file (blank = batch default)">
+            ${k==="pdf"?`
+            <input class="fc-domain" data-name="${esc(f.name)}" placeholder="domain (opt)" value="${esc(cfg.domain)}" style="width:120px" title="force_domain for THIS file (blank = batch default)">
+            <input class="fc-tags" data-name="${esc(f.name)}" placeholder="tags (opt): a, b" value="${esc(cfg.tags)}" style="width:150px" title="force_tags for THIS file (blank = batch default)">`:""}
+            ${k!=="code"?`
             <select class="fc-chunking" data-name="${esc(f.name)}" title="chunking for THIS file (blank = batch default / custom fallback)">
               <option value="">chunking: inherit</option>
-              ${["heading","fixed","document","none"].map(c=>`<option${cfg.chunking===c?" selected":""}>${c}</option>`).join("")}</select>
+              ${["heading","fixed","document","none"].map(c=>`<option${cfg.chunking===c?" selected":""}>${c}</option>`).join("")}</select>`:""}
             ${k==="pdf"?`
-            <select class="fc-ocr" data-name="${esc(f.name)}" title="OCR engine for THIS file's scanned pages (custom route only)">
+            <select class="fc-ocr" data-name="${esc(f.name)}" title="OCR engine for THIS file's scanned pages">
               <option value="">OCR: auto</option>
               ${["tesseract","vlm","none"].map(c=>`<option${cfg.ocr===c?" selected":""}>${c}</option>`).join("")}</select>
-            <input class="fc-pages" data-name="${esc(f.name)}" placeholder="pages: 1-50,60" value="${esc(cfg.pages)}" style="width:130px" title="1-based page subset for THIS file (custom route only) — use 👁 to find the numbers">`:""}
+            <input class="fc-pages" data-name="${esc(f.name)}" placeholder="pages: 1-50,60" value="${esc(cfg.pages)}" style="width:120px" title="1-based page subset for THIS file — use 👁 to find the numbers">`:""}
+            <input class="fc-dest" data-name="${esc(f.name)}" placeholder="destination: stays in inbox" value="${esc(cfg.dest)}" style="flex:0 1 240px" title="Vault-relative folder this file MOVES to when its ingest is queued (before parsing, so the index records the final path). Blank = classic: stays in the inbox, archives to _ingested.">
+            <button class="btn icon fc-destpick" data-name="${esc(f.name)}" title="Pick the destination folder inside the vault">📁</button>
             <button class="btn mini fc-clear" data-name="${esc(f.name)}" title="Clear this file's settings (falls back to batch defaults)">clear</button>
           </div>
         </td></tr>`:"";
@@ -1329,7 +1370,11 @@ async function loadInbox(){
       state.fileCfg[n]={...fileCfg(n),[key]:el.value};renderPlan()});
     bindCfg(".fc-domain","domain");bindCfg(".fc-tags","tags");
     bindCfg(".fc-chunking","chunking","onchange");bindCfg(".fc-ocr","ocr","onchange");
-    bindCfg(".fc-pages","pages");
+    bindCfg(".fc-pages","pages");bindCfg(".fc-dest","dest");
+    $$(".fc-destpick").forEach(b=>b.onclick=async()=>{
+      const rel=await pickVaultFolder();if(rel===null)return;
+      const n=b.dataset.name;
+      state.fileCfg[n]={...fileCfg(n),dest:rel};rerenderInbox()});
     $$(".fc-clear").forEach(b=>b.onclick=()=>{
       delete state.fileCfg[b.dataset.name];rerenderInbox()});
     $$(".ibx-del").forEach(b=>b.onclick=async()=>{
@@ -1348,66 +1393,107 @@ async function loadInbox(){
 }
 /* ⚙ toggle / clear re-render: the inbox listing is tiny, a refetch is cheap */
 const rerenderInbox=loadInbox;
-function customFiles(kind){
-  return state.inboxFiles.filter(f=>fileKind(f.name)===kind&&(state.route[f.name]||"default")==="custom").map(f=>f.name);
+function routedFiles(kind,route){
+  return state.inboxFiles.filter(f=>fileKind(f.name)===kind
+    &&(state.route[f.name]||"default")===route).map(f=>f.name);
 }
+/* The full plan of record. EVERY routable type rides both lanes now:
+   default = batch settings, custom = per-file ⚙ tuning. PDFs on the default
+   lane go through the guarded inbox endpoint; everything else compiles into
+   custom-group jobs. Groups split whenever effective settings differ. */
 function computePlan(){
-  const pdfGroups=groupBy(customFiles("pdf"),effCustomPdf);
-  const mdGroups=groupBy(customFiles("md"),n=>({chunking:effCustomPdf(n).chunking}));
-  const codeFiles=customFiles("code");
-  const defPdfs=state.inboxFiles.filter(f=>fileKind(f.name)==="pdf"&&(state.route[f.name]||"default")!=="custom").map(f=>f.name);
-  const defGroups=groupBy(defPdfs,effDefault);
-  const ignored=state.inboxFiles.filter(f=>{const k=fileKind(f.name);return k!=="pdf"&&(state.route[f.name]||"default")!=="custom"}).map(f=>f.name);
-  return {pdfGroups,mdGroups,codeFiles,defGroups,ignored};
+  return {
+    cusPdf:groupBy(routedFiles("pdf","custom"),effCustomPdf),
+    cusMd:groupBy(routedFiles("md","custom"),n=>effMd(n,false)),
+    cusCode:groupBy(routedFiles("code","custom"),effCode),
+    defPdf:groupBy(routedFiles("pdf","default"),effDefault),
+    defMd:groupBy(routedFiles("md","default"),n=>effMd(n,true)),
+    defCode:groupBy(routedFiles("code","default"),effCode),
+    ignored:state.inboxFiles.filter(f=>!["pdf","md","code"].includes(fileKind(f.name)))
+      .map(f=>f.name),
+  };
 }
 const cfgLabel=c=>[c.chunking&&`chunking ${c.chunking}`,c.ocr&&`OCR ${c.ocr}`,
-  c.pages&&`pages ${c.pages}`,c.domain&&`domain ${c.domain}`,c.tags&&`tags ${c.tags}`]
-  .filter(Boolean).join(" · ")||"defaults";
+  c.pages&&`pages ${c.pages}`,c.domain&&`domain ${c.domain}`,c.tags&&`tags ${c.tags}`,
+  c.dest&&`→ ${c.dest}`]
+  .filter(Boolean).join(" · ")||"defaults · stays in inbox";
+function planCards(P){
+  const card=(lane,kind,g,extra)=>`<div class="note" style="margin-bottom:8px">
+    <b>${lane} · ${kind}</b> — ${g.files.map(esc).join(", ")}
+    <div class="hint" style="margin:5px 0 0">${esc(cfgLabel(g.cfg))}${extra||""}</div></div>`;
+  const cards=[];
+  P.cusPdf.forEach(g=>cards.push(card("custom","pdf",g," <span style=\"opacity:.7\">(edit in each file's ⚙)</span>")));
+  P.cusMd.forEach(g=>cards.push(card("custom","md",g," · metadata from the note's headings")));
+  P.cusCode.forEach(g=>cards.push(card("custom","code",g,
+    `<div class="row" style="margin-top:8px"><input id="gp-exts" placeholder="exts subset (opt): .sql,.js" style="width:190px" value="${esc(state.codeExts)}" title="restrict which extensions the code loader maps (applies to every code job)"></div>`)));
+  P.defPdf.forEach(g=>cards.push(card("default","pdf",g)));
+  P.defMd.forEach(g=>cards.push(card("default","md",g," · metadata from the note's headings")));
+  P.defCode.forEach(g=>cards.push(card("default","code",g)));
+  return cards.join("");
+}
 function renderPlan(){
   const P=computePlan();
-  const cards=[];
-  P.pdfGroups.forEach((g,i)=>cards.push(`<div class="note" style="margin-bottom:8px"><b>PDF job ${P.pdfGroups.length>1?i+1:""}</b> — ${g.files.map(esc).join(", ")}
-    <div class="hint" style="margin:5px 0 0">${esc(cfgLabel(g.cfg))} <span style="opacity:.7">(from each file's ⚙; edit there)</span></div></div>`));
-  if(P.codeFiles.length)cards.push(`<div class="note" style="margin-bottom:8px"><b>Code job</b> — ${P.codeFiles.map(esc).join(", ")}
-    <div class="row" style="margin-top:8px"><input id="gp-exts" placeholder="exts subset (opt): .sql,.js" style="width:190px" value="${esc(state.codeExts)}" title="restrict which extensions the code loader maps"></div></div>`);
-  P.mdGroups.forEach((g,i)=>cards.push(`<div class="note" style="margin-bottom:8px"><b>Markdown job ${P.mdGroups.length>1?i+1:""}</b> — ${g.files.map(esc).join(", ")}
-    <div class="hint" style="margin:5px 0 0">chunking ${esc(g.cfg.chunking||"default")} · scoped parse, one job per file; metadata from the note's headings</div></div>`));
-  $("#cg-groups").innerHTML=cards.join("");
+  $("#cg-groups").innerHTML=planCards(P);
   const ex=$("#gp-exts");if(ex)ex.oninput=()=>{state.codeExts=ex.value;renderPlanText()};
   renderPlanText();
 }
 function renderPlanText(){
   const P=computePlan();
   const L=[];
-  P.pdfGroups.forEach(g=>L.push(`<b>custom pdf</b> (${g.files.length}): ${esc(cfgLabel(g.cfg))} → ingest-pdfs + append`));
-  if(P.codeFiles.length)L.push(`<b>custom code</b> (${P.codeFiles.length}): ${state.codeExts?`exts ${esc(state.codeExts)} · `:""}→ ingest-code + append`);
-  P.mdGroups.forEach(g=>L.push(`<b>custom md</b> (${g.files.length}): chunking ${esc(g.cfg.chunking||"default")} → ingest-md per file + append`));
-  if(P.defGroups.length)P.defGroups.forEach(g=>L.push(
-    `<b>default lane</b> (${g.files.length} PDF${g.files.length===1?"":"s"}): ${esc(g.files.join(", "))} — ${esc(cfgLabel(g.cfg))} <span class="hint" style="margin:0">(runs on “Ingest inbox now” / “Ingest all”)</span>`));
-  else L.push(`<b>default lane</b>: nothing (no default-routed PDFs)`);
-  if(P.ignored.length)L.push(`<span class="hint" style="margin:0">not ingestable as-is (convert or use the notebooks kind): ${esc(P.ignored.join(", "))}</span>`);
+  const line=(lane,kind,g,tail)=>L.push(`<b>${lane} ${kind}</b> (${g.files.length}): ${esc(cfgLabel(g.cfg))} ${tail}`);
+  P.cusPdf.forEach(g=>line("custom","pdf",g,"→ ingest-pdfs + append"));
+  P.cusMd.forEach(g=>line("custom","md",g,"→ ingest-md per file + append"));
+  P.cusCode.forEach(g=>line("custom","code",g,`${state.codeExts?`· exts ${esc(state.codeExts)} `:""}→ ingest-code + append`));
+  P.defPdf.forEach(g=>line("default","pdf",g,"→ inbox lane (dup-guarded) + append"));
+  P.defMd.forEach(g=>line("default","md",g,"→ ingest-md per file + append"));
+  P.defCode.forEach(g=>line("default","code",g,`${state.codeExts?`· exts ${esc(state.codeExts)} `:""}→ ingest-code + append`));
+  if(!L.length)L.push("nothing to queue — inbox has no routable files");
+  if(P.ignored.length)L.push(`<span class="hint" style="margin:0">not queueable here (notebooks kind under Advanced, or convert first): ${esc(P.ignored.join(", "))}</span>`);
   $("#cg-preview").innerHTML=state.inboxFiles.length?L.map(x=>`<div style="margin-bottom:4px">${x}</div>`).join(""):"Inbox is empty.";
 }
-/* Default (standard) lane: one /api/ingest_inbox call per settings-group.
-   allPdfs=true ignores custom routing (the classic whole-inbox behavior). */
-async function ingestDefaultLane(allPdfs){
-  const names=state.inboxFiles
-    .filter(f=>fileKind(f.name)==="pdf"&&(allPdfs||(state.route[f.name]||"default")!=="custom"))
-    .map(f=>f.name);
-  if(!names.length){toast("No PDFs for the default lane.",1);return false}
-  const groups=groupBy(names,effDefault);
+/* md/code groups (either lane) compile into /api/ingest_custom bodies */
+function mdCodeGroups(P,lanes){
+  const groups=[];
+  const take=(list,kind)=>list.forEach(g=>{
+    const gg={kind,files:g.files,dest_dir:g.cfg.dest||undefined};
+    if(kind==="md")gg.chunking=g.cfg.chunking||undefined;
+    if(kind==="code")gg.exts=state.codeExts.trim()||undefined;
+    groups.push(gg)});
+  if(lanes.includes("custom")){take(P.cusMd,"md");take(P.cusCode,"code")}
+  if(lanes.includes("default")){take(P.defMd,"md");take(P.defCode,"code")}
+  return groups;
+}
+async function postIngestCustom(groups){
+  if(!groups.length)return true;
+  const go=async(force)=>{
+    const res=await fetch("/api/ingest_custom",{method:"POST",
+      headers:{"Content-Type":"application/json"},body:JSON.stringify({groups,force})});
+    const r=await res.json().catch(()=>({}));
+    if(res.ok&&r.ok){
+      $("#cg-msg").textContent=`queued ${r.jobs.length} job(s)`;
+      toast(`Queued ${r.jobs.length} job(s) (ingest + append per group).`);
+      return true}
+    if(res.status===409&&r.conflicts){
+      const list=r.conflicts.map(c=>`• ${c.file}\n   already indexed as: ${c.existing_source}`).join("\n");
+      if(confirm(`Possible duplicates:\n\n${list}\n\nOK = ingest anyway\nCancel = skip.`))return go(true);
+      toast("Skipped.",1);return false}
+    toast(r.error||(r.problems||[]).join("; ")||("HTTP "+res.status),1);return false};
+  try{return await go(false)}catch(e){toast(e.message,1);return false}
+}
+async function postInboxGroups(groups){
   let okAll=true;
   for(const g of groups){
     const go=async(force)=>{
       const body={force,files:g.files,
         domain:g.cfg.domain||undefined,
         tags:g.cfg.tags?g.cfg.tags.split(",").map(t=>t.trim()).filter(Boolean):[],
-        chunking:g.cfg.chunking||undefined};
+        chunking:g.cfg.chunking||undefined,
+        dest_dir:g.cfg.dest||undefined};
       const res=await fetch("/api/ingest_inbox",{method:"POST",
         headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
       const r=await res.json().catch(()=>({}));
       if(res.ok&&r.ok){
-        toast(`Queued: ingest ${r.files.length} PDF(s) [${cfgLabel(g.cfg).replace(/<[^>]*>/g,"")}] → append`);
+        toast(`Queued: ${r.files.length} PDF(s)${r.moved_to?` → ${r.moved_to}`:""} → append`);
         return true}
       if(res.status===409&&r.conflicts){
         const list=r.conflicts.map(c=>`• ${c.file}\n   already indexed as: ${c.existing_source}`).join("\n");
@@ -1417,53 +1503,43 @@ async function ingestDefaultLane(allPdfs){
       toast(r.error||("HTTP "+res.status),1);return false};
     try{if(!await go(false))okAll=false}catch(e){toast(e.message,1);okAll=false}
   }
-  if(groups.length>1)toast(`${groups.length} default-lane batches queued (split by per-file ⚙ settings). Restart :8051 after the last append.`);
-  else toast("Restart :8051 after the append finishes.");
   return okAll;
 }
-$("#btn-ingest-inbox").onclick=()=>ingestDefaultLane(true);
-$("#cg-ingest-inbox").onclick=()=>ingestDefaultLane(true);
-async function ingestCustomGroups(){
+/* The three actions, in the order the buttons present them:
+   Queue the plan = everything the preview shows; or one lane at a time. */
+async function queueLanes(lanes){
   const P=computePlan();
-  const groups=[];
-  for(const g of P.pdfGroups)groups.push({kind:"pdf",files:g.files,
-    chunking:g.cfg.chunking||undefined,ocr_engine:g.cfg.ocr||undefined,
-    pages:g.cfg.pages||undefined,domain:g.cfg.domain||undefined,
-    tags:g.cfg.tags?g.cfg.tags.split(",").map(t=>t.trim()).filter(Boolean):[]});
-  if(P.codeFiles.length)groups.push({kind:"code",files:P.codeFiles,exts:state.codeExts.trim()||undefined});
-  for(const g of P.mdGroups)groups.push({kind:"md",files:g.files,chunking:g.cfg.chunking||undefined});
-  if(!groups.length){toast("No files are routed to custom — flip a file's route select first.",1);return false}
-  const go=async(force)=>{
-    const res=await fetch("/api/ingest_custom",{method:"POST",
-      headers:{"Content-Type":"application/json"},body:JSON.stringify({groups,force})});
-    const r=await res.json().catch(()=>({}));
-    if(res.ok&&r.ok){
-      $("#cg-msg").textContent=`queued ${r.jobs.length} job(s)`;
-      toast(`Queued ${r.jobs.length} job(s) (ingest + append per group). Restart :8051 after the last append.`);
-      return true}
-    if(res.status===409&&r.conflicts){
-      const list=r.conflicts.map(c=>`• ${c.file}\n   already indexed as: ${c.existing_source}`).join("\n");
-      if(confirm(`Possible duplicates:\n\n${list}\n\nOK = ingest anyway\nCancel = skip.`))return go(true);
-      toast("Custom ingest cancelled.",1);return false}
-    toast(r.error||(r.problems||[]).join("; ")||("HTTP "+res.status),1);return false};
-  try{return await go(false)}catch(e){toast(e.message,1);return false}
+  const customGroups=[
+    ...(lanes.includes("custom")?P.cusPdf.map(g=>({kind:"pdf",files:g.files,
+      chunking:g.cfg.chunking||undefined,ocr_engine:g.cfg.ocr||undefined,
+      pages:g.cfg.pages||undefined,domain:g.cfg.domain||undefined,
+      dest_dir:g.cfg.dest||undefined,
+      tags:g.cfg.tags?g.cfg.tags.split(",").map(t=>t.trim()).filter(Boolean):[]})):[]),
+    ...mdCodeGroups(P,lanes)];
+  const inboxGroups=lanes.includes("default")?P.defPdf:[];
+  if(!customGroups.length&&!inboxGroups.length){
+    toast("Nothing routed to that lane.",1);return}
+  const ok1=await postIngestCustom(customGroups);
+  const ok2=await postInboxGroups(inboxGroups);
+  if(ok1&&ok2)toast("All queued — watch Jobs; restart :8051 after the last append.");
+  setTimeout(loadInbox,800);
 }
-$("#cg-ingest-custom").onclick=()=>ingestCustomGroups();
-$("#cg-ingest-all").onclick=async()=>{
-  const ok=await ingestCustomGroups();
-  const P=computePlan();
-  if(P.defGroups.length)await ingestDefaultLane(false);
-  else if(ok)toast("No default-routed PDFs left — custom groups cover everything.");
-};
+$("#cg-queue-plan").onclick=()=>queueLanes(["custom","default"]);
+$("#cg-queue-custom").onclick=()=>queueLanes(["custom"]);
+$("#cg-queue-default").onclick=()=>queueLanes(["default"]);
+$("#btn-ingest-inbox").onclick=()=>queueLanes(["default"]);
 $("#cg-chunking").onchange=()=>renderPlan();
 ["#inbox-domain","#inbox-tags"].forEach(s=>$(s).addEventListener("input",()=>renderPlanText()));
 $("#inbox-chunking").addEventListener("change",()=>renderPlanText());
 /* ---------- fetch & convert lane ---------- */
 $("#fx-format").onchange=()=>{
+  const pdf=$("#fx-format").value==="pdf";
   $("#fx-fetch").textContent="Fetch → ."+$("#fx-format").value;
-  $("#fx-backend").disabled=$("#fx-format").value==="pdf";
-  $("#fx-backend").title=$("#fx-format").value==="pdf"
-    ?"The .pdf path always renders in headless Chromium — the backend picker only applies to .md fetches."
+  /* never disable the select — a frozen control reads as a bug; dim it and
+     say why instead (the choice is kept for when you switch back to .md) */
+  $("#fx-backend").style.opacity=pdf?".55":"";
+  $("#fx-backend").title=pdf
+    ?"Not used for .pdf — that path always renders in headless Chromium. Your choice here is kept for the next .md fetch."
     :"Fetch backend for the .md path. auto = best installed (crawl4ai → scrapling → requests); requests always works.";
 };
 $("#fx-format").onchange();
@@ -1535,8 +1611,7 @@ $("#btn-queue").onclick=async()=>{
     output:$("#p-output").value||undefined,max_pages:$("#p-maxpages").value||undefined,
     pages:$("#p-pages").value.trim()||undefined,
     ocr_engine:$("#p-ocr").value||undefined,chunking:$("#p-chunking").value||undefined,
-    only_books:$("#p-onlybooks").checked||undefined,
-    skip_books:$("#p-skipbooks").checked||undefined,no_images:$("#p-noimages").checked||undefined};
+    no_images:$("#p-noimages").checked||undefined};
   if(k==="ingest_notebooks")params={output:$("#p-nb-output").value||undefined,
     save_figures:$("#p-nb-figs").checked||undefined,no_outputs:$("#p-nb-noout").checked||undefined};
   if(k==="ingest_code")params={output:$("#p-code-output").value||undefined,
@@ -1895,7 +1970,8 @@ const BUILTIN_THEMES=[
 ];
 const THEME_VARS=["bg","panel","panel-2","line","ink","ink-dim","ink-faint",
   "amber","amber-dim","blue","red","green","btn-primary-ink","log-bg",
-  "skel-mid","td-line","row-sel","row-hover","bar-border","glow"];
+  "skel-mid","td-line","row-sel","row-hover","bar-border","glow",
+  "disp","body","mono"];
 const themeBtn=$("#theme-toggle");
 function customThemes(){try{return JSON.parse(localStorage.getItem("ledger-custom-themes")||"{}")}catch(e){return{}}}
 function saveCustomThemes(t){localStorage.setItem("ledger-custom-themes",JSON.stringify(t))}
@@ -2000,6 +2076,60 @@ $("#thm-save").onclick=()=>{
 };
 injectCustomThemes();
 applyTheme(document.documentElement.dataset.theme||"dark");
+
+/* ---------- fonts: per-role overrides riding on top of any theme ----------
+   Stored in localStorage "ledger-fonts" as {disp|body|mono: full CSS stack};
+   applied as inline vars on :root (wins over every stylesheet), also set
+   pre-paint by the head script. The chosen font falls back to the theme's
+   own stack if it isn't installed. */
+const FONT_DEFAULTS={disp:'"Fraunces",Georgia,serif',
+  body:'"Inter",system-ui,sans-serif',mono:'"IBM Plex Mono",ui-monospace,monospace'};
+const FONT_CHOICES={
+  disp:["Times New Roman","Georgia","Garamond","Palatino Linotype","Book Antiqua","New York","Arial","Segoe UI"],
+  body:["Arial","Segoe UI","Helvetica","Verdana","Tahoma","Trebuchet MS","Times New Roman","Georgia","New York"],
+  mono:["Consolas","Courier New","Cascadia Code","JetBrains Mono","Fira Code"]};
+const FONT_LABEL={disp:"headings",body:"body",mono:"mono"};
+function fontsLoad(){try{return JSON.parse(localStorage.getItem("ledger-fonts")||"{}")}catch(e){return{}}}
+function fontsSave(f){localStorage.setItem("ledger-fonts",JSON.stringify(f))}
+function fontStack(role,name){return `"${name}", `+FONT_DEFAULTS[role]}
+function fontsApply(){
+  const f=fontsLoad();
+  for(const role of ["disp","body","mono"]){
+    if(f[role])document.documentElement.style.setProperty("--"+role,f[role]);
+    else document.documentElement.style.removeProperty("--"+role);
+  }
+  renderFontSelects();
+}
+function renderFontSelects(){
+  const f=fontsLoad();
+  for(const role of ["disp","body","mono"]){
+    const sel=$("#font-"+role);if(!sel)continue;
+    const curName=(f[role]||"").match(/^"([^"]*)"/);
+    const cur=curName?curName[1]:"";
+    const known=FONT_CHOICES[role].includes(cur);
+    sel.innerHTML=`<option value="">${FONT_LABEL[role]}: theme default</option>`
+      +FONT_CHOICES[role].map(n=>`<option value="${esc(n)}"${n===cur?" selected":""}>${FONT_LABEL[role]}: ${esc(n)}</option>`).join("")
+      +(cur&&!known?`<option value="${esc(cur)}" selected>${FONT_LABEL[role]}: ${esc(cur)}</option>`:"")
+      +`<option value="__custom__">${FONT_LABEL[role]}: custom…</option>`;
+  }
+}
+["disp","body","mono"].forEach(role=>{
+  const sel=$("#font-"+role);if(!sel)return;
+  sel.onchange=()=>{
+    const f=fontsLoad();
+    let v=sel.value;
+    if(v==="__custom__"){
+      v=(prompt("Font family name (must be installed on this machine, e.g. Cambria):")||"").trim();
+      if(!v){renderFontSelects();return}
+    }
+    if(v)f[role]=fontStack(role,v);else delete f[role];
+    fontsSave(f);fontsApply();
+    toast(v?`${FONT_LABEL[role]} font → ${v}`:`${FONT_LABEL[role]} font reset`);
+  };
+});
+$("#font-reset").onclick=()=>{localStorage.removeItem("ledger-fonts");fontsApply();toast("Fonts reset to the theme defaults")};
+fontsApply();
+
 const descBtn=$("#desc-toggle");
 function applyDescs(on){
   document.body.classList.toggle("descs",on);
@@ -2161,7 +2291,7 @@ $("#rag-restart").onclick=async()=>{
 
 /* ---------- boot ---------- */
 (async()=>{
-  try{const s=await api("/api/settings");state.ragApi=s.rag_api;state.jsonls=s.jsonl_files}catch(e){}
+  try{const s=await api("/api/settings");state.ragApi=s.rag_api;state.jsonls=s.jsonl_files;state.vaultPath=s.vault_path}catch(e){}
   loadOverview();loadFacets();loadInbox();loadConverted();
   state.timers.tab=setInterval(loadOverview,10000);
 })();
