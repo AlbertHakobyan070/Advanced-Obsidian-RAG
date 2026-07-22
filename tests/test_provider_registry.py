@@ -173,11 +173,11 @@ def test_legacy_local_provider_still_works():
 
 
 def test_shipped_config_yaml_registry_is_valid():
-    """The real config.yaml must parse and obey the reserved-name rule."""
-    from src.utils.config_loader import load_config
-    cfg = load_config()
+    """The shipped config must parse and obey the reserved-name rule."""
+    from conftest import shipped_config
+    cfg = shipped_config()
     registry = cfg.get("providers", {}) or {}
-    assert registry, "config.yaml lost its providers: block"
+    assert registry, "the shipped config lost its providers: block"
     for name, spec in registry.items():
         assert name not in LLMClient.RESERVED_PROVIDERS, \
             f"providers.{name} shadows a reserved legacy name"

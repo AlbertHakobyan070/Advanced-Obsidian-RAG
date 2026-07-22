@@ -260,6 +260,74 @@ COURSE_KEYWORDS = [
 ]
 
 
+# ─────────────────────────────────────────────────────────────────────
+# Taxonomy override — the maps above encode ONE vault's folder conventions
+# (an academic one). Another vault, or a fresh install, supplies its own
+# through `taxonomy:` in config.yaml.
+#
+# The maps are mutated IN PLACE, never rebound: pdf_loader, ipynb_loader and
+# code_loader each did `from obsidian_parser import FOLDER_COURSE_MAP`, which
+# binds the object at import time — rebinding the global here would leave all
+# three of them on the built-ins.
+#
+# Empty maps are a valid state: every chunk then carries course_code/
+# course_name "unknown" and domain "general", which the rest of the pipeline
+# already handles (retrieval just loses the metadata-boost lane).
+# ─────────────────────────────────────────────────────────────────────
+
+_DETECT_FROM_PATH = True
+
+
+def configure_taxonomy(cfg) -> None:
+    """Apply `taxonomy:` from config over the built-in folder/domain maps.
+
+    Call once per process, before any ingestion. Idempotent.
+
+      taxonomy.detect_from_path: false  -> clear every map; nothing is derived
+                                           from folder names at all.
+      all four maps null (the default)  -> keep the built-in academic maps.
+      ANY map supplied                  -> the built-ins are dropped WHOLESALE
+                                           and only what you supplied applies.
+
+    That last rule is all-or-nothing on purpose. Supplying just `folder_map`
+    used to leave the built-in KEYWORD lane running, so a vault that had
+    declared its own taxonomy still got folders silently labelled with this
+    author's course names through the substring fallback. Either the built-in
+    academic taxonomy is in force or yours is — never a mixture.
+
+    Caveat worth knowing: the loaders also carry an inline course-CODE regex
+    (`CS|DS|ENGS|BSDS|ECON` + digits). detect_from_path:false suppresses it in
+    this module, but a folder literally named "CS 101" can still yield that code
+    in the PDF/notebook/code loaders. That is folder-name evidence, not this
+    vault's data leaking into another one.
+    """
+    global _DETECT_FROM_PATH
+    if cfg is None:
+        return
+    _DETECT_FROM_PATH = bool(cfg.get("taxonomy.detect_from_path", True))
+    if not _DETECT_FROM_PATH:
+        for m in (FOLDER_COURSE_MAP, DOMAIN_MAP, COURSE_MAP):
+            m.clear()
+        del COURSE_KEYWORDS[:]
+        return
+    maps = {key: cfg.get(f"taxonomy.{key}")
+            for key in ("folder_map", "domain_map", "code_map", "keywords")}
+    for key, supplied in maps.items():
+        if supplied is not None and not isinstance(supplied, dict):
+            raise ValueError(f"taxonomy.{key} must be a mapping or null, got "
+                             f"{type(supplied).__name__}")
+    if all(v is None for v in maps.values()):
+        return                                   # nothing supplied -> built-ins
+    for key, target in (("folder_map", FOLDER_COURSE_MAP),
+                        ("domain_map", DOMAIN_MAP),
+                        ("code_map", COURSE_MAP)):
+        target.clear()
+        target.update({str(k): str(v) for k, v in (maps[key] or {}).items()})
+    del COURSE_KEYWORDS[:]
+    COURSE_KEYWORDS.extend((str(k).lower(), str(v))
+                           for k, v in (maps["keywords"] or {}).items())
+
+
 def detect_course_from_path(parts: list[str]) -> dict:
     """Detect course from path components. Single source of truth used by the
     PDF and notebook loaders (and the recalibration pass).
@@ -274,6 +342,9 @@ def detect_course_from_path(parts: list[str]) -> dict:
 
     Returns {course_code, course_name, domain}; unknown/unknown/general if none.
     """
+    if not _DETECT_FROM_PATH:
+        return {"course_code": "unknown", "course_name": "unknown",
+                "domain": "general"}
     # 1. exact folder-name match
     for part in parts:
         name = FOLDER_COURSE_MAP.get(part.lower().strip())

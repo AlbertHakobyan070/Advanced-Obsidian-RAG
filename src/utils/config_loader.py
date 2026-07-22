@@ -102,6 +102,35 @@ def persist_config_values(cfg_path: str | Path, changes: dict[str, Any]) -> list
     return written
 
 
+_ENV_REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+
+
+def expand_env(node: Any) -> Any:
+    """Expand ${VAR} / ${VAR:-default} inside string values, recursively.
+
+    Exists for the containerised builds: the vault lives at a path only the
+    person running Docker knows, and it has to appear in TWO places that must
+    agree — the compose bind-mount and parser.vault_path. Pointing both at
+    ${RAG_HOST_HOME} means one line in .env instead of two edits that silently
+    drift apart.
+
+    An unset variable with no default is left as the literal ${VAR}: blanking
+    it would turn a vault path into "" and make the parser scan the filesystem
+    root. Left intact, it shows up in the console as an obviously-unset path.
+    """
+    if isinstance(node, str):
+        return _ENV_REF_RE.sub(
+            lambda m: os.environ.get(m.group(1),
+                                     m.group(2) if m.group(2) is not None
+                                     else m.group(0)),
+            node)
+    if isinstance(node, dict):
+        return {k: expand_env(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [expand_env(v) for v in node]
+    return node
+
+
 def load_config(config_path: str | Path | None = None) -> Config:
     """
     Locate and load config.yaml, plus the sibling .env.
@@ -137,4 +166,16 @@ def load_config(config_path: str | Path | None = None) -> Config:
     with open(cfg_file, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
 
-    return Config(data, project_root)
+    # After load_dotenv above, so .env values are visible to the expansion.
+    cfg = Config(expand_env(data), project_root)
+
+    # Apply `taxonomy:` over the parser's built-in folder/course maps. This
+    # lives here, not in each of main.py's eleven load_config() call sites,
+    # because the maps are process-global: configuring them anywhere but the
+    # single point where config enters the process means one forgotten call
+    # site silently ingests with the wrong taxonomy. obsidian_parser imports
+    # nothing but stdlib + yaml, so there is no cycle and no real import cost.
+    from src.ingestion.obsidian_parser import configure_taxonomy
+    configure_taxonomy(cfg)
+
+    return cfg

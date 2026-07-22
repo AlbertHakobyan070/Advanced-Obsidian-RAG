@@ -136,17 +136,39 @@ Open **http://127.0.0.1:8052**. Tabs:
   from its chip; **font pickers** for headings / body / mono (system serif and sans
   choices like Times New Roman, Georgia, Arial — or any installed font by name; applied
   over every theme, browser-local); an Obsidian-style **vault switcher** that remembers
-  every vault ever opened together with its own path/index settings and swaps the whole
-  set atomically; and the editable config surface with **📁 folder pickers**: vault root,
+  every vault ever opened together with its own settings and swaps the whole set
+  atomically — vault root, chunks JSONL, Chroma dir, BM25 pickle, collection name,
+  inbox folder, browse root and manifest cache all travel with the vault, so a second
+  vault never inherits the first one's browse root or cached in-RAG status; and the editable config surface with **📁 folder pickers**: vault root,
   Chroma / BM25 / chunks paths, embedding + cross-encoder models, default rerank &
   chunking, generation endpoint. Saves rewrite `config.yaml` in place (comments
   preserved); nothing hot-applies — the response says which service to restart.
-  Two panels sit under the fields: **Generation backends**, listing the
-  `providers:` registry with each backend's endpoint/model and whether its API-key
-  environment variable is set (never the value); and **Reranker**, which suggests
-  known-good cross-encoders with their measured cost and states what PyTorch can
-  actually reach — a `cuda` device on a CPU-only torch build would otherwise fail
-  silently into a much slower path.
+  Three panels sit under the fields.
+  **Reranker** offers four ready-made profiles — *Default* (works on any machine),
+  *Higher quality*, *Old / low-power machine* (`rerank_mode: lexical`: no model, nothing
+  to download, answers in milliseconds), and *External rerank server* (`http`, scoring
+  against a `/v1/rerank` endpoint you run) — plus a **Use** button on every known
+  cross-encoder. Costs are quoted as ratios, not seconds: absolute timings are a
+  property of the machine, not the model. The device dropdown lists only what PyTorch
+  can actually reach here (adding `mps` on Apple Silicon, `cuda:N` per visible GPU),
+  since picking an absent accelerator fails silently into a much slower path — while
+  never dropping a value your config already holds, so a config written on a GPU box
+  stays selectable on a CPU one.
+  **OCR** reports the two engines separately, because they are different in kind:
+  Tesseract is a *binary* that is installed or not (with its version and language
+  packs), while the VLM lane is a *vision model served over HTTP elsewhere* that is up
+  or down. **Probe** re-checks the endpoint; **Warm up** sends one tiny page through the
+  real OCR path, because `GET /models` answers "is the server up", not "is the model
+  loaded" — and `pdf.vlm_ocr.launch_hint` is free text shown verbatim when it is down,
+  so the command to start it is where you need it.
+  **Generation backends** lists the `providers:` registry with each backend's
+  endpoint/model and whether its API-key environment variable is set (never the value).
+
+  The **folder pickers** browse the *server's* filesystem, not yours: a web page cannot
+  open a native folder dialog for a path the server has to read, and under Docker the
+  server only sees what is bind-mounted. On Windows they start at the drive list, on
+  Linux/macOS at your home folder, the current vault, `/Volumes` and `/`; any entry also
+  accepts a typed path.
 - **Info** — an in-app diagram of the whole pipeline with a query/ingestion toggle and a
   per-knob influence table.
 

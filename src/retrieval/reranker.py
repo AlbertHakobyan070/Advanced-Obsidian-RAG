@@ -49,25 +49,86 @@ def _lexical_score(query_terms: dict[str, float], text: str) -> float:
     return score / (1.0 + len(toks) / 500.0)
 
 
-# Cross-encoders known to work as a drop-in here, with their measured cost on
-# THIS project's hardware (CPU-only torch, ~35 candidate pairs of ~1.8k chars).
+# Cross-encoders known to work as a drop-in here. Sizes are the models' own
+# published parameter counts; the cost column is a RATIO relative to MiniLM,
+# because absolute seconds/query depend entirely on the machine — quoting one
+# box's numbers as if they were the model's property is how a reader on
+# different hardware ends up with a wrong expectation.
 # Any HF cross-encoder id works — this list only drives the console's picker
 # and documents the tradeoff, it is not a whitelist.
 KNOWN_RERANKERS = {
     "cross-encoder/ms-marco-MiniLM-L-6-v2": {
-        "label": "MiniLM-L6 (default) — 22M params, ~2s/query CPU",
-        "max_length": 512,
-    },
-    "BAAI/bge-reranker-v2-m3": {
-        # 568M params (XLM-RoBERTa-large), multilingual, 8k context. Stronger
-        # on general benchmarks, but ~22x the CPU cost — measured ~48s/query
-        # here. Practical only on a GPU, or offline (eval runs).
-        "label": "bge-reranker-v2-m3 — 568M, multilingual/8k, GPU recommended",
+        "label": "MiniLM-L6 — 22M params, the baseline cost (1x)",
         "max_length": 512,
     },
     "BAAI/bge-reranker-base": {
-        "label": "bge-reranker-base — 278M, middle ground",
+        "label": "bge-reranker-base — 278M, roughly 10x MiniLM's cost",
         "max_length": 512,
+    },
+    "BAAI/bge-reranker-v2-m3": {
+        # XLM-RoBERTa-large, multilingual, 8k context. Stronger on public
+        # benchmarks; on a CPU-only box the measured cost here was ~22x MiniLM,
+        # which makes it a GPU-or-offline choice rather than an interactive one.
+        "label": "bge-reranker-v2-m3 — 568M, multilingual/8k, ~22x MiniLM (GPU advised)",
+        "max_length": 512,
+    },
+}
+
+
+# Ready-made reranker setups. The console applies one as a group, because the
+# four knobs are only correct together: a big model with the wrong device, or
+# `http` mode with no endpoint, fails in ways that read like a broken install.
+#
+# `default` is deliberately first and deliberately boring — it is the setup that
+# works on any machine, laptop or server, with or without a GPU. The rest are
+# opt-in for people who know which way they want to trade.
+RERANK_PROFILES = {
+    "default": {
+        "label": "Default — works everywhere",
+        "detail": "MiniLM cross-encoder, device auto-detected. The right "
+                  "starting point on any modern machine; a GPU is used if "
+                  "torch can see one, otherwise it runs fine on CPU.",
+        "settings": {
+            "retrieval.rerank_mode": "cross_encoder",
+            "retrieval.cross_encoder_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+            "retrieval.cross_encoder_max_length": "512",
+            "retrieval.cross_encoder_device": "auto",
+        },
+    },
+    "quality": {
+        "label": "Higher quality — needs a GPU or patience",
+        "detail": "bge-reranker-base: better ordering on public benchmarks at "
+                  "roughly 10x the cost. Worth it only if you have measured "
+                  "that it helps YOUR corpus (main.py eval --retrieval-only).",
+        "settings": {
+            "retrieval.rerank_mode": "cross_encoder",
+            "retrieval.cross_encoder_model": "BAAI/bge-reranker-base",
+            "retrieval.cross_encoder_max_length": "512",
+            "retrieval.cross_encoder_device": "auto",
+        },
+    },
+    "low_power": {
+        "label": "Old or low-power machine — no model at all",
+        "detail": "Model-free lexical reranking: query-term coverage instead of "
+                  "a neural cross-encoder. Nothing to download, no torch load "
+                  "time, answers in milliseconds. Ordering is weaker on "
+                  "paraphrased questions, better on exact-keyword hunts.",
+        "settings": {
+            "retrieval.rerank_mode": "lexical",
+            "retrieval.cross_encoder_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+            "retrieval.cross_encoder_max_length": "512",
+            "retrieval.cross_encoder_device": "cpu",
+        },
+    },
+    "external": {
+        "label": "External rerank server (advanced)",
+        "detail": "Score against a /v1/rerank endpoint you run yourself, so a "
+                  "big reranker can use hardware this process cannot. Set "
+                  "retrieval.rerank_http.base_url first — this mode does not "
+                  "fail soft if the endpoint is down.",
+        "settings": {
+            "retrieval.rerank_mode": "http",
+        },
     },
 }
 

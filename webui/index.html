@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark light">
-<title>Corpus Ledger — the personal RAG</title>
+<title>Corpus Ledger — RAG Management Console</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='3' y='3' width='5' height='18' rx='1' fill='%23E8A33D'/%3E%3Crect x='10' y='3' width='5' height='18' rx='1' fill='%238A6423'/%3E%3Crect x='17' y='6' width='4' height='15' rx='1' fill='%23A99F8F'/%3E%3C/svg%3E">
 <script>/* theme + fonts are applied BEFORE first paint to avoid a flash of the wrong look */
 document.documentElement.dataset.theme=localStorage.getItem("ledger-theme")||"dark";
@@ -357,7 +357,7 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
 <header>
   <div class="hrow">
     <div class="wordmark"><svg class="mark" viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><rect x="3" y="3" width="5" height="18" rx="1"/><rect x="10" y="3" width="5" height="18" rx="1" opacity=".55"/><rect x="17" y="6" width="4" height="15" rx="1" opacity=".3"/></svg>Corpus <em>Ledger</em></div>
-    <div class="sub">the personal RAG — management console · :8052</div>
+    <div class="sub">Personal RAG — management console · :8052</div>
     <div class="hctrl">
       <span class="st"><span class="dot" id="dot-manage"></span>manage</span>
       <span class="st"><span class="dot" id="dot-rag"></span>query api :8051</span>
@@ -740,6 +740,7 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
     <div class="desc">Typical setups: <b>another vault</b> = change the vault root AND give it its own Chroma dir + BM25 pickle + chunks JSONL (each corpus needs its own index trio — mixing them corrupts nothing but retrieves nonsense). <b>Embedding model</b>: changing it makes every existing vector incompatible — you must re-embed the whole corpus (<code>main.py index</code>) before search works again; the cross-encoder and generation settings are safe to swap freely. Enum defaults (rerank / chunking) only set the <i>config default</i>; per-call overrides in Query/Ingest always win.</div>
     <div id="set-fields" class="grid g2" style="margin-top:10px"><div class="skel"></div></div>
     <div id="set-rerankers" style="margin-top:16px"></div>
+    <div id="set-ocr" style="margin-top:16px"></div>
     <div id="set-providers" style="margin-top:16px"></div>
     <div class="row" style="margin-top:14px">
       <button class="btn primary" id="set-save">Save changes</button>
@@ -1236,7 +1237,13 @@ async function previewFile(name,where){
     }else{el.innerHTML=`<pre class="log" style="max-height:70vh">${esc(text)}</pre>`}
   }catch(e){$("#modal-body").innerHTML=`<span style="color:var(--red)">${esc(e.message)}</span>`}
 }
-/* Server-side folder picker. Resolves to the chosen path, or null. */
+/* Server-side folder picker. Resolves to the chosen path, or null.
+   A browser page cannot open the HOST's native folder dialog for a path the
+   SERVER has to read — and under Docker the server only sees what is
+   bind-mounted — so this browses the server's filesystem instead.
+   Every entry's full path is joined SERVER-side (d.dirs[].path): joining here
+   meant picking a separator, and the hardcoded "\\" produced "/vault\Foo" on
+   Linux, which is never a directory. */
 function pickFolder(start,title){
   return new Promise(resolve=>{
     let done=false;
@@ -1246,19 +1253,28 @@ function pickFolder(start,title){
       try{d=await api("/api/browse?"+new URLSearchParams({path:path||""}))}
       catch(e){toast(e.message,1);return}
       openModal(title||"Pick a folder",`
-        <div class="fp-path">${esc(d.path||"Drives")}</div>
+        <div class="fp-path">${esc(d.path||"Start somewhere")}</div>
         <div style="margin:10px 0;max-height:52vh;overflow:auto" id="fp-list">
           ${d.parent!==null?`<div class="fp-row" data-go="${esc(d.parent)}">↑ ..</div>`:""}
-          ${d.dirs.map(n=>{const full=d.path?(d.path.replace(/[\\/]+$/,"")+"\\"+n):n;
-            return `<div class="fp-row" data-go="${esc(full)}">📁 ${esc(n)}</div>`}).join("")
+          ${d.dirs.map(e=>`<div class="fp-row" data-go="${esc(e.path)}">📁 ${esc(e.name)}</div>`).join("")
            ||`<div class="empty">No subfolders.</div>`}
         </div>
         <div class="row">
+          <input id="fp-manual" placeholder="…or type a path" spellcheck="false"
+                 style="flex:1;min-width:180px" value="${esc(d.path||"")}"
+                 title="Type or paste an absolute path the SERVER can see. Under Docker that means a bind-mounted path.">
+          <button class="btn" id="fp-go" title="Open the typed path">Go</button>
+        </div>
+        <div class="row" style="margin-top:8px">
           <button class="btn primary" id="fp-pick" ${d.path?"":"disabled"}>Use this folder</button>
           <button class="btn" id="fp-cancel">Cancel</button>
         </div>`);
       $("#fp-list").onclick=e=>{const r=e.target.closest("[data-go]");if(r)level(r.dataset.go)};
-      $("#fp-pick").onclick=()=>finish(d.path);
+      const manual=$("#fp-manual");
+      const go=()=>{const v=manual.value.trim();if(v)level(v)};
+      $("#fp-go").onclick=go;
+      manual.onkeydown=e=>{if(e.key==="Enter"){e.preventDefault();go()}};
+      $("#fp-pick").onclick=()=>finish(manual.value.trim()||d.path);
       $("#fp-cancel").onclick=()=>finish(null);
     }
     level(start||"");
@@ -2279,6 +2295,7 @@ async function loadSettings(){
     }).join("");
     renderProviders(s);
     renderRerankers(s);
+    loadOcr();
     /* Switching backend must switch the model with it: a provider plus the
        PREVIOUS provider's model id is the one combination that fails at call
        time. Fill it in visibly here so the change is reviewable before saving
@@ -2294,10 +2311,16 @@ async function loadSettings(){
     }
     $$(".set-browse").forEach(b=>b.onclick=async()=>{
       const input=document.getElementById(b.dataset.for);
-      const cur=(input.value||"").replace(/\//g,"\\");
+      const cur=(input.value||"").trim();
       const isFile=b.dataset.mode==="file";
-      const start=cur?(isFile?cur.replace(/\\[^\\]*$/,""):cur):"";
-      const picked=await pickFolder(/^[A-Za-z]:\\/.test(start)?start:"","Pick a folder");
+      /* Strip the filename for "file" keys. Both separators are matched and the
+         value is NOT rewritten to backslashes: the same console runs on Windows
+         and inside a Linux container, and forcing "\" there turned every
+         resume-here path into a non-existent one, so the picker always
+         restarted at the root list. */
+      const start=isFile?cur.replace(/[\\/][^\\/]*$/,""):cur;
+      const absolute=/^([A-Za-z]:[\\/]|\/)/.test(start);
+      const picked=await pickFolder(absolute?start:"","Pick a folder");
       if(!picked)return;
       const posix=picked.replace(/\\/g,"/").replace(/\/+$/,"");
       if(isFile){
@@ -2308,23 +2331,107 @@ async function loadSettings(){
   }catch(e){$("#set-fields").innerHTML=`<span style="color:var(--red)">${esc(e.message)}</span>`}
 }
 
-/* Reranker picker help + what torch can ACTUALLY reach. The device dropdown
-   lists cuda options unconditionally, so this panel exists to say plainly when
-   torch is a CPU-only build — otherwise picking "cuda" silently falls back to
-   CPU and the only symptom is a query that takes 20x longer. */
+/* Reranker: profiles (apply four knobs as a set) + per-model switch buttons.
+   The model field is free text with a <datalist>, which Safari renders with no
+   visible affordance at all — so on the Mac build there was literally nothing
+   to click and the reranker looked hardwired to MiniLM. These rows are the
+   switch. Nothing here saves on its own: it fills the fields above, and the
+   normal Save button writes them, so the change stays reviewable. */
 function renderRerankers(s){
   const box=$("#set-rerankers");if(!box)return;
-  const list=s.rerankers||[],g=s.gpu||{};
-  const cur=(s.editable&&s.editable["retrieval.cross_encoder_model"])
-    ?String(s.editable["retrieval.cross_encoder_model"].value??""):"";
-  const gpuLine=g.available
-    ?`<span class="pill done">GPU available — ${esc((g.devices||[]).join(", "))}</span>`
+  const list=s.rerankers||[],profiles=s.rerank_profiles||[],g=s.gpu||{};
+  const val=k=>(s.editable&&s.editable[k])?String(s.editable[k].value??""):"";
+  const cur=val("retrieval.cross_encoder_model");
+  const mode=val("retrieval.rerank_mode");
+  /* What torch REALLY reaches here — the device dropdown is now built from
+     this, so it can no longer offer an accelerator that isn't there. */
+  const acc=[];
+  if(g.available)acc.push(`CUDA — ${esc((g.devices||[]).join(", "))}`);
+  if(g.mps)acc.push("Apple Metal (mps)");
+  const gpuLine=acc.length
+    ?`<span class="pill done">${acc.join(" · ")}</span>`
     :`<span class="pill">CPU only — torch ${esc(String(g.torch||"?"))}${g.cuda_build?"":" (no CUDA build)"}</span>`;
-  box.innerHTML=`<h3 style="margin:0 0 6px">Reranker <span class="hint" style="margin:0;display:inline;font-weight:400">— cross-encoder that reorders the fused candidates</span></h3>
-    <p class="hint" style="margin:0 0 8px">${gpuLine} &nbsp; Any HF cross-encoder id works; the field suggests these. A bigger reranker is not automatically better <b>on your corpus</b> — label <code>expected_source_files</code> in the golden set and compare with <code>main.py eval --retrieval-only</code> before switching.</p>
+  box.innerHTML=`<h3 style="margin:0 0 6px">Reranker <span class="hint" style="margin:0;display:inline;font-weight:400">— reorders the fused candidates before the answer is written</span></h3>
+    <p class="hint" style="margin:0 0 10px">${gpuLine} &nbsp; Start with <b>Default</b>; it works on any machine. A bigger reranker is not automatically better <b>on your corpus</b> — label <code>expected_source_files</code> in the golden set and compare with <code>main.py eval --retrieval-only</code> before switching.</p>
+    <div class="grid g2" style="gap:8px">${profiles.map(p=>`
+      <div class="vault-row${p.settings["retrieval.rerank_mode"]===mode&&(!p.settings["retrieval.cross_encoder_model"]||p.settings["retrieval.cross_encoder_model"]===cur)?" cur":""}">
+        <div style="flex:1;min-width:0"><span class="nm">${esc(p.label)}</span>
+          <div class="pth" style="white-space:normal">${esc(p.detail||"")}</div></div>
+        <button class="btn rr-profile" data-id="${esc(p.id)}" title="Fill the fields above with this profile (review, then Save)">Use</button>
+      </div>`).join("")}</div>
+    <label class="f" style="margin-top:14px">Cross-encoder models <span class="hint" style="margin:0;display:inline;text-transform:none;letter-spacing:0">(any HF cross-encoder id works — these are the ones verified here)</span></label>
     ${list.map(r=>`<div class="vault-row${r.id===cur?" cur":""}">
       <div style="flex:1;min-width:0"><span class="nm">${esc(r.id)}</span>${r.id===cur?' <span class="pill done" style="margin-left:6px">active</span>':""}
-      <div class="pth">${esc(r.label||"")}</div></div></div>`).join("")}`;
+      <div class="pth">${esc(r.label||"")}</div></div>
+      ${r.id===cur?"":`<button class="btn rr-use" data-id="${esc(r.id)}" data-len="${esc(String(r.max_length||512))}" title="Put this model in the field above (review, then Save)">Use</button>`}</div>`).join("")}`;
+
+  const setField=(key,value)=>{
+    const el=document.getElementById("cfg-"+key.replace(/\./g,"-"));
+    if(!el)return false;
+    /* A select silently keeps its old value when asked for one it doesn't
+       have — add the option rather than pretend the change took. */
+    if(el.tagName==="SELECT"&&![...el.options].some(o=>o.value===value))
+      el.add(new Option(value,value));
+    el.value=value;return true;
+  };
+  $$(".rr-use").forEach(b=>b.onclick=()=>{
+    setField("retrieval.cross_encoder_model",b.dataset.id);
+    setField("retrieval.cross_encoder_max_length",b.dataset.len);
+    /* Picking a model while reranking is off would change nothing. */
+    if(mode!=="cross_encoder")setField("retrieval.rerank_mode","cross_encoder");
+    toast("Filled in — press Save changes to apply",0);
+  });
+  $$(".rr-profile").forEach(b=>b.onclick=()=>{
+    const p=profiles.find(x=>x.id===b.dataset.id);if(!p)return;
+    const missing=Object.entries(p.settings).filter(([k,v])=>!setField(k,v));
+    if(missing.length){toast("could not set: "+missing.map(([k])=>k).join(", "),1);return}
+    toast(`${p.label} — press Save changes to apply`,0);
+  });
+}
+
+/* OCR panel. Tesseract is a BINARY that is either installed or not; the VLM
+   lane is a vision model served over HTTP somewhere else, which is up or down
+   and needs warming. Conflating the two is why "enable OCR" was unclear. */
+function renderOcr(st){
+  const box=$("#set-ocr");if(!box)return;
+  const t=st.tesseract||{},v=st.vlm||{};
+  const eff=st.effective;
+  const effPill=eff==="none"
+    ?`<span class="pill failed">no OCR — scanned pages stay empty</span>`
+    :`<span class="pill done">active engine: ${esc(eff)}</span>`;
+  const tessPill=t.available
+    ?`<span class="pill done">installed${t.version?" — "+esc(t.version):""}</span>`
+    :`<span class="pill failed">not found</span>`;
+  const vlmPill=!v.configured
+    ?`<span class="pill">not configured</span>`
+    :(v.reachable?`<span class="pill done">endpoint up</span>`
+                 :`<span class="pill failed">endpoint down</span>`);
+  box.innerHTML=`<h3 style="margin:0 0 6px">OCR <span class="hint" style="margin:0;display:inline;font-weight:400">— reads pages that carry no extractable text</span></h3>
+    <p class="hint" style="margin:0 0 10px">${effPill} &nbsp; Configured: <code>pdf.ocr_engine = ${esc(st.engine)}</code>. <b>auto</b> uses Tesseract when it is present. Change the engine in the fields above; OCR settings are read per job, so no restart is needed.</p>
+    <div class="vault-row">
+      <div style="flex:1;min-width:0"><span class="nm">Tesseract</span> ${tessPill}
+        <div class="pth">Classic OCR, runs locally. ${t.path?esc(t.path):"(binary not on PATH)"}${t.tessdata?" · tessdata: "+esc(t.tessdata):""}${(t.languages||[]).length?" · languages: "+esc(t.languages.join(", ")):""}</div></div>
+    </div>
+    <div class="vault-row">
+      <div style="flex:1;min-width:0"><span class="nm">Vision model (VLM)</span> ${vlmPill}
+        <div class="pth">${esc(v.base_url||"—")} · model ${esc(v.model||"—")}${v.preset?" · preset "+esc(v.preset):""}${(v.models_served||[]).length?" · serving: "+esc(v.models_served.join(", ")):""}</div>
+        ${v.configured&&!v.reachable?`<div class="hint" style="margin:4px 0 0;font-size:11px">Start it, then press Probe. ${st.launch_hint?`Launch: <code>${esc(st.launch_hint)}</code>`:""}</div>`:""}
+        ${v.error&&!v.reachable?`<div class="hint" style="margin:2px 0 0;font-size:11px;color:var(--ink-faint)">${esc(String(v.error).slice(0,180))}</div>`:""}</div>
+      <button class="btn" id="ocr-probe" title="Re-check whether the vision endpoint answers">Probe</button>
+      <button class="btn" id="ocr-warm" title="Send one tiny page so the model loads now instead of on the first real ingest page">Warm up</button>
+    </div>`;
+  $("#ocr-probe").onclick=()=>loadOcr();
+  $("#ocr-warm").onclick=async e=>{
+    const b=e.currentTarget;b.disabled=true;b.textContent="warming…";
+    try{const r=await api("/api/ocr/warm",{method:"POST"});toast(r.note||"warm",0)}
+    catch(err){toast(err.message,1)}
+    finally{b.disabled=false;b.textContent="Warm up";loadOcr()}
+  };
+}
+async function loadOcr(){
+  const box=$("#set-ocr");if(!box)return;
+  try{renderOcr(await api("/api/ocr/status"))}
+  catch(e){box.innerHTML=`<span style="color:var(--red)">${esc(e.message)}</span>`}
 }
 
 /* Provider registry status. Shows WHICH env var each backend needs and whether
@@ -2450,7 +2557,7 @@ $("#rag-restart").onclick=async()=>{
   const reset=()=>{b.disabled=false;b.textContent="⟳ restart :8051"};
   try{
     const r=await api("/api/service/restart",{method:"POST"});
-    toast(`:${r.port} relaunched (pid ${r.new_pid}) — waiting for ready…`);
+    toast(`:${r.port} relaunched${r.new_pid?` (pid ${r.new_pid})`:""} — waiting for ready…`);
     $("#dot-rag").className="dot bad";
     const t0=Date.now();
     const poll=setInterval(async()=>{

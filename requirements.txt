@@ -1,4 +1,4 @@
-# the personal RAG — pinned to the known-working environment (Python 3.11).
+# Personal RAG — pinned to the known-working environment (Python 3.11).
 # Core pipeline
 chromadb==1.5.9
 bm25s==0.3.9

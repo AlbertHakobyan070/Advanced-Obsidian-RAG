@@ -1,5 +1,5 @@
 """
-manage_api.py — Corpus management console (backend) for the personal RAG.
+manage_api.py — Corpus management console (backend) for Personal RAG.
 
 Everything serve_api.py deliberately is NOT: ingest, index, OCR passes,
 document search/inspection, deletion, uploads — driven from a browser at
@@ -68,7 +68,7 @@ RAG_API = CFG.get("webui.rag_api", "http://127.0.0.1:8051")
 COLLECTION = CFG.get("paths.collection_name", "obsidian_vault")
 PAGE = 5000                      # ChromaDB paging batch (see module docstring)
 
-app = FastAPI(title="the personal RAG — Management Console", version="0.1.0")
+app = FastAPI(title="Personal RAG — Management Console", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
@@ -1046,7 +1046,7 @@ def jobs_cancel(jid: str) -> dict:
 
 def _inbox() -> Path:
     vault = Path(CFG.get("pdf.vault_path") or CFG.get("parser.vault_path"))
-    inbox = vault / CFG.get("webui.inbox_dir", "00 – AUA_DS/Other/Inbox")
+    inbox = vault / (CFG.get("webui.inbox_dir") or "Inbox")
     inbox.mkdir(parents=True, exist_ok=True)
     return inbox
 
@@ -1556,12 +1556,13 @@ def _file_row(f: Path, rel: str, rag: dict[str, tuple[str, dict]]) -> dict:
 def vault_tree(path: str = "") -> dict:
     """
     One folder level of the vault, with per-file in-RAG status. `path` is
-    vault-relative posix; '' = the configured browse root (webui.vault_tree_root,
-    default '00 – AUA_DS' per the author's spec — the rest of the vault is reachable
-    via /api/vault/search below). Read-only: never writes to the vault.
+    vault-relative posix; '' = the configured browse root (webui.vault_tree_root),
+    which defaults to the VAULT ROOT — any other default names a folder that
+    exists in one particular vault and nowhere else. The rest of the vault is
+    reachable via /api/vault/search below. Read-only: never writes to the vault.
     """
     vault = _vault_root()
-    root_rel = str(CFG.get("webui.vault_tree_root", "00 – AUA_DS"))
+    root_rel = str(CFG.get("webui.vault_tree_root") or "")
     base = (vault / (path or root_rel)).resolve()
     if not str(base).lower().startswith(str(vault.resolve()).lower()):
         return JSONResponse({"error": "path escapes the vault"}, status_code=400)
@@ -1630,12 +1631,25 @@ EDITABLE_SETTINGS: dict[str, dict] = {
                                      "label": "Cross-encoder rerank model"},
     "retrieval.cross_encoder_max_length": {"kind": "str", "restart": ":8051",
                                      "label": "Cross-encoder max tokens per pair"},
+    # Values are filled in at request time from what torch ACTUALLY reports —
+    # see _device_choices(). Offering "cuda" on a CPU-only build is a trap: the
+    # only symptom is a query that silently runs many times slower.
     "retrieval.cross_encoder_device": {"kind": "enum", "restart": ":8051",
-                                     "values": ["auto", "cpu", "cuda", "cuda:0", "cuda:1"],
+                                     "values": [],
                                      "label": "Cross-encoder device"},
     "retrieval.rerank_mode":        {"kind": "enum", "restart": ":8051",
-                                     "values": ["cross_encoder", "lexical", "none"],
+                                     "values": ["cross_encoder", "lexical",
+                                                "http", "none"],
                                      "label": "Default rerank method"},
+    "pdf.ocr_engine":               {"kind": "enum", "restart": "none (read per job)",
+                                     "values": ["auto", "tesseract", "vlm", "none"],
+                                     "label": "OCR engine for scanned pages"},
+    # Values are filled in at request time from pdf.vlm_ocr_presets.
+    "pdf.vlm_ocr.preset":           {"kind": "enum", "restart": "none (read per job)",
+                                     "values": [],
+                                     "label": "VLM-OCR preset (vision model)"},
+    "pdf.vlm_ocr.base_url":         {"kind": "str",  "restart": "none (read per job)",
+                                     "label": "VLM-OCR endpoint (OpenAI-compatible)"},
     "parser.chunking":              {"kind": "enum", "restart": ":8052",
                                      "values": ["heading", "fixed", "document", "none"],
                                      "label": "Default chunking strategy"},
@@ -1652,6 +1666,9 @@ EDITABLE_SETTINGS: dict[str, dict] = {
                                      "label": "Generation model id"},
     "webui.inbox_dir":              {"kind": "str",  "restart": ":8052",
                                      "label": "Inbox folder (vault-relative)"},
+    "webui.vault_tree_root":        {"kind": "str",  "restart": ":8052",
+                                     "allow_empty": True,
+                                     "label": "Vault-tab browse root (blank = vault root)"},
     "webui.auto_restart_rag":       {"kind": "enum", "restart": "none (read per job)",
                                      "values": ["true", "false"],
                                      "label": "Auto-restart :8051 after index-changing jobs"},
@@ -1689,16 +1706,81 @@ def _provider_choices(disk_cfg) -> tuple[list[str], list[dict]]:
     return names + list(LLMClient.RESERVED_PROVIDERS), details
 
 
+def _with_current(choices: list[str], current: Any) -> list[str]:
+    """Enum members + whatever the config already holds.
+
+    A dropdown built purely from what this machine can do would STRAND a config
+    written on a different machine: the value shows as selected, is not in the
+    list, and the first save silently rewrites it to whatever was first. The
+    provider dropdown solves this by always appending the reserved names; this
+    is the same guarantee for device-shaped enums."""
+    cur = str(current or "").strip()
+    return choices if not cur or cur in choices else choices + [cur]
+
+
+def _taxonomy(cfg) -> dict:
+    """What this vault calls its folder-derived label, for the console's
+    wording. The METADATA keys stay course_code / course_name whatever this
+    says — renaming them would invalidate every stored chunk and force a full
+    re-embed, so only the human-facing label is configurable."""
+    label = str(cfg.get("taxonomy.label") or "course")
+    return {
+        "label": label,
+        "label_plural": str(cfg.get("taxonomy.label_plural") or label + "s"),
+        "detect_from_path": bool(cfg.get("taxonomy.detect_from_path", True)),
+    }
+
+
+def _torch_devices() -> tuple[dict, list[str]]:
+    """What torch can ACTUALLY reach here, and the device values worth offering.
+
+    Returns (info, choices). The choices list is the whole point: the dropdown
+    used to offer cuda/cuda:0/cuda:1 unconditionally, which on a CPU-only build
+    (every Docker image here, and every Mac) silently falls back to CPU. Apple
+    Silicon reports `mps` when torch runs natively on the host — never inside a
+    Linux container, which cannot reach Metal.
+    """
+    choices = ["auto", "cpu"]
+    try:
+        import torch
+        info = {"torch": torch.__version__,
+                "cuda_build": torch.version.cuda,
+                "available": bool(torch.cuda.is_available()),
+                "devices": [torch.cuda.get_device_name(i)
+                            for i in range(torch.cuda.device_count())]
+                if torch.cuda.is_available() else [],
+                "mps": False}
+        try:
+            info["mps"] = bool(torch.backends.mps.is_available())
+        except Exception:                        # older torch, no mps backend
+            pass
+        if info["available"]:
+            choices.append("cuda")
+            choices += [f"cuda:{i}" for i in range(torch.cuda.device_count())]
+        if info["mps"]:
+            choices.append("mps")
+    except Exception as e:                       # torch missing/broken
+        info = {"torch": None, "cuda_build": None, "available": False,
+                "devices": [], "mps": False, "error": str(e)}
+    return info, choices
+
+
 def _persist_section_keys(cfg_path: Path, changes: dict[str, Any]) -> list[str]:
     """Rewrite `section.leaf` values in config.yaml IN PLACE, preserving
     comments and layout. Section-aware (unlike persist_config_values) so keys
     that repeat across sections — vault_path, model — stay unambiguous: the
-    leaf must appear exactly once WITHIN its top-level section block."""
+    leaf must appear exactly once WITHIN its top-level section block.
+
+    Deeper keys (`pdf.vlm_ocr.preset`) are matched on their LAST segment, still
+    scoped to the top-level section. That keeps the guarantee that matters: a
+    leaf occurring more than once in the section raises rather than guessing
+    which nesting level was meant."""
     text = cfg_path.read_text(encoding="utf-8")
     lines = text.split("\n")
     written: list[str] = []
     for dotted, value in changes.items():
-        section, _, leaf = dotted.partition(".")
+        section, _, rest = dotted.partition(".")
+        leaf = rest.rsplit(".", 1)[-1]
         sval = ("true" if value else "false") if isinstance(value, bool) else str(value)
         if any(c in sval for c in "\r\n"):
             raise ValueError(f"{dotted}: newlines not allowed")
@@ -1742,35 +1824,36 @@ def settings() -> dict:
     from src.utils.config_loader import load_config as _load
     disk_cfg = _load()
     provider_names, provider_details = _provider_choices(disk_cfg)
-    # Reranker suggestions + whether torch can actually reach a GPU. The device
-    # dropdown offering "cuda" on a CPU-only torch build would be a trap, so the
-    # console reports what torch really sees rather than what the box has.
-    from src.retrieval.reranker import KNOWN_RERANKERS
-    try:
-        import torch
-        gpu = {"torch": torch.__version__,
-               "cuda_build": torch.version.cuda,
-               "available": bool(torch.cuda.is_available()),
-               "devices": [torch.cuda.get_device_name(i)
-                           for i in range(torch.cuda.device_count())]
-               if torch.cuda.is_available() else []}
-    except Exception as e:                       # torch missing/broken
-        gpu = {"torch": None, "cuda_build": None, "available": False,
-               "devices": [], "error": str(e)}
+    # Reranker suggestions + whether torch can actually reach an accelerator.
+    from src.retrieval.reranker import KNOWN_RERANKERS, RERANK_PROFILES
+    gpu, device_choices = _torch_devices()
+    vlm_presets = sorted((disk_cfg.get("pdf.vlm_ocr_presets") or {}).keys())
     editable = {}
     for key, spec in EDITABLE_SETTINGS.items():
         editable[key] = {**spec, "value": disk_cfg.get(key)}
     editable["generation.provider"]["values"] = provider_names
+    editable["retrieval.cross_encoder_device"]["values"] = _with_current(
+        device_choices, disk_cfg.get("retrieval.cross_encoder_device"))
+    # "null" is a real, selectable value: it turns the preset OFF and falls back
+    # to the explicit pdf.vlm_ocr.* keys, which is how this config behaved
+    # before presets existed.
+    editable["pdf.vlm_ocr.preset"]["values"] = ["null"] + vlm_presets
+    # YAML null round-trips as the literal string "null" through the dropdown,
+    # so an untouched "no preset" config doesn't read back as a pending change.
+    editable["pdf.vlm_ocr.preset"]["value"] = (
+        disk_cfg.get("pdf.vlm_ocr.preset") or "null")
     return {
         "rag_api": RAG_API,
         "providers": provider_details,
         "judge_provider": disk_cfg.get("eval.judge.provider"),
         "rerankers": [{"id": k, **v} for k, v in KNOWN_RERANKERS.items()],
+        "rerank_profiles": [{"id": k, **v} for k, v in RERANK_PROFILES.items()],
         "gpu": gpu,
         "vault_path": str(CFG.get("pdf.vault_path") or CFG.get("parser.vault_path")),
-        "inbox_dir": CFG.get("webui.inbox_dir", "00 – AUA_DS/Other/Inbox"),
+        "inbox_dir": CFG.get("webui.inbox_dir") or "Inbox",
         "jsonl_files": [p.name for p in chunk_files()],
         "ocr_engines": ["auto", "tesseract", "vlm", "none"],
+        "taxonomy": _taxonomy(disk_cfg),
         "config_path": str(ROOT / "config.yaml"),
         "editable": editable,
     }
@@ -1784,6 +1867,7 @@ def settings_update(body: SettingsIn) -> dict:
     from src.utils.config_loader import load_config as _load
     disk_cfg = _load()
     provider_names, _ = _provider_choices(disk_cfg)
+    _, device_choices = _torch_devices()
 
     changes: dict[str, Any] = {}
     restarts: set[str] = set()
@@ -1793,10 +1877,18 @@ def settings_update(body: SettingsIn) -> dict:
         if not spec:
             return JSONResponse({"ok": False, "error": f"unknown setting {key!r}"},
                                 status_code=400)
-        if key == "generation.provider":          # enum filled at request time
+        # Enums whose members depend on this machine / this config are filled in
+        # at request time, exactly as they are in GET /api/settings.
+        if key == "generation.provider":
             spec = {**spec, "values": provider_names}
+        elif key == "retrieval.cross_encoder_device":
+            spec = {**spec, "values": _with_current(
+                device_choices, disk_cfg.get("retrieval.cross_encoder_device"))}
+        elif key == "pdf.vlm_ocr.preset":
+            spec = {**spec, "values": ["null"] + sorted(
+                (disk_cfg.get("pdf.vlm_ocr_presets") or {}).keys())}
         sval = str(value).strip()
-        if not sval:
+        if not sval and not spec.get("allow_empty"):
             return JSONResponse({"ok": False, "error": f"{key}: empty value"},
                                 status_code=400)
         if spec["kind"] == "enum" and sval not in spec["values"]:
@@ -1844,21 +1936,186 @@ def settings_update(body: SettingsIn) -> dict:
     return {"ok": True, "written": written, "note": note}
 
 
+# ---- OCR engines (status + warm-up) ----
+
+@app.get("/api/ocr/status")
+def ocr_status() -> dict:
+    """What OCR this install can actually do, right now.
+
+    Two engines with completely different shapes, and the console kept
+    conflating them:
+      * tesseract — a BINARY in this image/machine. Either present or not.
+      * vlm       — a vision model served OVER HTTP somewhere else. Nothing to
+                    install; it is up or it is down, and it needs warming.
+
+    Read-only and never raises: every probe is wrapped, because "the OCR panel
+    500s" is a worse failure than "the endpoint is down".
+    """
+    from src.utils.config_loader import load_config as _load
+    disk_cfg = _load()
+
+    # --- tesseract ---
+    # Ask the ingest path's OWN resolver rather than reimplementing it: it also
+    # locates and sets TESSDATA_PREFIX, which is the difference between "the
+    # binary is on PATH" and "OCR will actually run". A panel that disagreed
+    # with what ingestion does would be worse than no panel.
+    from src.ingestion.pdf_loader import detect_ocr_engine
+    detected = detect_ocr_engine()
+    exe = shutil.which("tesseract")
+    tess: dict = {"available": detected == "tesseract", "path": exe,
+                  "version": None, "languages": [],
+                  "tessdata": os.environ.get("TESSDATA_PREFIX"),
+                  "detected": detected}
+    if exe:
+        try:
+            out = subprocess.run([exe, "--version"], capture_output=True,
+                                 text=True, timeout=10).stdout
+            tess["version"] = (out.splitlines() or [""])[0].strip()
+        except Exception as e:
+            tess["version"] = f"(version probe failed: {e})"
+        try:
+            out = subprocess.run([exe, "--list-langs"], capture_output=True,
+                                 text=True, timeout=10).stdout
+            tess["languages"] = [ln.strip() for ln in out.splitlines()[1:]
+                                 if ln.strip()]
+        except Exception:
+            pass
+
+    # --- vlm endpoint ---
+    presets = disk_cfg.get("pdf.vlm_ocr_presets") or {}
+    vlm: dict = {"configured": False, "reachable": False, "base_url": None,
+                 "model": None, "preset": disk_cfg.get("pdf.vlm_ocr.preset"),
+                 "presets": sorted(presets), "models_served": [], "error": None}
+    try:
+        from src.ingestion.ocr_vlm import VLMOCR
+        client = VLMOCR.from_config(disk_cfg)
+        vlm.update({"configured": True, "base_url": client.base_url,
+                    "model": client.model})
+        import requests
+        r = requests.get(f"{client.base_url}/models",
+                         headers=client._headers(), timeout=5)
+        vlm["reachable"] = r.status_code < 500
+        if r.ok:
+            data = r.json()
+            vlm["models_served"] = [m.get("id") for m in (data.get("data") or [])
+                                    if isinstance(m, dict)][:20]
+    except Exception as e:
+        vlm["error"] = f"{type(e).__name__}: {e}"
+
+    engine = str(disk_cfg.get("pdf.ocr_engine", "auto"))
+    # What the ingest path would ACTUALLY resolve to, which is not always what
+    # ocr_engine says: "vlm" with no vlm block falls back to auto-detection,
+    # and "auto"/"tesseract" without tessdata resolves to no OCR at all.
+    if engine == "none" or not disk_cfg.get("pdf.ocr_enabled", True):
+        effective = "none"
+    elif engine == "vlm":
+        effective = "vlm" if vlm["configured"] else (detected or "none")
+    else:
+        effective = detected or "none"
+
+    return {"engine": engine, "effective": effective,
+            "ocr_enabled": bool(disk_cfg.get("pdf.ocr_enabled", True)),
+            "language": disk_cfg.get("pdf.ocr_language", "eng"),
+            "tesseract": tess, "vlm": vlm,
+            "launch_hint": disk_cfg.get("pdf.vlm_ocr.launch_hint")}
+
+
+@app.post("/api/ocr/warm")
+def ocr_warm() -> dict:
+    """Load the vision model by sending it one tiny real page.
+
+    A GET /models answers "is the server up", not "is the model loaded" — a
+    llama.cpp server answers /models instantly while the first real image
+    request still pays the full weight-load. This sends a 64x64 white PNG
+    through the exact ocr_image() path, so a success here means the next
+    ingest page will be fast rather than a cold-start timeout.
+    """
+    from src.utils.config_loader import load_config as _load
+    try:
+        from src.ingestion.ocr_vlm import VLMOCR
+        client = VLMOCR.from_config(_load())
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"{type(e).__name__}: {e}"},
+                            status_code=400)
+    import base64
+    # 64x64 white PNG, inline so warming needs no scratch file and no Pillow.
+    png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAPElEQVR4nO3BMQEAAADC"
+        "oPVPbQwfoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOA3AAABAAAB"
+        "5Vd8AAAAAElFTkSuQmCC")
+    t0 = time.time()
+    try:
+        text = client.ocr_image(png)
+    except Exception as e:
+        return JSONResponse(
+            {"ok": False, "base_url": client.base_url, "model": client.model,
+             "error": f"{type(e).__name__}: {e}"}, status_code=502)
+    dt = round(time.time() - t0, 1)
+    return {"ok": True, "base_url": client.base_url, "model": client.model,
+            "seconds": dt, "returned_chars": len(text),
+            "note": f"Model answered in {dt}s and is now warm. A blank page "
+                    f"returning no text is expected and fine."}
+
+
 # ---- folder browser (Settings path pickers) ----
+
+def _browse_roots(windows: bool | None = None) -> list[dict]:
+    """The '' listing: where a path picker starts.
+
+    `windows` is injectable so the POSIX branch is testable from Windows.
+    Patching os.name globally is not an option — pathlib reads it, and a
+    Windows process then builds PosixPath objects and dies.
+
+    Windows gets drive letters. POSIX (the Docker/Mac deployment) has none, so
+    it gets the places a vault can actually live — '/' plus the home dir, the
+    current vault, and /Volumes for external disks. Returning drive letters on
+    Linux is what made the vault switcher a dead end in the container: every
+    'A:/'..'Z:/' probe failed, the list came back empty, and "Use this folder"
+    stayed disabled with nothing to click.
+    """
+    if windows is None:
+        windows = os.name == "nt"
+    if windows:
+        import string
+        return [{"name": f"{d}:", "path": f"{d}:/"}
+                for d in string.ascii_uppercase if Path(f"{d}:/").exists()]
+    roots: list[dict] = []
+    seen: set[str] = set()
+
+    def add(label: str, p: str | Path | None) -> None:
+        if not p:
+            return
+        q = Path(p)
+        if not q.is_dir():
+            return
+        key = str(q)
+        if key in seen:
+            return
+        seen.add(key)
+        roots.append({"name": f"{label} — {key}" if label else key, "path": key})
+
+    add("home", os.environ.get("HOME"))
+    add("vault", CFG.get("parser.vault_path"))
+    add("external drives", "/Volumes")          # macOS mounts live here
+    add("", "/")
+    return roots
+
 
 @app.get("/api/browse")
 def browse(path: str = "") -> dict:
     """
     One level of the LOCAL filesystem, folders only — powers the Settings
     tab's path pickers and the vault switcher (a browser page can't open a
-    native folder dialog for server-side paths). '' lists the drives.
-    Read-only; never creates or touches anything.
+    native folder dialog for a SERVER-side path, and in Docker the server only
+    sees what is bind-mounted). '' lists the roots. Read-only.
+
+    Every entry carries its FULL path, joined server-side. The client used to
+    join with a literal '\\', which produced '/vault\\Foo' on Linux — a path
+    that is never a directory, so the first click 404'd.
     """
     if not path:
-        import string
-        drives = [f"{d}:/" for d in string.ascii_uppercase
-                  if Path(f"{d}:/").exists()]
-        return {"path": "", "parent": None, "dirs": drives}
+        return {"path": "", "parent": None, "sep": os.sep,
+                "dirs": _browse_roots()}
     p = Path(path)
     if not p.is_dir():
         return JSONResponse({"error": f"not a folder: {path}"}, status_code=404)
@@ -1866,11 +2123,11 @@ def browse(path: str = "") -> dict:
     try:
         for entry in sorted(p.iterdir(), key=lambda x: x.name.lower()):
             if entry.is_dir() and not entry.name.startswith((".", "$")):
-                dirs.append(entry.name)
+                dirs.append({"name": entry.name, "path": str(entry)})
     except PermissionError:
         return JSONResponse({"error": f"no permission: {path}"}, status_code=403)
     parent = str(p.parent) if p.parent != p else ""
-    return {"path": str(p), "parent": parent, "dirs": dirs}
+    return {"path": str(p), "parent": parent, "sep": os.sep, "dirs": dirs}
 
 
 # ---- vault switcher (Obsidian-style: every vault ever opened stays listed,
@@ -1879,8 +2136,15 @@ def browse(path: str = "") -> dict:
 # The per-vault settings snapshot: everything that must travel WITH a vault.
 # Each corpus needs its own index trio — reusing another vault's indexes
 # retrieves nonsense (same warning the Settings tab shows).
+#
+# vault_tree_root and manifest_cache are here because they are per-CORPUS, not
+# per-install: the tree root is a folder inside one particular vault, and the
+# manifest cache is keyed by that vault's source_files. Leaving them global
+# meant vault B was browsed at vault A's root and served vault A's cached
+# in-RAG status.
 VAULT_KEYS = ["parser.vault_path", "paths.chunks_file", "paths.chroma_dir",
-              "paths.bm25_index", "paths.collection_name", "webui.inbox_dir"]
+              "paths.bm25_index", "paths.collection_name", "webui.inbox_dir",
+              "webui.vault_tree_root", "webui.manifest_cache"]
 
 # Registry lives at a vault-INDEPENDENT path (DATA_DIR follows the per-vault
 # chunks_file, so it moves on switch — the registry must not move with it).
@@ -1985,6 +2249,11 @@ def vaults_switch(body: VaultSwitchIn) -> dict:
                                      ).as_posix(),
                 "paths.collection_name": snap["paths.collection_name"] or "obsidian_vault",
                 "webui.inbox_dir": snap["webui.inbox_dir"] or "Inbox",
+                # A fresh vault gets its OWN root and cache. The tree root is
+                # empty = browse from the vault root: any other default names a
+                # folder that exists in one specific vault and nowhere else.
+                "webui.vault_tree_root": "",
+                "webui.manifest_cache": f"data/vaults/{slug}/.manifest_cache.json",
             }
             scaffolded = True
             if tgt is None:
@@ -2049,16 +2318,72 @@ def _pid_on_port(port: int) -> int | None:
 
 _RESTART_LOCK = threading.Lock()
 
+# Where the POSIX lane looks for serve_api's pid. docker-entrypoint.sh runs
+# serve_api under a supervisor loop and writes its pid here, so signalling that
+# pid restarts the query API without restarting the whole container.
+_SERVE_PID_FILE = Path(os.environ.get("RAG_SERVE_PID_FILE")
+                       or (ROOT / "logs" / "serve_api.pid"))
+
+
+def _restart_rag_api_posix() -> dict:
+    """Signal the supervised serve_api process; its supervisor relaunches it.
+
+    Deliberately NOT a "find the process and hope" heuristic: without the
+    pid-file contract this raises and says what to do instead. A silent no-op
+    here would be worse than the old hard error — the console would report a
+    restart that never happened, and every setting saved afterwards would look
+    applied while :8051 kept serving the old config.
+    """
+    import signal
+
+    port = _rag_port()
+    if not _SERVE_PID_FILE.exists():
+        raise RuntimeError(
+            f"no serve_api pid file at {_SERVE_PID_FILE} — this lane needs the "
+            f"supervised entrypoint (docker-entrypoint.sh). Restart the "
+            f"container instead: docker compose restart rag")
+    try:
+        pid = int(_SERVE_PID_FILE.read_text(encoding="utf-8").strip())
+    except (ValueError, OSError) as e:
+        raise RuntimeError(f"unreadable pid file {_SERVE_PID_FILE}: {e}")
+    with _RESTART_LOCK:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            raise RuntimeError(
+                f"serve_api pid {pid} is not running — the supervisor should "
+                f"have restarted it already; check the container logs")
+        except PermissionError as e:
+            raise RuntimeError(f"cannot signal pid {pid}: {e}")
+        # Wait for the supervisor to write a NEW pid (up to 10s). The old pid
+        # dying is not enough — the relaunch is what makes :8051 come back.
+        new_pid = pid
+        for _ in range(20):
+            time.sleep(0.5)
+            try:
+                new_pid = int(_SERVE_PID_FILE.read_text(encoding="utf-8").strip())
+            except (ValueError, OSError):
+                continue
+            if new_pid != pid:
+                break
+    log.info("restarted :%d via SIGTERM (old pid %s -> new pid %s)",
+             port, pid, new_pid)
+    return {"port": port, "killed_pid": pid,
+            "new_pid": new_pid if new_pid != pid else None}
+
 
 def _restart_rag_api() -> dict:
     """Kill whatever listens on the query-API port and relaunch serve_api
     detached, inheriting THIS console's environment (rag.bat sets the HF
     cache vars — a console started bare would hand :8051 a broken env, which
-    is exactly the failure the launcher comments warn about). Windows-only:
-    the Docker deployment restarts via the container, not this lane."""
+    is exactly the failure the launcher comments warn about).
+
+    Two lanes: Windows kills by port and relaunches itself; POSIX (the
+    Docker/Mac deployment) signals the supervised process — see above. Without
+    the POSIX lane nothing saved in Settings or the vault switcher could ever
+    be applied from the console in the container."""
     if os.name != "nt":
-        raise RuntimeError("service restart is the Windows lane; in Docker "
-                           "restart the container instead")
+        return _restart_rag_api_posix()
     port = _rag_port()
     with _RESTART_LOCK:
         old_pid = _pid_on_port(port)

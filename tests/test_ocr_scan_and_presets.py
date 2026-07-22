@@ -165,9 +165,9 @@ def test_unknown_preset_names_the_known_ones():
 
 
 def test_shipped_config_presets_are_well_formed():
-    from src.utils.config_loader import load_config
-    presets = load_config().get("pdf.vlm_ocr_presets", {}) or {}
-    assert presets, "config.yaml lost its vlm_ocr_presets block"
+    from conftest import shipped_config
+    presets = shipped_config().get("pdf.vlm_ocr_presets", {}) or {}
+    assert presets, "the shipped config lost its vlm_ocr_presets block"
     for name, spec in presets.items():
         assert spec.get("model"), f"{name} has no model"
         assert spec.get("prompt"), f"{name} has no prompt"

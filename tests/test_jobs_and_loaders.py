@@ -11,13 +11,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest
 
-from manage_api import _build_argv, _retag_meta, _safe_rel
+# manage_api builds its CFG at import time, so it needs a config.yaml — which a
+# fresh clone does not have (it is gitignored; you copy config.example.yaml).
+# Importing unconditionally made `pytest tests/` collapse at COLLECTION for
+# anyone who had just cloned the repo, taking the loader tests below down with
+# it even though they need no config at all.
+try:
+    from manage_api import _build_argv, _retag_meta, _safe_rel
+    _HAVE_CONSOLE = True
+except (FileNotFoundError, KeyError):
+    _HAVE_CONSOLE = False
+
 from src.ingestion.pdf_loader import parse_page_spec
 from src.ingestion.code_loader import CodeLoader
+
+pytestmark_console = pytest.mark.skipif(
+    not _HAVE_CONSOLE,
+    reason="no config.yaml — copy config.example.yaml to config.yaml")
 
 
 # ---- _build_argv: the agent-facing job contract ----
 
+@pytestmark_console
 def test_ingest_pdfs_chunking_flag():
     argv = _build_argv("ingest_pdfs", {"chunking": "fixed"})
     assert argv[-2:] == ["--chunking", "fixed"]
@@ -25,16 +40,19 @@ def test_ingest_pdfs_chunking_flag():
     assert "--chunking" not in argv
 
 
+@pytestmark_console
 def test_ingest_pdfs_chunking_invalid():
     with pytest.raises(ValueError):
         _build_argv("ingest_pdfs", {"chunking": "semantic"})
 
 
+@pytestmark_console
 def test_ingest_pdfs_ocr_invalid():
     with pytest.raises(ValueError):
         _build_argv("ingest_pdfs", {"ocr_engine": "gpt4v"})
 
 
+@pytestmark_console
 def test_ingest_pdfs_pages_validated():
     argv = _build_argv("ingest_pdfs", {"pages": "1-50,60,70-80"})
     assert "--pages" in argv
@@ -42,11 +60,13 @@ def test_ingest_pdfs_pages_validated():
         _build_argv("ingest_pdfs", {"pages": "0-5"})       # 1-based
 
 
+@pytestmark_console
 def test_unknown_kind_raises():
     with pytest.raises(ValueError):
         _build_argv("drop_all_tables", {})
 
 
+@pytestmark_console
 def test_safe_rel_guards():
     assert _safe_rel("foo.jsonl") == "data/foo.jsonl"       # bare name -> data/
     assert _safe_rel("data/foo.jsonl") == "data/foo.jsonl"
@@ -58,6 +78,7 @@ def test_safe_rel_guards():
 
 # ---- _retag_meta: the metadata transform behind /api/documents/retag ----
 
+@pytestmark_console
 def test_retag_meta_domain_course_tags():
     m = {"source_file": "x.sql", "domain": "general",
          "course_code": "unknown", "course_name": "unknown", "tags": ["old"]}
@@ -69,6 +90,7 @@ def test_retag_meta_domain_course_tags():
     assert out["tags"] == ["sql"]
 
 
+@pytestmark_console
 def test_retag_meta_none_keeps_everything():
     m = {"domain": "biz", "course_name": "Business Intelligence & Analytics",
          "course_code": "DS 206"}
@@ -110,6 +132,7 @@ def test_discovery_skips_dir_named_like_sql(tmp_path):
 
 # ---- session 14: new job kinds + chunking values + rerank modes ----
 
+@pytestmark_console
 def test_chunking_document_none_accepted():
     for mode in ("document", "none"):
         argv = _build_argv("ingest_pdfs", {"chunking": mode})
@@ -118,6 +141,7 @@ def test_chunking_document_none_accepted():
         _build_argv("ingest_pdfs", {"chunking": "semantic"})
 
 
+@pytestmark_console
 def test_include_files_pass_through_and_guards():
     argv = _build_argv("ingest_pdfs", {"include_files": ["a.pdf", "b.pdf"]})
     assert "--include-files" in argv and "a.pdf,b.pdf" in argv
@@ -129,6 +153,7 @@ def test_include_files_pass_through_and_guards():
     assert "--include-files" not in _build_argv("ingest_pdfs", {"include_files": []})
 
 
+@pytestmark_console
 def test_ingest_md_guards():
     argv = _build_argv("ingest_md", {"include_path": "Inbox/x.md",
                                      "output": "data/inbox_md.jsonl",
@@ -141,6 +166,7 @@ def test_ingest_md_guards():
         _build_argv("ingest_md", {"output": "data/x.jsonl"})
 
 
+@pytestmark_console
 def test_fetch_web_and_convert_files_validation():
     argv = _build_argv("fetch_web", {"urls": ["https://a.io/x"], "backend": "auto"})
     assert "fetch-web" in argv
@@ -174,6 +200,7 @@ def test_lexical_reranker_orders_by_term_coverage():
         [docs[0].text, docs[1].text]
 
 
+@pytestmark_console
 def test_persist_section_keys_section_aware(tmp_path):
     from manage_api import _persist_section_keys
     cfg = tmp_path / "config.yaml"

@@ -76,7 +76,7 @@ def main():
         st.caption("Answers are grounded in your own lecture notes. "
                    "Citations are audited by a second model pass.")
 
-    st.title("📚 the personal RAG")
+    st.title("📚 Personal RAG")
     st.caption("Ask anything from your Obsidian vault — grounded, cited answers from your own notes.")
 
     if "history" not in st.session_state:

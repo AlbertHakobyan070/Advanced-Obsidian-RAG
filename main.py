@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-main.py — CLI entry point for the personal RAG.
+main.py — CLI entry point for Personal RAG.
 
     python main.py index                      # build dense + sparse indexes from chunks.jsonl
     python main.py query "What is ARIMA?"      # one-shot question
@@ -264,7 +264,7 @@ def cmd_convert_files(args):
 
 def _inbox_dir(cfg) -> Path:
     vault = Path(cfg.get("pdf.vault_path") or cfg.get("parser.vault_path"))
-    return vault / cfg.get("webui.inbox_dir", "00 – AUA_DS/Other/Inbox")
+    return vault / (cfg.get("webui.inbox_dir") or "Inbox")
 
 
 def _render_answer(answer) -> None:
@@ -317,7 +317,7 @@ def cmd_chat(args):
     from src.pipeline import RAGPipeline
 
     rag = RAGPipeline.from_config(cfg)
-    print("the personal RAG — interactive mode. Type 'exit' or Ctrl-C to quit.\n")
+    print("Personal RAG — interactive mode. Type 'exit' or Ctrl-C to quit.\n")
     try:
         while True:
             q = input("❓ ").strip()
@@ -358,7 +358,7 @@ def cmd_serve(args):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="the author's personal RAG over his Obsidian vault.")
+    p = argparse.ArgumentParser(description="the personal RAG over his Obsidian vault.")
     p.add_argument("--config", default=None, help="Path to config.yaml")
     sub = p.add_subparsers(dest="command", required=True)
 

@@ -65,7 +65,7 @@ python main.py query "Explain the central limit theorem from my notes"
 
 ## 3. (Optional) Route through a coding agent
 
-A coding agent (e.g. Claude Code, Hermes Agent, OpenCode) that supports any
+A coding agent (e.g. Claude Code, Cursor, OpenCode) that supports any
 OpenAI-compatible endpoint can sit in front of KoboldCPP, giving the RAG
 an agent layer — memory, tools, multi-step reasoning — on top of retrieval.
 

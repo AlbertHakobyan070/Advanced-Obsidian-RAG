@@ -6,12 +6,44 @@
 # ============================================================
 
 parser:
+  # Any string value in this file may reference an environment variable as
+  # ${NAME} or ${NAME:-default} — useful for containers, where the vault path
+  # has to match a bind-mount. An unset ${NAME} stays literal rather than
+  # becoming "", which would point the parser at the filesystem root.
   vault_path: "path/to/your/obsidian/vault"
   max_chunk_size: 3000
   min_chunk_size: 200
   overlap_size: 150
   chunking: heading              # heading | fixed | document | none (how OVERSIZED sections split)
   skip_dirs: [".obsidian", ".trash", ".git", "__path_fix_backups", "__MACOSX"]
+
+# ---------------------------------------------------------------------------
+# What the folder-derived grouping label is CALLED, and where it comes from.
+#
+# The METADATA keys are always course_code / course_name whatever `label` says.
+# Renaming them would invalidate every stored chunk and force a full re-embed,
+# so only the console's wording and the folder maps are configurable.
+#
+# The shipped parser has built-in maps for an academic vault (course folders,
+# CS/DS course codes). They are a DEFAULT, not a requirement:
+#   * detect_from_path: false  -> nothing is derived from folder names; every
+#                                 chunk is "unknown" until you retag. Right for
+#                                 a vault with no folder convention to mine.
+#   * all four maps null       -> keep the built-in academic maps.
+#   * ANY map supplied         -> the built-ins are dropped WHOLESALE and only
+#                                 what you supply applies. All-or-nothing, so a
+#                                 vault that declares its own taxonomy can't
+#                                 still be labelled through the built-in
+#                                 keyword fallback.
+# ---------------------------------------------------------------------------
+taxonomy:
+  label: course                   # e.g. course | project | client | topic
+  label_plural: courses
+  detect_from_path: true
+  folder_map: null                # {"folder name": "Label"}
+  domain_map: null                # {"Label": "ml"}  (stats/ml/nlp/viz/biz/ts/db/math/swe/prog)
+  code_map: null                  # {"CS 101": "Label"}
+  keywords: null                  # {"substring": "Label"} — last-resort match
 
 paths:
   chunks_file: "data/chunks.jsonl"
@@ -52,11 +84,6 @@ providers:
     model: "auto"
     api_key_env: FREELLMAPI_API_KEY
     api_key_optional: true
-  minimax:
-    kind: openai
-    base_url: "https://api.minimax.io/v1"
-    model: "MiniMax-M2"
-    api_key_env: MINIMAX_API_KEY
   kobold:
     kind: openai
     base_url: "http://localhost:5001/v1"
@@ -280,7 +307,27 @@ pdf:
   # image_url content — SGLang/vLLM on a GPU box, llama.cpp/LM Studio serving
   # a GGUF quant locally, or FreeLLMAPI (:3001) fronting a free hosted vision
   # model. Per-page markdown replaces the scanned page's empty extraction.
+  # Named VLM-OCR engines. Each model needs its OWN prompt and dpi —
+  # DeepSeek-OCR requires llama.cpp's <__media__> marker because it ships no
+  # chat template of its own, the others don't — so a preset bundles them and
+  # switching engine is one word instead of four keys that fail confusingly
+  # when mismatched. Selected by `vlm_ocr.preset` below.
+  vlm_ocr_presets:
+    deepseek:
+      model: "DeepSeek-OCR"
+      prompt: "<__media__>\nConvert the document to markdown."
+      dpi: 150
+    paddleocr_vl:
+      model: "PaddleOCR-VL"
+      prompt: "Convert the document to markdown."
+      dpi: 200
+    glm_ocr:
+      model: "GLM-OCR"
+      prompt: "Convert the document to markdown."
+      dpi: 200
+
   vlm_ocr:
+    preset: null                            # a name above, or null for the keys here
     base_url: "http://127.0.0.1:8100/v1"
     model: "Unlimited-OCR"                  # match what the server reports
     api_key_env: "OPENAI_API_KEY"           # sent if set; local servers ignore it
@@ -289,6 +336,9 @@ pdf:
     timeout: 300                            # generous — CPU-quant servers are slow
     max_tokens: 8192
     max_pages_per_pdf: null                 # safety cap for huge scanned books
+    # Free text shown verbatim in the console's OCR panel when the endpoint is
+    # down — your own reminder of how to start it. Never executed.
+    launch_hint: "Start your vision server on :8100, then press Probe."
   only_book_folders: false                  # true = only ingest PDFs under Books/ dirs
   max_pages_per_pdf: null                   # cap pages (null = no cap)
 notebooks:
@@ -312,6 +362,15 @@ webui:
   auto_restart_rag: false                    # restart :8051 automatically after index-changing jobs
   # Browser uploads land INSIDE the vault here (created if missing), so the
   # normal ingest passes pick them up with --include-path "Inbox":
-  inbox_dir: "00 – AUA_DS/Other/Inbox"
+  inbox_dir: "Inbox"
+  # Vault-tab browse root, vault-relative. "" = the vault root. Set it to a
+  # subfolder if only part of your vault is material worth indexing.
+  vault_tree_root: ""
   jobs_dir: "logs/jobs"                      # one log file per job
   manifest_cache: "data/.manifest_cache.json"
+
+# NOTE: the vault switcher (Settings → Vaults) carries all of these PER VAULT —
+# vault_path, the index trio, collection name, inbox_dir, vault_tree_root and
+# manifest_cache travel together, so a second vault never inherits the first
+# one's browse root or cached in-RAG status. Every key it manages must EXIST in
+# this file, or a switch fails with "found 0 matches".
