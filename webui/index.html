@@ -346,9 +346,39 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
   box-shadow:0 6px 20px rgba(0,0,0,.10)}
 .infocard h3{display:flex;align-items:center;gap:7px;padding-bottom:5px;
   border-bottom:1px solid var(--line);color:var(--amber)}
-/* query test console: give the whole knob shelf a subtle framed backdrop */
+/* ---- query test console: the knob shelf --------------------------------
+   A GRID, not a wrapping flex row. As flex the four groups sized to their
+   contents (494 / 260 / 511 / 132 px), so each one wrapped onto its own line
+   at a different width and the shelf read as a lopsided stack. auto-fit
+   columns give equal widths, aligned tops, and a sane collapse to one column
+   on a narrow window. */
 #tab-query .fsets{background:linear-gradient(180deg,var(--panel-2),transparent);
-  border:1px solid var(--line);border-radius:var(--r);padding:11px}
+  border:1px solid var(--line);border-radius:var(--r);padding:11px;
+  display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));
+  gap:10px;align-items:stretch}
+/* Column layout + margin-top:auto puts every group's CONTROLS on a shared
+   bottom line, however tall its title wraps. */
+#tab-query .fset{display:flex;flex-direction:column}
+#tab-query .fset .row{flex-wrap:wrap;margin-top:auto;row-gap:8px}
+/* Controls share their cell instead of keeping fixed pixel widths, so nothing
+   overflows its group and the columns stay even. */
+#tab-query .fset input.num{flex:1 1 96px;width:auto;min-width:0}
+#tab-query .fset select{flex:1 1 150px;min-width:0}
+#tab-query .fset .chk{flex:0 0 auto}
+/* Actions get their own full-width bar under the shelf: the primary action of
+   the tab should sit in one predictable place, not float as a fourth grid
+   cell whose position changes with the window width. */
+#tab-query .q-actions{display:flex;align-items:center;gap:10px;margin-top:10px;
+  flex-wrap:wrap}
+#tab-query .q-actions .spacer{flex:1 1 auto}
+#tab-query .q-actions .btn{min-width:120px;justify-content:center}
+#tab-query #q-busy{margin:0}
+/* The query line: preset is a fixed chooser, history takes the slack. */
+#tab-query .q-top{display:flex;gap:10px;align-items:center;flex-wrap:wrap;
+  margin-bottom:8px}
+#tab-query .q-top #q-preset{flex:0 0 auto}
+#tab-query .q-top #q-history{flex:1 1 220px;max-width:none;min-width:0}
+#tab-query #q-text{display:block;width:100%;box-sizing:border-box}
 @media(prefers-reduced-motion:reduce){.infocard{transition:none} .infocard:hover{transform:none}}
 </style>
 </head>
@@ -650,9 +680,9 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
     <h2>Test console</h2>
     <p class="hint">Talks straight to the warm query endpoint (:8051). <b>Ask</b> = full RAG answer (needs FreeLLMAPI). <b>Search only</b> = retrieval, no LLM.</p>
     <div class="desc"><b>Search only</b> runs retrieval end-to-end (hybrid dense+BM25 fusion → rerank → E2 expansion) and shows the ranked chunks — free, local, no LLM. <b>Ask</b> adds grounded, cited generation on top. The knob groups: <b>preset</b> bundles everything (code / concept / synthesis); <b>rerank_k / dense_k / sparse_k</b> size the pools; <b>HyDE / HyPE / Omnisearch</b> are extra retrieval lanes; <b>rerank</b> picks the reranking method (cross-encoder = semantic scoring, lexical = model-free term coverage, none = fused order); <b>parents / neighbors</b> are the E2 small-to-big expansions (swap note chunks for full sections · append adjacent PDF pages). "default" on any select = whatever the preset/config says. The retrieval echo under each answer shows what actually ran — full knob documentation lives on the Info tab.</div>
-    <div class="row" style="margin-bottom:8px">
+    <div class="q-top">
       <select id="q-preset" title="A named bundle of every knob below. Blank = auto (code-intent queries self-apply the code preset)."><option value="">preset: none</option><option>code</option><option>concept</option><option>synthesis</option></select>
-      <select id="q-history" style="max-width:420px" title="Last 20 queries from this browser — picking one restores the question AND its knob settings."><option value="">history…</option></select>
+      <select id="q-history" title="Last 20 queries from this browser — picking one restores the question AND its knob settings."><option value="">history…</option></select>
       <button class="btn" id="q-history-clear" title="Forget the saved query history">clear</button>
     </div>
     <textarea id="q-text" rows="2" style="width:100%" placeholder="What do I know about conjugate priors?"></textarea>
@@ -679,14 +709,13 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
           <select id="q-neigh" title="E2 small-to-big: append adjacent-page PDF chunks as marked supplementary sources. default = config/preset (ON in the synthesis preset)."><option value="">neighbors: default</option><option value="on">neighbors: on</option><option value="off">neighbors: off</option></select>
         </div>
       </div>
-      <div class="fset" style="display:flex;align-items:flex-end;border-color:transparent;background:none;padding-left:0">
-        <div class="row">
-          <button class="btn" id="q-search" title="Retrieval only — free, local, no LLM. Tune here first.">Search only</button>
-          <button class="btn primary" id="q-ask" title="Full RAG: retrieval + grounded, cited generation (needs FreeLLMAPI).">Ask</button>
-        </div>
-      </div>
     </div>
-    <div id="q-busy" style="display:none;margin-top:14px"><svg class="reel" viewBox="0 0 24 24"><circle class="b" cx="12" cy="12" r="9"/><circle class="a" cx="12" cy="12" r="6"/></svg><span class="hint" id="q-busy-msg">retrieving…</span></div>
+    <div class="q-actions">
+      <div id="q-busy" style="display:none"><svg class="reel" viewBox="0 0 24 24"><circle class="b" cx="12" cy="12" r="9"/><circle class="a" cx="12" cy="12" r="6"/></svg><span class="hint" id="q-busy-msg">retrieving…</span></div>
+      <span class="spacer"></span>
+      <button class="btn" id="q-search" title="Retrieval only — free, local, no LLM. Tune here first.">Search only</button>
+      <button class="btn primary" id="q-ask" title="Full RAG: retrieval + grounded, cited generation (needs FreeLLMAPI).">Ask</button>
+    </div>
     <div id="q-out" style="margin-top:14px"></div>
   </div>
 </section>
@@ -2295,19 +2324,22 @@ async function loadSettings(){
     }).join("");
     renderProviders(s);
     renderRerankers(s);
+    /* Move the fields each panel drives INTO that panel, so a click on "Use"
+       visibly changes the inputs sitting right underneath it. They are moved,
+       not copied: one input per setting keeps Save unambiguous. */
+    relocateFields(RERANK_FIELD_KEYS,"#rr-fields");
+    relocateFields(PROVIDER_FIELD_KEYS,"#pv-fields");
+    wireSettingsInteractions(s);
     loadOcr();
-    /* Switching backend must switch the model with it: a provider plus the
-       PREVIOUS provider's model id is the one combination that fails at call
-       time. Fill it in visibly here so the change is reviewable before saving
-       (the backend carries the same default if an API caller omits it). */
-    const provSel=document.getElementById("cfg-generation-provider");
-    const modelIn=document.getElementById("cfg-generation-model");
-    if(provSel&&modelIn){
-      provSel.onchange=()=>{
+    /* Choosing a provider from the dropdown itself carries its model along,
+       exactly as the Use button does. */
+    const provSel=fieldEl("generation.provider");
+    if(provSel){
+      provSel.addEventListener("change",()=>{
         const p=(s.providers||[]).find(x=>x.name===provSel.value);
-        if(p&&p.model)modelIn.value=p.model;
-        renderProviders(s,provSel.value);
-      };
+        if(p&&p.model)setField("generation.model",p.model);
+        if(p&&p.base_url)setField("generation.base_url",p.base_url);
+      });
     }
     $$(".set-browse").forEach(b=>b.onclick=async()=>{
       const input=document.getElementById(b.dataset.for);
@@ -2354,39 +2386,131 @@ function renderRerankers(s){
   box.innerHTML=`<h3 style="margin:0 0 6px">Reranker <span class="hint" style="margin:0;display:inline;font-weight:400">— reorders the fused candidates before the answer is written</span></h3>
     <p class="hint" style="margin:0 0 10px">${gpuLine} &nbsp; Start with <b>Default</b>; it works on any machine. A bigger reranker is not automatically better <b>on your corpus</b> — label <code>expected_source_files</code> in the golden set and compare with <code>main.py eval --retrieval-only</code> before switching.</p>
     <div class="grid g2" style="gap:8px">${profiles.map(p=>`
-      <div class="vault-row${p.settings["retrieval.rerank_mode"]===mode&&(!p.settings["retrieval.cross_encoder_model"]||p.settings["retrieval.cross_encoder_model"]===cur)?" cur":""}">
-        <div style="flex:1;min-width:0"><span class="nm">${esc(p.label)}</span>
+      <div class="vault-row rr-row" data-profile="${esc(p.id)}">
+        <div style="flex:1;min-width:0"><span class="nm">${esc(p.label)}</span><span class="rr-state"></span>
           <div class="pth" style="white-space:normal">${esc(p.detail||"")}</div></div>
-        <button class="btn rr-profile" data-id="${esc(p.id)}" title="Fill the fields above with this profile (review, then Save)">Use</button>
+        <button class="btn rr-profile" data-id="${esc(p.id)}" title="Apply this profile to the fields below (review, then Save)">Use</button>
       </div>`).join("")}</div>
     <label class="f" style="margin-top:14px">Cross-encoder models <span class="hint" style="margin:0;display:inline;text-transform:none;letter-spacing:0">(any HF cross-encoder id works — these are the ones verified here)</span></label>
-    ${list.map(r=>`<div class="vault-row${r.id===cur?" cur":""}">
-      <div style="flex:1;min-width:0"><span class="nm">${esc(r.id)}</span>${r.id===cur?' <span class="pill done" style="margin-left:6px">active</span>':""}
+    ${list.map(r=>`<div class="vault-row rr-row" data-model="${esc(r.id)}">
+      <div style="flex:1;min-width:0"><span class="nm">${esc(r.id)}</span><span class="rr-state"></span>
       <div class="pth">${esc(r.label||"")}</div></div>
-      ${r.id===cur?"":`<button class="btn rr-use" data-id="${esc(r.id)}" data-len="${esc(String(r.max_length||512))}" title="Put this model in the field above (review, then Save)">Use</button>`}</div>`).join("")}`;
+      <button class="btn rr-use" data-id="${esc(r.id)}" data-len="${esc(String(r.max_length||512))}" title="Put this model in the fields below (review, then Save)">Use</button></div>`).join("")}
+    <label class="f" style="margin-top:16px">These four knobs <span class="hint" style="margin:0;display:inline;text-transform:none;letter-spacing:0">— every button above writes here, so you can see exactly what it changed before saving</span></label>
+    <div id="rr-fields" class="grid g2" style="margin-top:8px"></div>`;
+}
 
-  const setField=(key,value)=>{
-    const el=document.getElementById("cfg-"+key.replace(/\./g,"-"));
-    if(!el)return false;
-    /* A select silently keeps its old value when asked for one it doesn't
-       have — add the option rather than pretend the change took. */
-    if(el.tagName==="SELECT"&&![...el.options].some(o=>o.value===value))
-      el.add(new Option(value,value));
-    el.value=value;return true;
-  };
+/* The four config fields the buttons above drive. They are RELOCATED out of
+   the generic field grid into the Reranker panel (see relocateFields) rather
+   than duplicated, so there is exactly one input per setting and Save keeps
+   working unchanged. */
+const RERANK_FIELD_KEYS=["retrieval.rerank_mode","retrieval.cross_encoder_model",
+  "retrieval.cross_encoder_max_length","retrieval.cross_encoder_device"];
+const PROVIDER_FIELD_KEYS=["generation.provider","generation.model","generation.base_url"];
+
+function fieldEl(key){return document.getElementById("cfg-"+key.replace(/\./g,"-"))}
+function liveVal(key){const el=fieldEl(key);return el?String(el.value||"").trim():""}
+/* A select silently keeps its old value when asked for one it does not have —
+   add the option rather than let the click look like it worked. */
+function setField(key,value){
+  const el=fieldEl(key);if(!el)return false;
+  if(el.tagName==="SELECT"&&![...el.options].some(o=>o.value===value))
+    el.add(new Option(value,value));
+  el.value=value;markSelections();return true;
+}
+/* Move a field's whole wrapper (label + control + restart badge) into `host`. */
+function relocateFields(keys,hostSel){
+  const host=$(hostSel);if(!host)return;
+  keys.forEach(k=>{
+    const el=fieldEl(k);if(!el)return;
+    let wrap=el;
+    while(wrap.parentElement&&wrap.parentElement.id!=="set-fields")wrap=wrap.parentElement;
+    if(wrap.parentElement)host.appendChild(wrap);
+  });
+}
+
+/* Live highlighting. Rebuilding the panels on every click would destroy the
+   relocated inputs, so this only toggles classes and badge text — which also
+   means a value typed by hand lights the same row as a click on Use. */
+function markSelections(){
+  const model=liveVal("retrieval.cross_encoder_model");
+  const mode=liveVal("retrieval.rerank_mode");
+  const saved=k=>String(state.settingsOrig[k]??"");
+  const dirty=RERANK_FIELD_KEYS.some(k=>liveVal(k)!==saved(k));
+  $$("#set-rerankers .rr-row").forEach(row=>{
+    let on=false;
+    if(row.dataset.model){
+      on=row.dataset.model===model&&mode==="cross_encoder";
+    }else if(row.dataset.profile){
+      const p=(state.rerankProfiles||[]).find(x=>x.id===row.dataset.profile);
+      on=!!p&&Object.entries(p.settings).every(([k,v])=>liveVal(k)===String(v));
+    }
+    row.classList.toggle("cur",on);
+    const st=row.querySelector(".rr-state");
+    if(st)st.innerHTML=on
+      ?(dirty?' <span class="pill" style="margin-left:6px">selected — Save to apply</span>'
+             :' <span class="pill done" style="margin-left:6px">active</span>')
+      :"";
+  });
+  const cur=liveVal("generation.provider");
+  const provDirty=PROVIDER_FIELD_KEYS.some(k=>liveVal(k)!==saved(k));
+  $$("#set-providers .pv-row").forEach(row=>{
+    const on=row.dataset.provider===cur;
+    row.classList.toggle("cur",on);
+    const st=row.querySelector(".pv-state");
+    if(st)st.innerHTML=on
+      ?(provDirty?' <span class="pill" style="margin-left:6px">selected — Save to apply</span>'
+                 :' <span class="pill done" style="margin-left:6px">active</span>')
+      :"";
+  });
+}
+
+/* Wire the buttons + keep the highlight honest when a field is edited by hand. */
+function wireSettingsInteractions(s){
+  state.rerankProfiles=s.rerank_profiles||[];
   $$(".rr-use").forEach(b=>b.onclick=()=>{
     setField("retrieval.cross_encoder_model",b.dataset.id);
     setField("retrieval.cross_encoder_max_length",b.dataset.len);
-    /* Picking a model while reranking is off would change nothing. */
-    if(mode!=="cross_encoder")setField("retrieval.rerank_mode","cross_encoder");
-    toast("Filled in — press Save changes to apply",0);
+    /* Picking a model while reranking is off or lexical would change nothing. */
+    if(liveVal("retrieval.rerank_mode")!=="cross_encoder")
+      setField("retrieval.rerank_mode","cross_encoder");
+    toast("Filled in below — press Save changes to apply",0);
   });
   $$(".rr-profile").forEach(b=>b.onclick=()=>{
-    const p=profiles.find(x=>x.id===b.dataset.id);if(!p)return;
+    const p=(s.rerank_profiles||[]).find(x=>x.id===b.dataset.id);if(!p)return;
     const missing=Object.entries(p.settings).filter(([k,v])=>!setField(k,v));
     if(missing.length){toast("could not set: "+missing.map(([k])=>k).join(", "),1);return}
     toast(`${p.label} — press Save changes to apply`,0);
   });
+  $$(".pv-use").forEach(b=>b.onclick=()=>{
+    const p=(s.providers||[]).find(x=>x.name===b.dataset.name);
+    setField("generation.provider",b.dataset.name);
+    /* A provider plus the PREVIOUS provider's model id is the one combination
+       that fails at call time — carry the new default along, visibly. */
+    if(p&&p.model)setField("generation.model",p.model);
+    if(p&&p.base_url)setField("generation.base_url",p.base_url);
+    toast("Filled in below — press Save changes to apply",0);
+  });
+  $$(".pv-key-save").forEach(b=>b.onclick=async()=>{
+    const inp=document.getElementById("key-"+b.dataset.env);
+    const value=(inp&&inp.value||"").trim();
+    if(!value&&!confirm(`Clear ${b.dataset.env} from .env?`))return;
+    b.disabled=true;
+    try{
+      const r=await api("/api/providers/key",{method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({env:b.dataset.env,value})});
+      if(inp)inp.value="";
+      toast(r.note||"saved",0);loadSettings();
+    }catch(e){toast(e.message,1)}
+    finally{b.disabled=false}
+  });
+  [...RERANK_FIELD_KEYS,...PROVIDER_FIELD_KEYS].forEach(k=>{
+    const el=fieldEl(k);if(!el)return;
+    el.addEventListener("input",markSelections);
+    el.addEventListener("change",markSelections);
+  });
+  markSelections();
 }
 
 /* OCR panel. Tesseract is a BINARY that is either installed or not; the VLM
@@ -2438,28 +2562,43 @@ async function loadOcr(){
    it is set in the server's environment — never the key itself. An unset key is
    the usual reason a freshly-switched provider 500s, and it is invisible
    otherwise. */
-function renderProviders(s,sel){
+function renderProviders(s){
   const box=$("#set-providers");if(!box)return;
   const list=s.providers||[];
-  const cur=sel||(s.editable&&s.editable["generation.provider"]?String(s.editable["generation.provider"].value??""):"");
   if(!list.length){box.innerHTML="";return}
   const rows=list.map(p=>{
-    const active=p.name===cur;
-    const key=!p.api_key_env
+    const keyed=!!p.api_key_env;
+    const status=!keyed
       ?`<span class="hint" style="margin:0">keyless</span>`
       :(p.key_present
         ?`<span class="pill done">${esc(p.api_key_env)} set</span>`
         :`<span class="pill${p.key_optional?"":" failed"}">${esc(p.api_key_env)} ${p.key_optional?"unset (optional)":"NOT set"}</span>`);
-    return `<div class="vault-row${active?" cur":""}">
+    /* The key box writes into .env and is never read back — /api/settings
+       reports only whether the variable is set, never its value. */
+    const keyBox=keyed?`<div class="row" style="margin-top:6px;flex-wrap:nowrap;gap:6px">
+        <input type="password" id="key-${esc(p.api_key_env)}" spellcheck="false" autocomplete="off"
+               placeholder="${p.key_present?"replace "+esc(p.api_key_env):"paste "+esc(p.api_key_env)}"
+               style="flex:1;min-width:120px"
+               title="Written to .env (gitignored). Never displayed again — leave blank and press Save key to clear it.">
+        <button class="btn pv-key-save" data-env="${esc(p.api_key_env)}" title="Write this key into .env and apply it to this console now">Save key</button>
+      </div>`:"";
+    return `<div class="vault-row pv-row" data-provider="${esc(p.name)}" style="align-items:flex-start">
       <div style="flex:1;min-width:0">
-        <span class="nm">${esc(p.name)}</span>${active?' <span class="pill done" style="margin-left:6px">active</span>':""}
+        <span class="nm">${esc(p.name)}</span><span class="pv-state"></span>
         <div class="pth">${esc(p.base_url||"(sdk default)")} · ${esc(p.model||"—")} · ${esc(p.kind)}</div>
-      </div>${key}</div>`;
+        ${keyBox}
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
+        ${status}
+        <button class="btn pv-use" data-name="${esc(p.name)}" title="Point generation at this backend (fills the fields below; review, then Save)">Use</button>
+      </div></div>`;
   }).join("");
   box.innerHTML=`<h3 style="margin:0 0 6px">Generation backends <span class="hint" style="margin:0;display:inline;font-weight:400">— the <code>providers:</code> registry</span></h3>
-    <p class="hint" style="margin:0 0 8px">Keys are read from environment variables (or <code>.env</code>), never stored in config.yaml. Set one and restart :8051.
+    <p class="hint" style="margin:0 0 8px"><b>Use</b> points generation at a backend and carries its model + endpoint along — a provider plus the previous provider's model id is the one combination that fails at call time. Keys go to <code>.env</code> (gitignored), never into config.yaml, and are never shown again; this console applies one immediately, :8051 needs a restart.
     The eval judge is separate: <code>eval.judge.provider</code> in config.yaml${s.judge_provider?` (currently <b>${esc(String(s.judge_provider))}</b>)`:" (unset — the judge reuses the generation backend)"}.</p>
-    ${rows}`;
+    ${rows}
+    <label class="f" style="margin-top:16px">Generation fields <span class="hint" style="margin:0;display:inline;text-transform:none;letter-spacing:0">— what the buttons above write</span></label>
+    <div id="pv-fields" class="grid g2" style="margin-top:8px"></div>`;
 }
 
 /* ---------- vault switcher (Obsidian-style) ---------- */
@@ -2499,7 +2638,10 @@ $("#vault-add").onclick=async()=>{
 $("#set-reload").onclick=()=>{loadSettings();$("#set-msg").textContent="reloaded"};
 $("#set-save").onclick=async()=>{
   const changes={};
-  $$("#set-fields [data-key]").forEach(el=>{
+  /* Scans the whole tab, not just #set-fields: the reranker and generation
+     fields are RELOCATED into their panels, and a #set-fields-only selector
+     would silently drop every edit made to them. */
+  $$("#tab-settings [data-key]").forEach(el=>{
     const k=el.dataset.key,v=el.value.trim();
     if(v!==state.settingsOrig[k])changes[k]=v;
   });

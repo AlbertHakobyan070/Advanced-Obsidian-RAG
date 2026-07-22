@@ -161,8 +161,18 @@ Open **http://127.0.0.1:8052**. Tabs:
   real OCR path, because `GET /models` answers "is the server up", not "is the model
   loaded" — and `pdf.vlm_ocr.launch_hint` is free text shown verbatim when it is down,
   so the command to start it is where you need it.
-  **Generation backends** lists the `providers:` registry with each backend's
-  endpoint/model and whether its API-key environment variable is set (never the value).
+  **Generation backends** lists the `providers:` registry and is *actionable*:
+  **Use** points generation at a backend and carries its model and endpoint
+  along, because a provider plus the previous provider's model id is the one
+  combination that fails at call time. Each backend also has a key box that
+  writes to `.env` (gitignored) — the value is never read back by any endpoint,
+  the panel only ever reports whether the variable is *set*, and the writer
+  accepts only env-var names the registry actually declares.
+
+  Each panel hosts the config fields it drives, directly beneath the buttons, so
+  a click visibly changes the inputs you are about to save; the matching row
+  lights up as **active** or **selected — Save to apply**, including when you
+  type a model id by hand.
 
   The **folder pickers** browse the *server's* filesystem, not yours: a web page cannot
   open a native folder dialog for a path the server has to read, and under Docker the

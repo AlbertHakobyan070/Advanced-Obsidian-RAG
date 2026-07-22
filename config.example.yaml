@@ -120,6 +120,18 @@ retrieval:
   # If a query mentions a course/domain, bias retrieval toward it
   metadata_boost: true
 
+  # Small-to-big context expansion (post-rerank), both OFF by default; the
+  # `synthesis` preset turns them on. parent_context swaps a markdown chunk for
+  # its whole enclosing section, read from the sidecar below (parents are never
+  # embedded). neighbor_context appends adjacent pages of the same PDF as
+  # marked supplementary sources.
+  parent_context: false
+  parents_file: "data/parents_md.jsonl"      # per-corpus; the vault switcher moves it
+  neighbor_context: false
+  neighbor_max_per_doc: 2
+  neighbor_max_total: 4
+  neighbor_max_chars: 2500
+
   # HyDE bypass for code-intent queries. If the query contains any of these
   # signals (case-insensitive, word-boundary matched; trailing '_' or '.'
   # behaves like a prefix, e.g. "geom_" matches geom_point), the hypothetical-
@@ -368,6 +380,10 @@ webui:
   vault_tree_root: ""
   jobs_dir: "logs/jobs"                      # one log file per job
   manifest_cache: "data/.manifest_cache.json"
+  # NOTE: ingest jobs started from the console write their output JSONL next to
+  # paths.chunks_file (the ACTIVE vault's data dir), not into the project's
+  # ./data — otherwise switching vaults leaves new chunks in the old vault's
+  # folder, where the next BM25 rebuild sweeps them into the wrong corpus.
 
 # NOTE: the vault switcher (Settings → Vaults) carries all of these PER VAULT —
 # vault_path, the index trio, collection name, inbox_dir, vault_tree_root and

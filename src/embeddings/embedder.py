@@ -351,8 +351,24 @@ class Embedder:
 
     def _append_dense(self, chunks: list["Chunk"]) -> None:
         import chromadb
+
+        # mkdir + get_or_create, NOT get_collection: a vault whose indexes have
+        # never been built has no collection yet, and appending into it is a
+        # completely normal first move — it is what the vault switcher sets a
+        # brand-new vault up to do, and what every "ingest, then append" job
+        # chain does. get_collection raised NotFoundError there, which read as
+        # a broken install rather than an empty one.
+        #
+        # The metadata MUST match _build_dense: Chroma only applies it at
+        # creation time, so a collection born here without hnsw:space=cosine
+        # would silently use L2 and score every query differently from one
+        # built by `main.py index`.
+        self.chroma_dir.mkdir(parents=True, exist_ok=True)
         client = chromadb.PersistentClient(path=str(self.chroma_dir))
-        collection = client.get_collection(self.collection_name)
+        collection = client.get_or_create_collection(
+            name=self.collection_name,
+            metadata={"hnsw:space": "cosine"},
+        )
         total = len(chunks)
         for start in range(0, total, self.batch_size):
             batch = chunks[start : start + self.batch_size]

@@ -15,12 +15,12 @@ REM        `rag console`, `rag query "..."`, etc. (the .bat picks up the
 REM        working directory automatically if PROJECT is left blank).
 REM
 REM   COMMANDS (each BLOCKS its window; run each in a SEPARATE terminal):
-REM     rag serve              -> start the warm HTTP endpoint on :8051
-REM     rag console            -> start the management console on :8052 (browser)
-REM     rag web                -> start the Streamlit web app (browser UI)
-REM     rag query "..."        -> one-shot CLI query (cold, human use)
-REM     rag chat               -> interactive warm CLI loop
-REM     rag <anything>         -> forwarded to: python main.py <anything>
+REM     rag serve              = start the warm HTTP endpoint on :8051
+REM     rag console            = start the management console on :8052 (browser)
+REM     rag web                = start the Streamlit web app (browser UI)
+REM     rag query "..."        = one-shot CLI query (cold, human use)
+REM     rag chat               = interactive warm CLI loop
+REM     rag [anything]         = forwarded to: python main.py [anything]
 REM
 REM   On 16 GB RAM, only start the ones you actually need right now.
 REM ===========================================================================

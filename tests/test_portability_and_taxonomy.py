@@ -195,6 +195,91 @@ def test_every_rerank_profile_is_applicable():
                 assert value in spec["values"], f"profile {name}: {key}={value}"
 
 
+# ------------------------------------------------- vault-anchored output ----
+
+@needs_config
+def test_job_output_lands_in_the_active_vaults_data_dir(monkeypatch, tmp_path):
+    """Ingest output must follow the ACTIVE vault, not the project folder.
+
+    The console built "--output data/x.jsonl" and main.py resolved it against
+    its CWD (the project root). After a vault switch, chunks_file — and with it
+    DATA_DIR, chunk_files() and the BM25 union — moves elsewhere, so new chunks
+    were written into the PREVIOUS vault's data folder: invisible in the new
+    vault's Ledger, and swept into the OLD vault's sparse union on its next
+    rebuild.
+    """
+    other = tmp_path / "OtherVault Data"
+    other.mkdir()
+    monkeypatch.setattr(M, "DATA_DIR", other)
+
+    argv = M._build_argv("ingest_notebooks", {"output": "data/new_chunks.jsonl"})
+    out = Path(argv[argv.index("--output") + 1])
+    assert out.parent == other, "output escaped the active vault's data dir"
+
+    argv = M._build_argv("index_append", {"file": "data/new_chunks.jsonl"})
+    assert Path(argv[argv.index("--append") + 1]).parent == other
+
+
+@needs_config
+def test_output_paths_still_reject_escapes(monkeypatch, tmp_path):
+    """Anchoring must not weaken the guard: validation runs on the RELATIVE
+    form, before anything is joined to the vault's data dir."""
+    monkeypatch.setattr(M, "DATA_DIR", tmp_path)
+    for bad in ("C:/windows/x.jsonl", "/etc/passwd", "../outside.jsonl",
+                "data/../../x.jsonl"):
+        with pytest.raises(ValueError):
+            M._build_argv("ingest_notebooks", {"output": bad})
+    # An omitted output is not an escape — it means "use the configured
+    # default". Only the lanes that REQUIRE their own output reject it.
+    assert "--output" not in M._build_argv("ingest_notebooks", {"output": ""})
+    with pytest.raises(ValueError):
+        M._build_argv("ingest_md", {"include_path": "Inbox", "output": ""})
+
+
+@needs_config
+def test_a_bare_filename_still_gets_the_data_dir(monkeypatch, tmp_path):
+    monkeypatch.setattr(M, "DATA_DIR", tmp_path)
+    argv = M._build_argv("ingest_code", {"output": "loose.jsonl"})
+    assert Path(argv[argv.index("--output") + 1]) == tmp_path / "loose.jsonl"
+
+
+def test_append_creates_the_collection_when_a_vault_is_brand_new(tmp_path):
+    """A vault whose indexes were never built has NO Chroma collection, and
+    appending into it is the normal first move — it is exactly what the vault
+    switcher scaffolds a new vault to do. get_collection raised NotFoundError
+    there, which reads as a broken install rather than an empty one.
+
+    Also pins the creation metadata: Chroma only applies it at creation time,
+    so a collection born on the append path without hnsw:space=cosine would
+    silently score every later query with L2.
+    """
+    chromadb = pytest.importorskip("chromadb")
+    from src.embeddings.embedder import Embedder
+
+    class StubBackend:
+        dim = 3
+
+        def embed(self, texts):
+            return [[float(len(t)), 0.5, 0.25] for t in texts]
+
+    emb = Embedder.__new__(Embedder)
+    emb.chroma_dir = tmp_path / "chroma_db"          # does not exist yet
+    emb.collection_name = "obsidian_vault"
+    emb.batch_size = 8
+    emb.backend = StubBackend()
+
+    class C:
+        def __init__(self, i, text):
+            self.id, self.text, self.metadata = i, text, {"source_file": "a.md"}
+
+    emb._append_dense([C("d1", "alpha"), C("d2", "beta")])
+
+    client = chromadb.PersistentClient(path=str(emb.chroma_dir))
+    col = client.get_collection("obsidian_vault")
+    assert col.count() == 2
+    assert (col.metadata or {}).get("hnsw:space") == "cosine"
+
+
 # ------------------------------------------------------------- taxonomy ----
 
 @pytest.fixture

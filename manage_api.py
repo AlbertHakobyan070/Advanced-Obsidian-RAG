@@ -266,6 +266,29 @@ def _safe_rel(p: str, *, default_dir: str = "data") -> str:
     return p
 
 
+def _vault_data_path(p: str, *, default_dir: str = "data") -> str:
+    """_safe_rel, then ANCHORED TO THE ACTIVE VAULT's data directory.
+
+    `_safe_rel` returns a project-relative "data/x.jsonl", and main.py resolves
+    that against its CWD — the project root. That is only correct while the
+    active vault's chunks_file also lives under the project. After a vault
+    switch it does not: chunks_file moves (e.g. to G:/ANIMUS/Animus Data), so
+    DATA_DIR, chunk_files() and the BM25 union all follow it while ingest jobs
+    kept writing into the PREVIOUS vault's data folder. Two consequences, both
+    silent: the new vault's Ledger showed nothing, and the stray *_chunks.jsonl
+    got swept into the OLD vault's sparse union on its next rebuild — one
+    vault's material indexed into another's corpus.
+
+    Validation still happens on the RELATIVE form first, so drive letters and
+    `..` are rejected before anything is joined.
+    """
+    rel = _safe_rel(p, default_dir=default_dir)
+    head, _, tail = rel.partition("/")
+    if head == default_dir and tail:
+        return str((DATA_DIR / tail).resolve())
+    return rel
+
+
 def _files_csv(files) -> str:
     """Validate + join a filename list for --include-files/--files flags.
     Plain filenames only (the upload sanitizer never produces commas or path
@@ -294,7 +317,7 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
         if prm.get("exclude_path"):
             argv += ["--exclude-path", str(prm["exclude_path"])]
         if prm.get("output"):
-            argv += ["--output", _safe_rel(str(prm["output"]))]
+            argv += ["--output", _vault_data_path(str(prm["output"]))]
         if prm.get("max_pages"):
             argv += ["--max-pages", str(int(prm["max_pages"]))]
         if prm.get("pages"):
@@ -328,7 +351,7 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
     if kind == "ingest_notebooks":
         argv = [py, "main.py", "ingest-notebooks"]
         if prm.get("output"):
-            argv += ["--output", _safe_rel(str(prm["output"]))]
+            argv += ["--output", _vault_data_path(str(prm["output"]))]
         if prm.get("no_outputs"):
             argv.append("--no-outputs")
         if prm.get("save_figures"):
@@ -350,7 +373,7 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
     if kind == "ingest_code":
         argv = [py, "main.py", "ingest-code"]
         if prm.get("output"):
-            argv += ["--output", _safe_rel(str(prm["output"]))]
+            argv += ["--output", _vault_data_path(str(prm["output"]))]
         if prm.get("include_path"):
             argv += ["--include-path", str(prm["include_path"])]
         if prm.get("exclude_path"):
@@ -372,7 +395,7 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
         # REQUIRED so the canonical chunks.jsonl can never be clobbered.
         if not prm.get("include_path"):
             raise ValueError("ingest_md requires include_path")
-        out = _safe_rel(str(prm.get("output") or ""))
+        out = _vault_data_path(str(prm.get("output") or ""))
         if Path(out).name == "chunks.jsonl":
             raise ValueError("ingest_md must not write chunks.jsonl")
         argv = [py, "main.py", "ingest-md",
@@ -417,7 +440,8 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
             argv += ["--ocr-pages", str(prm["ocr_pages"])]
         return argv
     if kind == "index_append":
-        return [py, "main.py", "index", "--append", _safe_rel(str(prm.get("file", "")))]
+        return [py, "main.py", "index", "--append",
+                _vault_data_path(str(prm.get("file", "")))]
     if kind == "index_rebuild":
         return [py, "main.py", "index"]
     if kind == "rebuild_bm25":
@@ -1936,6 +1960,100 @@ def settings_update(body: SettingsIn) -> dict:
     return {"ok": True, "written": written, "note": note}
 
 
+# ---- provider API keys (.env writer) ----
+
+class ProviderKeyIn(BaseModel):
+    env: str                       # the env-var NAME, e.g. MINIMAX_API_KEY
+    value: str = ""                # "" clears it
+
+
+def _env_file() -> Path:
+    return ROOT / ".env"
+
+
+def _known_key_envs(disk_cfg) -> set[str]:
+    """Env-var names this config actually reads a key from.
+
+    The writer accepts ONLY these. A console endpoint that writes arbitrary
+    NAME=VALUE pairs into .env is a way to set PATH or PYTHONPATH for every
+    job the worker spawns; restricting it to names the provider registry
+    already declares keeps it to what it is for.
+    """
+    names = {"OPENAI_API_KEY", "ANTHROPIC_API_KEY"}   # the reserved lanes
+    for spec in (disk_cfg.get("providers", {}) or {}).values():
+        env = (spec or {}).get("api_key_env")
+        if env:
+            names.add(str(env))
+    for dotted in ("pdf.vlm_ocr.api_key_env",):
+        env = disk_cfg.get(dotted)
+        if env:
+            names.add(str(env))
+    return names
+
+
+def _write_env_var(path: Path, name: str, value: str) -> str:
+    """Set or remove NAME=value in .env, preserving every other line.
+
+    Returns "set" | "cleared". The file is rewritten whole (it is a handful of
+    lines), and an existing assignment is replaced IN PLACE rather than
+    appended, so the file cannot accumulate duplicate names where the last one
+    silently wins.
+    """
+    lines = (path.read_text(encoding="utf-8").split("\n")
+             if path.exists() else [])
+    pattern = re.compile(rf"^\s*(?:export\s+)?{re.escape(name)}\s*=")
+    kept, replaced = [], False
+    for line in lines:
+        if pattern.match(line):
+            if value and not replaced:
+                kept.append(f"{name}={value}")
+                replaced = True
+            continue                      # drop old/duplicate assignments
+        kept.append(line)
+    if value and not replaced:
+        if kept and kept[-1].strip():
+            kept.append("")
+        kept.append(f"{name}={value}")
+        kept.append("")
+    path.write_text("\n".join(kept), encoding="utf-8")
+    return "set" if value else "cleared"
+
+
+@app.post("/api/providers/key")
+def provider_key(body: ProviderKeyIn) -> dict:
+    """Store a provider API key in .env (gitignored) and apply it in-process.
+
+    The value is never read back by any endpoint — /api/settings reports only
+    whether the variable is SET. Jobs inherit os.environ, so setting it here
+    also fixes the currently-running console without a restart; :8051 is a
+    separate process and still needs one.
+    """
+    from src.utils.config_loader import load_config as _load
+    disk_cfg = _load()
+    name = body.env.strip()
+    if name not in _known_key_envs(disk_cfg):
+        return JSONResponse(
+            {"ok": False, "error": f"{name!r} is not an api_key_env named by "
+                                   f"this config's providers"}, status_code=400)
+    value = body.value.strip()
+    if any(c in value for c in "\r\n"):
+        return JSONResponse({"ok": False, "error": "key contains a newline"},
+                            status_code=400)
+    try:
+        action = _write_env_var(_env_file(), name, value)
+    except OSError as e:
+        return JSONResponse({"ok": False, "error": f"cannot write .env: {e}"},
+                            status_code=500)
+    if value:
+        os.environ[name] = value
+    else:
+        os.environ.pop(name, None)
+    log.info("provider key %s %s (value not logged)", name, action)
+    return {"ok": True, "env": name, "action": action,
+            "note": f"{name} {action} in .env. Restart :8051 for the query API "
+                    f"to pick it up (this console already has it)."}
+
+
 # ---- OCR engines (status + warm-up) ----
 
 @app.get("/api/ocr/status")
@@ -2144,7 +2262,11 @@ def browse(path: str = "") -> dict:
 # in-RAG status.
 VAULT_KEYS = ["parser.vault_path", "paths.chunks_file", "paths.chroma_dir",
               "paths.bm25_index", "paths.collection_name", "webui.inbox_dir",
-              "webui.vault_tree_root", "webui.manifest_cache"]
+              "webui.vault_tree_root", "webui.manifest_cache",
+              # The small-to-big parent sidecar is built FROM one corpus's
+              # markdown; pointing vault B at vault A's parents swaps in text
+              # from the wrong vault whenever parent_context is on.
+              "retrieval.parents_file"]
 
 # Registry lives at a vault-INDEPENDENT path (DATA_DIR follows the per-vault
 # chunks_file, so it moves on switch — the registry must not move with it).
@@ -2237,9 +2359,9 @@ def vaults_switch(body: VaultSwitchIn) -> dict:
         # 2. restore (or scaffold) the target's state
         tgt = by_key.get(tgt_key)
         scaffolded = False
+        slug = re.sub(r"[^\w\-]+", "_", target.name).strip("_").lower() or "vault"
+        chroma_root = Path(snap["paths.chroma_dir"]).parent
         if tgt is None or not tgt.get("settings"):
-            slug = re.sub(r"[^\w\-]+", "_", target.name).strip("_").lower() or "vault"
-            chroma_root = Path(snap["paths.chroma_dir"]).parent
             settings = {
                 "parser.vault_path": str(target).replace("\\", "/"),
                 "paths.chunks_file": f"data/vaults/{slug}/chunks.jsonl",
@@ -2254,12 +2376,36 @@ def vaults_switch(body: VaultSwitchIn) -> dict:
                 # folder that exists in one specific vault and nowhere else.
                 "webui.vault_tree_root": "",
                 "webui.manifest_cache": f"data/vaults/{slug}/.manifest_cache.json",
+                "retrieval.parents_file": f"data/vaults/{slug}/parents_md.jsonl",
             }
             scaffolded = True
             if tgt is None:
                 tgt = {"path": str(target), "label": body.label or target.name}
                 vaults.append(tgt)
             tgt["settings"] = settings
+        else:
+            # BACKFILL. A snapshot taken before a key joined VAULT_KEYS does not
+            # contain it, and _persist_section_keys only writes what it is
+            # given — so restoring that vault would silently LEAVE the previous
+            # vault's value in config.yaml. That is how a returning vault ends
+            # up reading another vault's manifest cache or parents sidecar.
+            # Derive from THIS vault's own chunks_file rather than the slug:
+            # both files have always lived beside chunks.jsonl, so a vault
+            # registered before these keys existed gets its real paths back
+            # ("data/chunks.jsonl" -> "data/parents_md.jsonl"), not an empty
+            # new sidecar that would make parent_context silently find nothing.
+            own = Path(tgt["settings"].get("paths.chunks_file")
+                       or f"data/vaults/{slug}/chunks.jsonl").parent.as_posix()
+            defaults = {
+                "webui.vault_tree_root": "",
+                "webui.manifest_cache": f"{own}/.manifest_cache.json",
+                "retrieval.parents_file": f"{own}/parents_md.jsonl",
+            }
+            missing = [k for k in VAULT_KEYS if k not in tgt["settings"]]
+            for key in missing:
+                tgt["settings"][key] = defaults.get(key, snap.get(key, ""))
+            if missing:
+                log.info("vault %s: backfilled %s", tgt.get("label"), missing)
         if body.label:
             tgt["label"] = body.label
         tgt["last_used"] = time.strftime("%Y-%m-%d %H:%M")
