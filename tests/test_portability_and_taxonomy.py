@@ -280,6 +280,64 @@ def test_append_creates_the_collection_when_a_vault_is_brand_new(tmp_path):
     assert (col.metadata or {}).get("hnsw:space") == "cosine"
 
 
+# ------------------------------------------------------- vault-relative ----
+
+@needs_config
+def test_vault_rel_normalises_a_root_that_looks_absolute():
+    """`Path(vault) / "/"` is NOT the vault root.
+
+    A leading separator makes the right-hand side absolute and pathlib throws
+    the base away, so the join yielded the DRIVE root, the containment check
+    rejected it, and the whole Vault tab rendered one red line. This is what
+    "the tree shows nothing" actually was.
+    """
+    assert M._vault_rel("/") == ""
+    assert M._vault_rel("") == ""
+    assert M._vault_rel(None) == ""
+    assert M._vault_rel("/Codes/") == "Codes"
+    assert M._vault_rel("\\Codes\\Sub") == "Codes/Sub"
+    assert M._vault_rel("Codes") == "Codes"
+
+
+@needs_config
+def test_vault_tree_browses_the_root_for_every_empty_ish_value(monkeypatch, tmp_path):
+    vault = tmp_path / "Vault"
+    (vault / "Codes").mkdir(parents=True)
+    (vault / "Codes" / "lab1.ipynb").write_text("{}", encoding="utf-8")
+    (vault / ".obsidian").mkdir()
+    monkeypatch.setattr(M, "CFG", M.Config(
+        {"parser": {"vault_path": str(vault)}, "webui": {}}, M.ROOT))
+    monkeypatch.setattr(M, "build_manifest", lambda force=False: {})
+
+    for root_value in ("", "/", "\\", None):
+        M.CFG._data["webui"]["vault_tree_root"] = root_value
+        out = M.vault_tree("")
+        assert isinstance(out, dict), f"{root_value!r} broke the tree: {out}"
+        assert [d["name"] for d in out["dirs"]] == ["Codes"]
+
+    sub = M.vault_tree("/Codes")            # a leading slash from the client too
+    assert [f["name"] for f in sub["files"]] == ["lab1.ipynb"]
+
+
+@needs_config
+def test_settings_rejects_an_absolute_vault_relative_path():
+    """Caught at save time, so the value that empties the tab never lands."""
+    r = M.settings_update(M.SettingsIn(changes={"webui.vault_tree_root": "/"}))
+    assert r.status_code == 400
+    assert b"relative to the vault root" in r.body
+    r = M.settings_update(M.SettingsIn(changes={"webui.inbox_dir": "../escape"}))
+    assert r.status_code == 400
+
+
+@needs_config
+def test_vault_tree_says_so_when_the_vault_folder_is_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(M, "CFG", M.Config(
+        {"parser": {"vault_path": str(tmp_path / "gone")}, "webui": {}}, M.ROOT))
+    out = M.vault_tree("")
+    assert out.status_code == 404
+    assert b"does not exist" in out.body
+
+
 # ------------------------------------------------------------- taxonomy ----
 
 @pytest.fixture

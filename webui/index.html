@@ -365,20 +365,36 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
 #tab-query .fset input.num{flex:1 1 96px;width:auto;min-width:0}
 #tab-query .fset select{flex:1 1 150px;min-width:0}
 #tab-query .fset .chk{flex:0 0 auto}
-/* Actions get their own full-width bar under the shelf: the primary action of
-   the tab should sit in one predictable place, not float as a fourth grid
-   cell whose position changes with the window width. */
-#tab-query .q-actions{display:flex;align-items:center;gap:10px;margin-top:10px;
-  flex-wrap:wrap}
-#tab-query .q-actions .spacer{flex:1 1 auto}
-#tab-query .q-actions .btn{min-width:120px;justify-content:center}
-#tab-query #q-busy{margin:0}
 /* The query line: preset is a fixed chooser, history takes the slack. */
 #tab-query .q-top{display:flex;gap:10px;align-items:center;flex-wrap:wrap;
   margin-bottom:8px}
 #tab-query .q-top #q-preset{flex:0 0 auto}
 #tab-query .q-top #q-history{flex:1 1 220px;max-width:none;min-width:0}
-#tab-query #q-text{display:block;width:100%;box-sizing:border-box}
+
+/* ---- the composer -------------------------------------------------------
+   Textarea and its actions in ONE bordered box, so Ask/Search sit inside the
+   query bar rather than floating below the knob shelf. The whole box takes
+   the focus ring, which is why the textarea's own border is removed instead
+   of nesting two frames. */
+#tab-query .q-composer{border:1px solid var(--line);border-radius:var(--r);
+  background:var(--panel-2);display:flex;flex-direction:column;
+  transition:border-color .15s}
+#tab-query .q-composer:focus-within{border-color:var(--amber)}
+#tab-query .q-composer #q-text{border:0;background:transparent;outline:none;
+  box-shadow:none;width:100%;box-sizing:border-box;display:block;
+  resize:vertical;min-height:66px;padding:11px 12px 6px}
+#tab-query .q-bar{display:flex;align-items:center;gap:8px;padding:0 8px 8px;
+  flex-wrap:wrap}
+#tab-query .q-bar .spacer{flex:1 1 auto}
+/* Sized to their labels, not stretched: "Ask" is two glyphs and a 120px pill
+   around it read as a banner rather than a button. The primary one is a little
+   wider so the pair still has a clear visual lead. */
+#tab-query .q-bar .btn{padding:7px 14px}
+#tab-query .q-bar .btn.primary{padding:7px 20px}
+#tab-query #q-busy{margin:0;display:flex;align-items:center;gap:7px}
+#tab-query #q-busy .hint{margin:0}
+/* Knob shelf sits under the composer: type first, tune second. */
+#tab-query .fsets{margin-top:10px}
 @media(prefers-reduced-motion:reduce){.infocard{transition:none} .infocard:hover{transform:none}}
 </style>
 </head>
@@ -685,7 +701,15 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
       <select id="q-history" title="Last 20 queries from this browser — picking one restores the question AND its knob settings."><option value="">history…</option></select>
       <button class="btn" id="q-history-clear" title="Forget the saved query history">clear</button>
     </div>
-    <textarea id="q-text" rows="2" style="width:100%" placeholder="What do I know about conjugate priors?"></textarea>
+    <div class="q-composer">
+      <textarea id="q-text" rows="2" placeholder="What do I know about conjugate priors?" title="Ctrl+Enter asks · Ctrl+Shift+Enter searches only"></textarea>
+      <div class="q-bar">
+        <div id="q-busy" style="display:none"><svg class="reel" viewBox="0 0 24 24"><circle class="b" cx="12" cy="12" r="9"/><circle class="a" cx="12" cy="12" r="6"/></svg><span class="hint" id="q-busy-msg">retrieving…</span></div>
+        <span class="spacer"></span>
+        <button class="btn" id="q-search" title="Retrieval only — free, local, no LLM. Tune here first. (Ctrl+Shift+Enter)">Search only</button>
+        <button class="btn primary" id="q-ask" title="Full RAG: retrieval + grounded, cited generation (needs FreeLLMAPI). (Ctrl+Enter)">Ask</button>
+      </div>
+    </div>
     <div class="fsets">
       <div class="fset"><div class="fset-t">Pool sizes</div>
         <div class="row">
@@ -709,12 +733,6 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
           <select id="q-neigh" title="E2 small-to-big: append adjacent-page PDF chunks as marked supplementary sources. default = config/preset (ON in the synthesis preset)."><option value="">neighbors: default</option><option value="on">neighbors: on</option><option value="off">neighbors: off</option></select>
         </div>
       </div>
-    </div>
-    <div class="q-actions">
-      <div id="q-busy" style="display:none"><svg class="reel" viewBox="0 0 24 24"><circle class="b" cx="12" cy="12" r="9"/><circle class="a" cx="12" cy="12" r="6"/></svg><span class="hint" id="q-busy-msg">retrieving…</span></div>
-      <span class="spacer"></span>
-      <button class="btn" id="q-search" title="Retrieval only — free, local, no LLM. Tune here first.">Search only</button>
-      <button class="btn primary" id="q-ask" title="Full RAG: retrieval + grounded, cited generation (needs FreeLLMAPI).">Ask</button>
     </div>
     <div id="q-out" style="margin-top:14px"></div>
   </div>
@@ -2107,6 +2125,13 @@ async function runQuery(retrieveOnly){
 }
 $("#q-ask").onclick=()=>runQuery(false);
 $("#q-search").onclick=()=>runQuery(true);
+/* Submit from the composer. Ctrl/Cmd+Enter is the convention for a multi-line
+   box where plain Enter has to stay a newline; Shift picks the cheap lane. */
+$("#q-text").addEventListener("keydown",e=>{
+  if(e.key!=="Enter"||!(e.ctrlKey||e.metaKey))return;
+  e.preventDefault();
+  runQuery(e.shiftKey);
+});
 
 /* ---------- themes: built-in + named custom presets, dark/light shelves ----------
    Custom presets live in localStorage "ledger-custom-themes" as

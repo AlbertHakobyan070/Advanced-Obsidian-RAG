@@ -1070,7 +1070,7 @@ def jobs_cancel(jid: str) -> dict:
 
 def _inbox() -> Path:
     vault = Path(CFG.get("pdf.vault_path") or CFG.get("parser.vault_path"))
-    inbox = vault / (CFG.get("webui.inbox_dir") or "Inbox")
+    inbox = vault / (_vault_rel(CFG.get("webui.inbox_dir")) or "Inbox")
     inbox.mkdir(parents=True, exist_ok=True)
     return inbox
 
@@ -1547,6 +1547,22 @@ def _vault_root() -> Path:
     return Path(CFG.get("pdf.vault_path") or CFG.get("parser.vault_path"))
 
 
+def _vault_rel(p: str) -> str:
+    """Normalise a vault-RELATIVE path so it can be safely joined to the root.
+
+    `Path(vault) / "/"` does not mean "the vault root" — a leading separator
+    makes the right-hand side ABSOLUTE and pathlib throws the base away
+    entirely, yielding `G:\\`. The containment check then rejects it and the
+    whole Vault tab renders one red line, which is what "the tree shows
+    nothing" turned out to be. Backslashes are folded too: these values are
+    written by hand and by Windows users.
+    """
+    s = str(p or "").replace("\\", "/").strip()
+    while s.startswith("/"):
+        s = s[1:]
+    return s.rstrip("/")
+
+
 def _rag_lookup() -> dict[str, tuple[str, dict]]:
     """manifest keyed by lowercase-posix source_file -> (original_key, doc).
     The original key is what /api/documents/retag and /delete expect."""
@@ -1586,24 +1602,31 @@ def vault_tree(path: str = "") -> dict:
     reachable via /api/vault/search below. Read-only: never writes to the vault.
     """
     vault = _vault_root()
-    root_rel = str(CFG.get("webui.vault_tree_root") or "")
-    base = (vault / (path or root_rel)).resolve()
+    if not vault.is_dir():
+        return JSONResponse(
+            {"error": f"the configured vault folder does not exist: {vault}. "
+                      f"Pick one in Settings -> Vaults."}, status_code=404)
+    root_rel = _vault_rel(CFG.get("webui.vault_tree_root"))
+    here = _vault_rel(path) or root_rel
+    base = (vault / here).resolve() if here else vault.resolve()
     if not str(base).lower().startswith(str(vault.resolve()).lower()):
         return JSONResponse({"error": "path escapes the vault"}, status_code=400)
     if not base.is_dir():
-        return JSONResponse({"error": f"not a folder: {path}"}, status_code=404)
+        return JSONResponse(
+            {"error": f"not a folder in this vault: "
+                      f"{here or '(vault root)'}"}, status_code=404)
 
     rag = _rag_lookup()
     dirs, files = [], []
     for entry in sorted(base.iterdir(), key=lambda p: (p.is_file(), p.name.lower())):
         if entry.name in _TREE_SKIP or entry.name.startswith("."):
             continue
-        rel = entry.relative_to(vault).as_posix()
+        entry_rel = entry.relative_to(vault).as_posix()
         if entry.is_dir():
-            dirs.append({"name": entry.name, "path": rel})
+            dirs.append({"name": entry.name, "path": entry_rel})
         elif entry.suffix.lower() in _TREE_EXTS:
-            files.append(_file_row(entry, rel, rag))
-    return {"root": root_rel, "path": path or root_rel,
+            files.append(_file_row(entry, entry_rel, rag))
+    return {"root": root_rel, "path": here, "vault": str(vault),
             "dirs": dirs, "files": files}
 
 
@@ -1688,9 +1711,12 @@ EDITABLE_SETTINGS: dict[str, dict] = {
                                      "label": "Generation endpoint (legacy providers only)"},
     "generation.model":             {"kind": "str",  "restart": ":8051",
                                      "label": "Generation model id"},
-    "webui.inbox_dir":              {"kind": "str",  "restart": ":8052",
+    # kind "relpath": must stay INSIDE the vault. A leading separator makes the
+    # value absolute, and `Path(vault) / "/x"` discards the vault entirely —
+    # which silently emptied the whole Vault tab.
+    "webui.inbox_dir":              {"kind": "relpath", "restart": ":8052",
                                      "label": "Inbox folder (vault-relative)"},
-    "webui.vault_tree_root":        {"kind": "str",  "restart": ":8052",
+    "webui.vault_tree_root":        {"kind": "relpath", "restart": ":8052",
                                      "allow_empty": True,
                                      "label": "Vault-tab browse root (blank = vault root)"},
     "webui.auto_restart_rag":       {"kind": "enum", "restart": "none (read per job)",
@@ -1919,6 +1945,19 @@ def settings_update(body: SettingsIn) -> dict:
             return JSONResponse(
                 {"ok": False,
                  "error": f"{key} must be one of {spec['values']}"}, status_code=400)
+        if spec["kind"] == "relpath":
+            norm = _vault_rel(sval)
+            if norm != sval.replace("\\", "/").strip():
+                return JSONResponse(
+                    {"ok": False,
+                     "error": f"{key} is relative to the vault root — drop the "
+                              f"leading separator (use {norm!r}, or blank for "
+                              f"the vault root)"}, status_code=400)
+            if ".." in norm.split("/"):
+                return JSONResponse(
+                    {"ok": False, "error": f"{key}: '..' is not allowed"},
+                    status_code=400)
+            sval = norm
         if spec["kind"] == "dir" and not Path(sval).is_dir():
             return JSONResponse(
                 {"ok": False,
