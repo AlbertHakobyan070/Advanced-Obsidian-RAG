@@ -320,6 +320,23 @@ def test_vault_tree_browses_the_root_for_every_empty_ish_value(monkeypatch, tmp_
 
 
 @needs_config
+def test_vault_containment_compares_components_not_string_prefixes(tmp_path):
+    vault = (tmp_path / "Vault").resolve()
+    inside = (vault / "Codes").resolve()
+    sibling_with_same_prefix = (tmp_path / "Vault2").resolve()
+    assert M._vault_contains(vault, vault)
+    assert M._vault_contains(vault, inside)
+    assert not M._vault_contains(vault, sibling_with_same_prefix)
+
+
+@needs_config
+def test_per_vault_chroma_roots_stay_siblings():
+    assert M._shared_chroma_root("<data-dir>/chroma_db") == Path("<data-dir>")
+    assert M._shared_chroma_root(
+        "<data-dir>/vault_animus/chroma_db") == Path("<data-dir>")
+
+
+@needs_config
 def test_settings_rejects_an_absolute_vault_relative_path():
     """Caught at save time, so the value that empties the tab never lands."""
     r = M.settings_update(M.SettingsIn(changes={"webui.vault_tree_root": "/"}))

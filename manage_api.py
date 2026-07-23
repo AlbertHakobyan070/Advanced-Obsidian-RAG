@@ -1563,6 +1563,21 @@ def _vault_rel(p: str) -> str:
     return s.rstrip("/")
 
 
+def _vault_contains(vault: Path, candidate: Path) -> bool:
+    """True only when candidate is the vault itself or a real descendant.
+
+    String-prefix checks are not path containment: ``C:\\Vault2`` starts with
+    ``C:\\Vault`` even though it is a sibling.  ``relative_to`` compares path
+    components and therefore closes that escape without platform-specific
+    separator or case logic here.
+    """
+    try:
+        candidate.relative_to(vault)
+        return True
+    except ValueError:
+        return False
+
+
 def _rag_lookup() -> dict[str, tuple[str, dict]]:
     """manifest keyed by lowercase-posix source_file -> (original_key, doc).
     The original key is what /api/documents/retag and /delete expect."""
@@ -1606,10 +1621,11 @@ def vault_tree(path: str = "") -> dict:
         return JSONResponse(
             {"error": f"the configured vault folder does not exist: {vault}. "
                       f"Pick one in Settings -> Vaults."}, status_code=404)
+    vault_resolved = vault.resolve()
     root_rel = _vault_rel(CFG.get("webui.vault_tree_root"))
     here = _vault_rel(path) or root_rel
-    base = (vault / here).resolve() if here else vault.resolve()
-    if not str(base).lower().startswith(str(vault.resolve()).lower()):
+    base = (vault / here).resolve() if here else vault_resolved
+    if not _vault_contains(vault_resolved, base):
         return JSONResponse({"error": "path escapes the vault"}, status_code=400)
     if not base.is_dir():
         return JSONResponse(
@@ -2336,6 +2352,20 @@ def _norm_vault(p: str) -> str:
     return str(p).replace("\\", "/").rstrip("/").lower()
 
 
+def _shared_chroma_root(chroma_dir: str) -> Path:
+    """Return the install-wide parent used for per-vault index directories.
+
+    When the current vault already uses ``.../vault_animus/chroma_db``, taking
+    one parent would put the next vault at
+    ``.../vault_animus/vault_next/chroma_db``.  Peel an existing ``vault_*``
+    layer so every vault remains a sibling under the shared index root.
+    """
+    root = Path(chroma_dir).parent
+    if root.name.lower().startswith("vault_"):
+        root = root.parent
+    return root
+
+
 class VaultSwitchIn(BaseModel):
     path: str                       # vault root folder (absolute)
     label: Optional[str] = None     # display name; defaults to the folder name
@@ -2399,7 +2429,7 @@ def vaults_switch(body: VaultSwitchIn) -> dict:
         tgt = by_key.get(tgt_key)
         scaffolded = False
         slug = re.sub(r"[^\w\-]+", "_", target.name).strip("_").lower() or "vault"
-        chroma_root = Path(snap["paths.chroma_dir"]).parent
+        chroma_root = _shared_chroma_root(snap["paths.chroma_dir"])
         if tgt is None or not tgt.get("settings"):
             settings = {
                 "parser.vault_path": str(target).replace("\\", "/"),

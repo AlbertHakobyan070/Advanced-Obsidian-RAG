@@ -211,11 +211,27 @@ pre.log{background:var(--log-bg);border:1px solid var(--line);border-radius:var(
 .dgbtn.on{border-color:var(--amber);color:var(--amber)}
 .diagram-cap{color:var(--ink-dim);font-size:12px;margin-top:10px;line-height:1.7}
 .diagram-cap b{color:var(--amber);font-weight:500;font-family:var(--mono);font-size:11px}
-.infocards{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:6px}
-@media(max-width:760px){.infocards{grid-template-columns:1fr}}
-.infocard{background:var(--panel-2);border:1px solid var(--line);border-left:3px solid var(--amber-dim);border-radius:var(--r);padding:12px 14px}
-.infocard h3{margin:0 0 6px;font-size:14.5px}
-.infocard p{margin:0;color:var(--ink-dim);font-size:12.5px;line-height:1.55}
+.infocards{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:12px;margin-top:10px}
+.infocard{grid-column:span 3;min-width:0;background:var(--panel-2);border:1px solid var(--line);
+  border-radius:calc(var(--r) + 2px);padding:14px;display:flex;flex-direction:column;gap:10px;
+  overflow:hidden;position:relative}
+.infocard:nth-child(n+5){grid-column:span 4}
+.infocard:before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--amber-dim)}
+.ic-top{display:flex;align-items:center;justify-content:flex-start;gap:10px}
+.ic-icon{width:34px;height:34px;border:1px solid var(--line);border-radius:10px;background:var(--panel);
+  color:var(--amber);display:grid;place-items:center;flex:0 0 auto}
+.ic-icon svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.ic-type{font:9.5px var(--mono);text-transform:uppercase;letter-spacing:.11em;color:var(--ink-faint);
+  border:1px solid var(--line);border-radius:999px;padding:3px 7px;white-space:nowrap}
+.infocard h3{margin:0;font-size:15px;color:var(--ink);padding:0;border:0}
+.infocard p{margin:0;color:var(--ink-dim);font-size:12.5px;line-height:1.5;min-height:38px}
+.ic-features{display:flex;flex-wrap:wrap;gap:5px;margin-top:auto;padding-top:2px}
+.ic-features span{font:10px var(--mono);color:var(--ink-dim);background:var(--panel);
+  border:1px solid var(--line);border-radius:999px;padding:3px 7px}
+.info-section-head{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;margin-bottom:4px}
+.info-section-head .hint{max-width:690px;margin:0;text-align:right}
+@media(max-width:1120px){.infocard,.infocard:nth-child(n+5){grid-column:span 6}}
+@media(max-width:680px){.infocard,.infocard:nth-child(n+5){grid-column:span 12}.info-section-head{display:block}.info-section-head .hint{text-align:left;margin-top:4px}}
 .infocard code,#tab-info td code{font:11px var(--mono);background:var(--panel);border:1px solid var(--line);border-radius:3px;padding:0 4px;color:var(--ink)}
 #tab-info .formula{text-align:center;margin:16px 0;color:var(--ink)}
 #tab-info .katex{font-size:1.05em}
@@ -340,61 +356,101 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
 #cg-preview{border-left:3px solid var(--amber-dim);background:var(--panel-2);
   border-radius:0 var(--r) var(--r) 0;padding:11px 14px;font-size:13px;color:var(--ink-dim)}
 #cg-preview b{color:var(--ink)}
-/* info-tab cards: header rule + hover lift, still theme-driven */
+/* info-tab cards: hover lift, still theme-driven */
 .infocard{transition:transform .15s ease,border-color .15s ease,box-shadow .18s ease}
-.infocard:hover{transform:translateY(-2px);border-left-color:var(--amber);
+.infocard:hover{transform:translateY(-2px);border-color:var(--amber-dim);
   box-shadow:0 6px 20px rgba(0,0,0,.10)}
-.infocard h3{display:flex;align-items:center;gap:7px;padding-bottom:5px;
-  border-bottom:1px solid var(--line);color:var(--amber)}
-/* ---- query test console: the knob shelf --------------------------------
-   A GRID, not a wrapping flex row. As flex the four groups sized to their
-   contents (494 / 260 / 511 / 132 px), so each one wrapped onto its own line
-   at a different width and the shelf read as a lopsided stack. auto-fit
-   columns give equal widths, aligned tops, and a sane collapse to one column
-   on a narrow window. */
-#tab-query .fsets{background:linear-gradient(180deg,var(--panel-2),transparent);
-  border:1px solid var(--line);border-radius:var(--r);padding:11px;
-  display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));
-  gap:10px;align-items:stretch}
-/* Column layout + margin-top:auto puts every group's CONTROLS on a shared
-   bottom line, however tall its title wraps. */
-#tab-query .fset{display:flex;flex-direction:column}
-#tab-query .fset .row{flex-wrap:wrap;margin-top:auto;row-gap:8px}
-/* Controls share their cell instead of keeping fixed pixel widths, so nothing
-   overflows its group and the columns stay even. */
-#tab-query .fset input.num{flex:1 1 96px;width:auto;min-width:0}
-#tab-query .fset select{flex:1 1 150px;min-width:0}
-#tab-query .fset .chk{flex:0 0 auto}
-/* The query line: preset is a fixed chooser, history takes the slack. */
-#tab-query .q-top{display:flex;gap:10px;align-items:center;flex-wrap:wrap;
-  margin-bottom:8px}
-#tab-query .q-top #q-preset{flex:0 0 auto}
-#tab-query .q-top #q-history{flex:1 1 220px;max-width:none;min-width:0}
+/* ---- Query workspace --------------------------------------------------- */
+#tab-query .query-workspace{padding:0;overflow:hidden}
+#tab-query .qw-head{display:flex;align-items:center;justify-content:space-between;gap:16px;
+  padding:17px 20px 14px;border-bottom:1px solid var(--line)}
+#tab-query .qw-title{display:flex;align-items:center;gap:11px;min-width:0}
+#tab-query .qw-mark{width:38px;height:38px;border-radius:11px;display:grid;place-items:center;
+  color:var(--amber);background:var(--panel-2);border:1px solid var(--line);flex:0 0 auto}
+#tab-query .qw-mark svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+#tab-query .qw-title h2{margin:0;font-size:17px}
+#tab-query .qw-title p{margin:2px 0 0;color:var(--ink-dim);font-size:12px}
+#tab-query .qw-badge{font:10px var(--mono);text-transform:uppercase;letter-spacing:.08em;
+  color:var(--green);border:1px solid var(--line);border-radius:999px;padding:5px 9px;white-space:nowrap}
+#tab-query .qw-badge:before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:currentColor;margin-right:6px}
+#tab-query .desc{margin:12px 20px 0}
+#tab-query .q-top{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;padding:14px 20px 0}
+#tab-query .q-tool{display:flex;flex-direction:column;gap:5px;min-width:0}
+#tab-query .q-tool>span{font:9.5px var(--mono);color:var(--ink-faint);text-transform:uppercase;letter-spacing:.1em}
+#tab-query .q-tool select{width:100%;height:37px}
+#tab-query .q-preset-tool{flex:0 0 210px}
+#tab-query .q-history-tool{flex:1 1 320px}
+#tab-query #q-history-clear{height:37px;display:inline-flex;align-items:center;gap:7px;padding:0 12px}
+#tab-query #q-history-clear svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 
-/* ---- the composer -------------------------------------------------------
-   Textarea and its actions in ONE bordered box, so Ask/Search sit inside the
-   query bar rather than floating below the knob shelf. The whole box takes
-   the focus ring, which is why the textarea's own border is removed instead
-   of nesting two frames. */
-#tab-query .q-composer{border:1px solid var(--line);border-radius:var(--r);
-  background:var(--panel-2);display:flex;flex-direction:column;
-  transition:border-color .15s}
-#tab-query .q-composer:focus-within{border-color:var(--amber)}
-#tab-query .q-composer #q-text{border:0;background:transparent;outline:none;
-  box-shadow:none;width:100%;box-sizing:border-box;display:block;
-  resize:vertical;min-height:66px;padding:11px 12px 6px}
-#tab-query .q-bar{display:flex;align-items:center;gap:8px;padding:0 8px 8px;
-  flex-wrap:wrap}
-#tab-query .q-bar .spacer{flex:1 1 auto}
-/* Sized to their labels, not stretched: "Ask" is two glyphs and a 120px pill
-   around it read as a banner rather than a button. The primary one is a little
-   wider so the pair still has a clear visual lead. */
-#tab-query .q-bar .btn{padding:7px 14px}
-#tab-query .q-bar .btn.primary{padding:7px 20px}
+#tab-query .q-composer{margin:12px 20px 0;border:1px solid var(--line);border-radius:calc(var(--r) + 2px);
+  background:var(--panel-2);display:grid;grid-template-columns:minmax(0,1fr) 255px;overflow:hidden;
+  transition:border-color .15s,box-shadow .15s}
+#tab-query .q-composer:focus-within{border-color:var(--amber-dim);box-shadow:0 0 0 2px color-mix(in srgb,var(--amber) 12%,transparent)}
+#tab-query .q-compose-main{min-width:0;display:flex;flex-direction:column}
+#tab-query .q-composer #q-text{border:0;background:transparent;outline:none;box-shadow:none;
+  width:100%;box-sizing:border-box;display:block;resize:vertical;min-height:112px;
+  padding:15px 16px 10px;font-size:14px;line-height:1.55}
+#tab-query .q-compose-meta{min-height:38px;border-top:1px solid var(--line);display:flex;
+  align-items:center;gap:12px;padding:6px 12px;color:var(--ink-faint);font-size:10.5px}
+#tab-query .q-shortcuts{display:flex;align-items:center;gap:13px;margin-left:auto;white-space:nowrap}
+#tab-query kbd{font:9.5px var(--mono);color:var(--ink-dim);background:var(--panel);border:1px solid var(--line);
+  border-bottom-color:var(--ink-faint);border-radius:4px;padding:2px 5px;margin-right:4px;box-shadow:0 1px 0 var(--line)}
 #tab-query #q-busy{margin:0;display:flex;align-items:center;gap:7px}
 #tab-query #q-busy .hint{margin:0}
-/* Knob shelf sits under the composer: type first, tune second. */
-#tab-query .fsets{margin-top:10px}
+#tab-query .q-actions{border-left:1px solid var(--line);background:linear-gradient(145deg,var(--panel),var(--panel-2));
+  padding:10px;display:grid;grid-template-rows:1fr 1fr;gap:8px}
+#tab-query .q-run{width:100%;min-height:64px;padding:10px 11px;display:grid;grid-template-columns:34px 1fr 16px;
+  align-items:center;gap:9px;text-align:left;border-radius:9px}
+#tab-query .q-run-icon{width:32px;height:32px;border-radius:9px;display:grid;place-items:center;
+  color:var(--amber);background:var(--panel-2);border:1px solid var(--line)}
+#tab-query .q-run.primary .q-run-icon{color:var(--btn-primary-ink);background:rgba(0,0,0,.12);border-color:rgba(0,0,0,.13)}
+#tab-query .q-run-icon svg,#tab-query .q-run-arrow{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+#tab-query .q-run-copy{display:flex;flex-direction:column;gap:2px;min-width:0}
+#tab-query .q-run-copy b{font-size:13px;color:inherit}
+#tab-query .q-run-copy small{font-size:10.5px;color:var(--ink-faint);font-weight:400;white-space:normal}
+#tab-query .q-run.primary .q-run-copy small{color:color-mix(in srgb,var(--btn-primary-ink) 72%,transparent)}
+
+#tab-query .fsets{margin:12px 20px 20px;padding:0;border:0;background:none;display:grid;
+  grid-template-columns:1.08fr .9fr 1.12fr;gap:10px;align-items:stretch}
+#tab-query .fset{border:1px solid var(--line);border-radius:calc(var(--r) + 1px);padding:13px;
+  background:var(--panel-2);display:flex;flex-direction:column;gap:11px}
+#tab-query .fset-head{display:flex;align-items:center;gap:9px}
+#tab-query .fset-icon{width:29px;height:29px;border-radius:8px;display:grid;place-items:center;
+  background:var(--panel);border:1px solid var(--line);color:var(--amber);flex:0 0 auto}
+#tab-query .fset-icon svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+#tab-query .fset-copy{min-width:0}
+#tab-query .fset-t{margin:0;font:10px var(--mono);color:var(--ink);text-transform:uppercase;letter-spacing:.09em}
+#tab-query .fset-copy small{display:block;color:var(--ink-faint);font-size:10.5px;margin-top:2px}
+#tab-query .q-field-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+#tab-query .q-field{display:flex;flex-direction:column;gap:4px;min-width:0}
+#tab-query .q-field>span{font:9.5px var(--mono);color:var(--ink-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#tab-query .q-field input,#tab-query .q-field select{width:100%;min-width:0;box-sizing:border-box;height:34px;padding:6px 8px}
+#tab-query .q-lanes{display:grid;grid-template-columns:1fr;gap:7px}
+#tab-query .q-toggle{display:grid;grid-template-columns:16px 1fr;align-items:center;column-gap:8px;
+  padding:8px 9px;border:1px solid var(--line);border-radius:8px;background:var(--panel);cursor:pointer}
+#tab-query .q-toggle:hover{border-color:var(--amber-dim)}
+#tab-query .q-toggle input{width:14px;height:14px;padding:0;accent-color:var(--amber);grid-row:1/3}
+#tab-query .q-toggle b{font-size:11.5px;font-weight:600;color:var(--ink)}
+#tab-query .q-toggle small{display:block;font-size:9.5px;color:var(--ink-faint);margin-top:1px}
+#tab-query .q-context-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+#tab-query .q-context-grid .q-field:last-child{grid-column:1/-1}
+@media(max-width:1120px){
+  #tab-query .fsets{grid-template-columns:1fr 1fr}
+  #tab-query .fset-context{grid-column:1/-1}
+  #tab-query .q-lanes{grid-template-columns:repeat(3,1fr)}
+}
+@media(max-width:760px){
+  #tab-query .qw-head{align-items:flex-start}.qw-badge{display:none}
+  #tab-query .q-preset-tool{flex:1 1 180px}
+  #tab-query .q-history-tool{flex:1 1 100%}
+  #tab-query .q-composer{grid-template-columns:1fr}
+  #tab-query .q-actions{border-left:0;border-top:1px solid var(--line);grid-template-columns:1fr 1fr;grid-template-rows:auto}
+  #tab-query .q-shortcuts{display:none}
+  #tab-query .fsets{grid-template-columns:1fr}
+  #tab-query .fset-context{grid-column:auto}
+  #tab-query .q-lanes{grid-template-columns:1fr}
+}
 @media(prefers-reduced-motion:reduce){.infocard{transition:none} .infocard:hover{transform:none}}
 </style>
 </head>
@@ -692,45 +748,63 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
 
 <!-- ============================= QUERY ============================= -->
 <section id="tab-query">
-  <div class="panel">
-    <h2>Test console</h2>
-    <p class="hint">Talks straight to the warm query endpoint (:8051). <b>Ask</b> = full RAG answer (needs FreeLLMAPI). <b>Search only</b> = retrieval, no LLM.</p>
-    <div class="desc"><b>Search only</b> runs retrieval end-to-end (hybrid dense+BM25 fusion → rerank → E2 expansion) and shows the ranked chunks — free, local, no LLM. <b>Ask</b> adds grounded, cited generation on top. The knob groups: <b>preset</b> bundles everything (code / concept / synthesis); <b>rerank_k / dense_k / sparse_k</b> size the pools; <b>HyDE / HyPE / Omnisearch</b> are extra retrieval lanes; <b>rerank</b> picks the reranking method (cross-encoder = semantic scoring, lexical = model-free term coverage, none = fused order); <b>parents / neighbors</b> are the E2 small-to-big expansions (swap note chunks for full sections · append adjacent PDF pages). "default" on any select = whatever the preset/config says. The retrieval echo under each answer shows what actually ran — full knob documentation lives on the Info tab.</div>
+  <div class="panel query-workspace">
+    <div class="qw-head">
+      <div class="qw-title">
+        <span class="qw-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 12h4l2.2-6 3.6 12L16 12h4"/></svg></span>
+        <div><h2>Query workspace</h2><p class="hint">Shape retrieval, inspect evidence, then generate a grounded answer.</p></div>
+      </div>
+      <span class="qw-badge">warm API · :8051</span>
+    </div>
+
     <div class="q-top">
-      <select id="q-preset" title="A named bundle of every knob below. Blank = auto (code-intent queries self-apply the code preset)."><option value="">preset: none</option><option>code</option><option>concept</option><option>synthesis</option></select>
-      <select id="q-history" title="Last 20 queries from this browser — picking one restores the question AND its knob settings."><option value="">history…</option></select>
-      <button class="btn" id="q-history-clear" title="Forget the saved query history">clear</button>
+      <label class="q-tool q-preset-tool"><span>Query preset</span>
+        <select id="q-preset" title="A named bundle of every knob below. Blank = auto (code-intent queries self-apply the code preset)."><option value="">Automatic</option><option>code</option><option>concept</option><option>synthesis</option></select>
+      </label>
+      <label class="q-tool q-history-tool"><span>Recent queries</span>
+        <select id="q-history" title="Last 20 queries from this browser — picking one restores the question and its settings."><option value="">Choose from history…</option></select>
+      </label>
+      <button class="btn q-clear" id="q-history-clear" title="Forget the saved query history"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m-8 0 1 13h8l1-13M10 11v5m4-5v5"/></svg><span>Clear</span></button>
     </div>
+
     <div class="q-composer">
-      <textarea id="q-text" rows="2" placeholder="What do I know about conjugate priors?" title="Ctrl+Enter asks · Ctrl+Shift+Enter searches only"></textarea>
-      <div class="q-bar">
-        <div id="q-busy" style="display:none"><svg class="reel" viewBox="0 0 24 24"><circle class="b" cx="12" cy="12" r="9"/><circle class="a" cx="12" cy="12" r="6"/></svg><span class="hint" id="q-busy-msg">retrieving…</span></div>
-        <span class="spacer"></span>
-        <button class="btn" id="q-search" title="Retrieval only — free, local, no LLM. Tune here first. (Ctrl+Shift+Enter)">Search only</button>
-        <button class="btn primary" id="q-ask" title="Full RAG: retrieval + grounded, cited generation (needs FreeLLMAPI). (Ctrl+Enter)">Ask</button>
+      <div class="q-compose-main">
+        <textarea id="q-text" rows="3" placeholder="Ask a question about the active vault…" title="Ctrl+Enter asks · Ctrl+Shift+Enter searches only"></textarea>
+        <div class="q-compose-meta">
+          <div id="q-busy" style="display:none"><svg class="reel" viewBox="0 0 24 24"><circle class="b" cx="12" cy="12" r="9"/><circle class="a" cx="12" cy="12" r="6"/></svg><span class="hint" id="q-busy-msg">retrieving…</span></div>
+          <div class="q-shortcuts" aria-label="Keyboard shortcuts"><span><kbd>Ctrl ↵</kbd> Ask</span><span><kbd>Ctrl ⇧ ↵</kbd> Search</span></div>
+        </div>
+      </div>
+      <div class="q-actions">
+        <button class="btn primary q-run" id="q-ask" title="Full RAG: retrieval plus grounded, cited generation. (Ctrl+Enter)"><span class="q-run-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg></span><span class="q-run-copy"><b>Ask</b><small>Grounded answer</small></span><svg class="q-run-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></button>
+        <button class="btn q-run" id="q-search" title="Retrieval only — free, local, no LLM. (Ctrl+Shift+Enter)"><span class="q-run-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg></span><span class="q-run-copy"><b>Search only</b><small>Inspect evidence</small></span><svg class="q-run-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></button>
       </div>
     </div>
+
     <div class="fsets">
-      <div class="fset"><div class="fset-t">Pool sizes</div>
-        <div class="row">
-          <input id="q-topk" class="num" type="number" min="1" max="50" placeholder="rerank_k" title="rerank_top_k — how many reranked chunks reach the LLM (blank = config default, 7)">
-          <input id="q-densek" class="num" type="number" min="1" max="200" placeholder="dense_k" title="dense_top_k — vector/semantic lane pool size fed INTO RRF fusion (blank = 20). Bigger = wider semantic net.">
-          <input id="q-sparsek" class="num" type="number" min="1" max="200" placeholder="sparse_k" title="sparse_top_k — BM25 keyword lane pool size fed INTO RRF fusion (blank = 20). Bigger = wider keyword net.">
-          <input id="q-maxtok" class="num" type="number" min="64" max="8192" step="64" placeholder="max tokens" title="Cap the answer's output tokens — Ask only (blank = config default, 2500)">
+      <div class="fset">
+        <div class="fset-head"><span class="fset-icon"><svg viewBox="0 0 24 24"><path d="M5 19V9m7 10V5m7 14v-7"/></svg></span><div class="fset-copy"><div class="fset-t">Candidate pools</div><small>Control breadth and output size</small></div></div>
+        <div class="q-field-grid">
+          <label class="q-field"><span>Rerank top</span><input id="q-topk" class="num" type="number" min="1" max="50" placeholder="default" title="How many reranked chunks reach the LLM"></label>
+          <label class="q-field"><span>Dense top</span><input id="q-densek" class="num" type="number" min="1" max="200" placeholder="default" title="Semantic lane pool size fed into RRF fusion"></label>
+          <label class="q-field"><span>Sparse top</span><input id="q-sparsek" class="num" type="number" min="1" max="200" placeholder="default" title="BM25 keyword lane pool size fed into RRF fusion"></label>
+          <label class="q-field"><span>Answer tokens</span><input id="q-maxtok" class="num" type="number" min="64" max="8192" step="64" placeholder="default" title="Cap answer output tokens (Ask only)"></label>
         </div>
       </div>
-      <div class="fset"><div class="fset-t">Extra lanes</div>
-        <div class="row" style="min-height:34px">
-          <label class="chk" title="Query expansion: search with a hypothetical ANSWER instead of the raw question"><input type="checkbox" id="q-hyde" checked>HyDE</label>
-          <label class="chk" title="Question-matching lane: match the query against pre-generated hypothetical questions (only chunks covered by a build_hype.py run participate; fails soft otherwise)"><input type="checkbox" id="q-hype">HyPE</label>
-          <label class="chk" title="Fuse LIVE-vault hits (needs Obsidian open with the Omnisearch HTTP server)"><input type="checkbox" id="q-omni">Omnisearch</label>
+      <div class="fset">
+        <div class="fset-head"><span class="fset-icon"><svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6 5.6 18.4"/></svg></span><div class="fset-copy"><div class="fset-t">Retrieval lanes</div><small>Widen or reshape the search</small></div></div>
+        <div class="q-lanes">
+          <label class="q-toggle" title="Search with a hypothetical answer instead of the raw question"><input type="checkbox" id="q-hyde" checked><div><b>HyDE</b><small>Concept expansion</small></div></label>
+          <label class="q-toggle" title="Match against pre-generated hypothetical questions"><input type="checkbox" id="q-hype"><div><b>HyPE</b><small>Question matching</small></div></label>
+          <label class="q-toggle" title="Fuse live-vault hits from Obsidian Omnisearch"><input type="checkbox" id="q-omni"><div><b>Omnisearch</b><small>Live vault lane</small></div></label>
         </div>
       </div>
-      <div class="fset"><div class="fset-t">Rerank &amp; context</div>
-        <div class="row">
-          <select id="q-rerank" title="Rerank method for this call. cross-encoder = semantic (query,chunk) scoring (the default). lexical = model-free query-term coverage — for exact-keyword hunts. none = keep the fused RRF order as-is."><option value="">rerank: default</option><option value="cross_encoder">rerank: cross-encoder</option><option value="lexical">rerank: lexical</option><option value="none">rerank: none</option></select>
-          <select id="q-parent" title="E2 small-to-big: swap matched note chunks for their FULL enclosing section (parents sidecar). default = config/preset (ON in the synthesis preset)."><option value="">parents: default</option><option value="on">parents: on</option><option value="off">parents: off</option></select>
-          <select id="q-neigh" title="E2 small-to-big: append adjacent-page PDF chunks as marked supplementary sources. default = config/preset (ON in the synthesis preset)."><option value="">neighbors: default</option><option value="on">neighbors: on</option><option value="off">neighbors: off</option></select>
+      <div class="fset fset-context">
+        <div class="fset-head"><span class="fset-icon"><svg viewBox="0 0 24 24"><path d="M4 7h10m4 0h2M4 17h2m4 0h10M14 4v6M6 14v6"/></svg></span><div class="fset-copy"><div class="fset-t">Ranking &amp; context</div><small>Order results and expand evidence</small></div></div>
+        <div class="q-context-grid">
+          <label class="q-field"><span>Reranker</span><select id="q-rerank" title="Choose semantic, lexical, or fused ordering"><option value="">Config default</option><option value="cross_encoder">Cross-encoder</option><option value="lexical">Lexical</option><option value="none">None · fused order</option></select></label>
+          <label class="q-field"><span>Parent sections</span><select id="q-parent" title="Swap matched note chunks for their full enclosing section"><option value="">Preset default</option><option value="on">Enabled</option><option value="off">Disabled</option></select></label>
+          <label class="q-field"><span>Page neighbors</span><select id="q-neigh" title="Append adjacent PDF pages as supplementary sources"><option value="">Preset default</option><option value="on">Enabled</option><option value="off">Disabled</option></select></label>
         </div>
       </div>
     </div>
@@ -1156,15 +1230,18 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
   </div>
 
   <div class="panel">
-    <h2>What each tab does</h2>
+    <div class="info-section-head">
+      <div><span class="ic-type">Console guide</span><h2>Workspace map</h2></div>
+      <p class="hint">Seven focused surfaces, each with one clear job.</p>
+    </div>
     <div class="infocards">
-      <div class="infocard"><h3>Ledger</h3><p>The at-a-glance dashboard: total chunks &amp; documents, ChromaDB vector count, disk usage, the per-domain chunk share (the “shelf”), which JSONL files hold what, and the most recent jobs. Read-only.</p></div>
-      <div class="infocard"><h3>Ingest</h3><p>Add material in three steps: <b>1</b> drop files into the inbox — every file can carry its <b>own ⚙ settings</b> (domain / tags / chunking / OCR / pages) or inherit the batch defaults; 👁 previews md/PDFs (page numbers for OCR picking); <b>2</b> optionally fetch web links as <code>.md</code> <i>or</i> as a <b>printed .pdf</b> (Chromium — LaTeX/tables/code intact), convert any file via markitdown (+ OCR pages), preview, then promote from <code>_converted</code>; <b>3</b> the jobs designer routes each file <b>default | custom</b>, batches files with identical settings into shared jobs, splits differing ones automatically, and shows the full plan before <b>Ingest custom / all / inbox only</b>. Vault-wide passes live under <b>Advanced</b> in the same panel. One serial worker; watch it on Jobs.</p></div>
-      <div class="infocard"><h3>Documents</h3><p>Everything the index knows, aggregated per source file. Filter by name, domain, <b>#tag</b>, or chunk file; preview the first chunks; <b>retag</b> (metadata-only, no re-embed) or <b>delete</b> from the index (vault files untouched).</p></div>
-      <div class="infocard"><h3>Vault</h3><p>Browse the real vault tree with ✓ in-RAG badges + chunk counts, stage domain/tag edits on indexed files and Apply as one batch, and search filenames across the whole vault (including books outside the browse root). Never writes to your vault.</p></div>
-      <div class="infocard"><h3>Jobs</h3><p>The serial job queue and live logs. Tail any job’s output, cancel a running one, and <b>retry</b> a failed one — every job is idempotent, so a retry never duplicates committed work. A zero-result ingest fails (not a silent “done”).</p></div>
-      <div class="infocard"><h3>Query</h3><p>Talk straight to the warm query API (:8051). <b>Search only</b> = retrieval (no LLM, works offline of the generator); <b>Ask</b> = full grounded answer. Per-call knobs sit in labeled groups — pool sizes, extra lanes (HyDE/HyPE/Omnisearch), rerank method and the E2 <b>parents / neighbors</b> expansions — plus copy / <code>.md</code> export. The <b>Preview</b> toggle renders the answer <i>and every source chunk</i> as markdown + LaTeX + code.</p></div>
-      <div class="infocard"><h3>Settings</h3><p>Appearance (dark/light preset shelves, saveable + renameable custom themes, description mode), the Obsidian-style <b>vault switcher</b> (each vault remembers its own path/index settings), and the editable config surface with 📁 folder pickers: vault root, Chroma / BM25 / chunks paths, embedding + cross-encoder models, default rerank &amp; chunking, generation endpoint. Saves rewrite <code>config.yaml</code> in place (comments kept); nothing hot-applies — the save response says what to restart.</p></div>
+      <div class="infocard"><div class="ic-top"><span class="ic-icon"><svg viewBox="0 0 24 24"><path d="M4 19V9m5 10V5m5 14v-7m5 7V3"/></svg></span><div><span class="ic-type">Observe</span><h3>Ledger</h3></div></div><p>See corpus and index health without changing anything.</p><div class="ic-features"><span>Index health</span><span>Domain mix</span><span>Recent jobs</span></div></div>
+      <div class="infocard"><div class="ic-top"><span class="ic-icon"><svg viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 19h16"/></svg></span><div><span class="ic-type">Add</span><h3>Ingest</h3></div></div><p>Bring files and web material through one staged, inspectable workflow.</p><div class="ic-features"><span>Per-file settings</span><span>OCR</span><span>Queued jobs</span></div></div>
+      <div class="infocard"><div class="ic-top"><span class="ic-icon"><svg viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8m-8 4h8m-8 4h5"/></svg></span><div><span class="ic-type">Curate</span><h3>Documents</h3></div></div><p>Inspect what the index knows, then retag or remove sources.</p><div class="ic-features"><span>Filter</span><span>Preview</span><span>Retag</span></div></div>
+      <div class="infocard"><div class="ic-top"><span class="ic-icon"><svg viewBox="0 0 24 24"><path d="M4 6h6l2 2h8v11H4z"/></svg></span><div><span class="ic-type">Browse</span><h3>Vault</h3></div></div><p>Browse the real vault with indexed-state badges and staged metadata edits.</p><div class="ic-features"><span>Tree</span><span>RAG badges</span><span>Search</span></div></div>
+      <div class="infocard"><div class="ic-top"><span class="ic-icon"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10"/><circle cx="18" cy="17" r="2"/></svg></span><div><span class="ic-type">Operate</span><h3>Jobs</h3></div></div><p>Follow the serial worker from queue to live log, cancel, or retry safely.</p><div class="ic-features"><span>Live logs</span><span>Cancel</span><span>Retry</span></div></div>
+      <div class="infocard"><div class="ic-top"><span class="ic-icon"><svg viewBox="0 0 24 24"><circle cx="10" cy="10" r="6"/><path d="m15 15 5 5M8 10h4m-2-2v4"/></svg></span><div><span class="ic-type">Explore</span><h3>Query</h3></div></div><p>Tune retrieval, inspect sources, then ask for a grounded answer.</p><div class="ic-features"><span>Search only</span><span>Ask</span><span>Export</span></div></div>
+      <div class="infocard"><div class="ic-top"><span class="ic-icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v3m0 12v3M3 12h3m12 0h3M5.6 5.6l2.1 2.1m8.6 8.6 2.1 2.1m0-12.8-2.1 2.1m-8.6 8.6-2.1 2.1"/></svg></span><div><span class="ic-type">Configure</span><h3>Settings</h3></div></div><p>Switch vaults and configure models, providers, paths, OCR, and appearance.</p><div class="ic-features"><span>Vaults</span><span>Models</span><span>Themes</span></div></div>
     </div>
   </div>
 
