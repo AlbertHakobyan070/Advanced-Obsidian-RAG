@@ -1,4 +1,4 @@
-﻿# ============================================================
+# ============================================================
 #  Personal RAG — central configuration
 #  Copy this file to config.yaml and adapt the paths to your machine.
 #  config.yaml is gitignored, so pulls never overwrite your settings.
@@ -84,6 +84,17 @@ providers:
     model: "auto"
     api_key_env: FREELLMAPI_API_KEY
     api_key_optional: true
+  # MiniMax Token Plan is an API subscription: paste its sk-cp- Subscription
+  # Key into MINIMAX_API_KEY. A pay-as-you-go sk-api key is a different
+  # credential and will not consume the plan's quota.
+  minimax:
+    label: "MiniMax M3 · Token Plan"
+    description: "Subscription/Credits key from Billing > Token Plan"
+    kind: anthropic
+    base_url: "https://api.minimax.io/anthropic"
+    model: "MiniMax-M3"
+    api_key_env: MINIMAX_API_KEY
+    api_key_prefix: "sk-cp-"
   kobold:
     kind: openai
     base_url: "http://localhost:5001/v1"
@@ -93,19 +104,26 @@ providers:
 generation:
   # A `providers:` name or a reserved legacy name (openai | anthropic | local).
   # Change `model` whenever you change this.
-  provider: openai
+  provider: freellmapi
   base_url: "http://localhost:3001/v1"   # legacy providers only
   model: "auto"
   temperature: 0.1
   max_tokens: 2500
   verify_citations: false                          # text-embedding-3-small native dim
+  # Reserved legacy `local` provider (KoboldCPP/OpenAI-compatible). Prefer a
+  # named registry entry for new setups; this block preserves older configs.
+  local:
+    base_url: "http://localhost:5001/v1"
+    api_key: "koboldcpp"                    # dummy; KoboldCPP ignores it
+    model: "gemma-4-E4B-it-Q8_k"            # whatever /v1/models reports
+    # Context length is set when KoboldCPP launches, not per request.
 
 retrieval:
   dense_top_k: 20
   sparse_top_k: 20
   rrf_k: 60
   rerank_top_k: 7
-  rerank_mode: cross_encoder                # cross_encoder | lexical | none
+  rerank_mode: cross_encoder                # cross_encoder | http | lexical | none
   # Any HF cross-encoder id. Bigger rerankers score better on public benchmarks
   # but cost far more per query — measure before switching:
   #   cross-encoder/ms-marco-MiniLM-L-6-v2   22M params   fast   (default)
@@ -114,8 +132,14 @@ retrieval:
   #                                          multilingual, 8k context, GPU
   #                                          strongly recommended
   cross_encoder_model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
-  cross_encoder_max_length: 512     # bge-* accept up to 8192; longer = slower
+  cross_encoder_max_length: 512     # bge-base hard limit; v2-m3 supports 8192
   cross_encoder_device: auto        # auto | cpu | cuda | cuda:0 | cuda:1
+  # Used only when rerank_mode: http. Point at any OpenAI-style /v1/rerank
+  # service (llama.cpp --reranking, TEI, Infinity, etc.).
+  rerank_http:
+    base_url: "http://127.0.0.1:8101/v1"
+    model: "bge-reranker-v2-m3"
+    timeout: 120
   use_hyde: true
   # If a query mentions a course/domain, bias retrieval toward it
   metadata_boost: true
@@ -263,14 +287,6 @@ retrieval:
     synthesis: {rerank_top_k: 10, use_hyde: true, dense_top_k: 30, sparse_top_k: 30}
     fresh:     {rerank_top_k: 8,  omnisearch: true}
 
-
-  # --- local provider block (KoboldCPP serving Gemma-4-E4B-it-Q8) ---
-  local:
-    base_url: "http://localhost:5001/v1"
-    api_key: "koboldcpp"                    # dummy; KoboldCPP ignores it
-    model: "gemma-4-E4B-it-Q8_k"            # whatever /v1/models reports
-    # NOTE: KoboldCPP context length is set at LAUNCH (--contextsize),
-    #       NOT per request. Launch with --contextsize 8192 or higher.
 
 # Golden-query eval suite (eval/eval_runner.py — `python main.py eval`).
 # Tier 1 (retrieval) and the groundedness floor need nothing but the index;

@@ -8,6 +8,8 @@ machine paths), and the shipped config is `config.example.yaml`. Asking for
 which reads as "the project is broken" rather than "you haven't made your
 config yet".
 """
+import importlib
+import shutil
 import sys
 from pathlib import Path
 
@@ -31,3 +33,17 @@ def shipped_config():
 @pytest.fixture
 def shipped_cfg():
     return shipped_config()
+
+
+@pytest.fixture
+def management_module(tmp_path, monkeypatch):
+    """Import the console against the config a fresh clone actually ships.
+
+    ``manage_api`` intentionally requires ``config.yaml`` at import time, while
+    the repository ships only ``config.example.yaml``. A temporary working
+    directory keeps that runtime contract intact without writing a machine
+    config into the checkout.
+    """
+    shutil.copyfile(ROOT / "config.example.yaml", tmp_path / "config.yaml")
+    monkeypatch.chdir(tmp_path)
+    return importlib.import_module("manage_api")

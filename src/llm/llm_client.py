@@ -15,10 +15,11 @@ Two ways to name a backend, and they coexist:
 
        providers:
          minimax:
-           kind: openai                       # wire protocol, not vendor
-           base_url: "https://api.minimax.io/v1"
-           model: "MiniMax-M2"
+           kind: anthropic                    # wire protocol, not vendor
+           base_url: "https://api.minimax.io/anthropic"
+           model: "MiniMax-M3"
            api_key_env: MINIMAX_API_KEY       # the NAME of an env var
+           api_key_prefix: "sk-cp-"           # Token Plan key type
        generation:
          provider: minimax
 
@@ -73,13 +74,22 @@ class LLMClient:
         base_url: str | None = None,
         default_temperature: float = 0.1,
         default_max_tokens: int = 1500,
+        backend: str | None = None,
     ):
+        # `provider` is the wire protocol used by complete(); `backend` is the
+        # configured registry alias (minimax, freellmapi, ...).  Keeping both
+        # prevents per-request backend comparisons from collapsing every
+        # OpenAI-compatible service into the label "openai".
         self.provider = provider
+        self.backend = backend or provider
         self.model = model
         self.default_temperature = default_temperature
         self.default_max_tokens = default_max_tokens
         self._client = self._build_client(provider, api_key, base_url)
-        log.info("LLMClient ready: provider=%s model=%s", provider, model)
+        log.info(
+            "LLMClient ready: backend=%s provider=%s model=%s",
+            self.backend, provider, model,
+        )
 
     # ---- construction -------------------------------------------------
 
@@ -140,8 +150,94 @@ class LLMClient:
         raise ValueError(f"Unknown LLM provider: {provider!r}")
 
     @classmethod
-    def _from_registry(cls, cfg: Config, role: str, name: str, spec: dict,
-                       temperature: float, max_tokens: int) -> "LLMClient":
+    def from_provider_override(
+        cls,
+        cfg: Config,
+        provider: str,
+        model: str | None = None,
+        role: str = "generation",
+    ) -> "LLMClient":
+        """Build a request-local client for a configured backend.
+
+        Registry backends use their own default model, not ``<role>.model``:
+        that role value belongs to the process-wide default backend and may be
+        invalid for the requested one.  ``model`` is the only per-request model
+        override.  The supplied ``Config`` is read only and is never copied or
+        mutated.
+
+        Reserved legacy providers remain available and retain their established
+        construction rules.  For them, ``model`` overrides the configured role
+        model when supplied.
+        """
+        temperature = cfg.get(f"{role}.temperature", 0.1)
+        max_tokens = cfg.get(f"{role}.max_tokens", 1500)
+        registry = cfg.get("providers", {}) or {}
+
+        if provider in registry and provider not in cls.RESERVED_PROVIDERS:
+            return cls._from_registry(
+                cfg,
+                role,
+                provider,
+                registry[provider],
+                temperature,
+                max_tokens,
+                model_override=model,
+                inherit_role_model=False,
+            )
+        if provider not in cls.RESERVED_PROVIDERS and registry:
+            raise ValueError(
+                f"{role}.provider = {provider!r} is not in the `providers:` "
+                f"registry and is not one of {cls.RESERVED_PROVIDERS}. "
+                f"Known providers: {sorted(registry)}"
+            )
+
+        if provider == "anthropic":
+            return cls(
+                provider="anthropic",
+                model=model or cfg.get(
+                    f"{role}.model", "claude-sonnet-4-20250514"
+                ),
+                api_key=cfg.require_secret("ANTHROPIC_API_KEY"),
+                default_temperature=temperature,
+                default_max_tokens=max_tokens,
+                backend=provider,
+            )
+        if provider == "openai":
+            return cls(
+                provider="openai",
+                model=model or cfg.get(f"{role}.model", "gpt-4o-mini"),
+                api_key=cfg.require_secret("OPENAI_API_KEY"),
+                base_url=cfg.get(f"{role}.base_url"),
+                default_temperature=temperature,
+                default_max_tokens=max_tokens,
+                backend=provider,
+            )
+        if provider == "local":
+            return cls(
+                provider="local",
+                model=model or cfg.get(f"{role}.local.model", "local-model"),
+                api_key=cfg.get(f"{role}.local.api_key", "local"),
+                base_url=cfg.get(
+                    f"{role}.local.base_url", "http://localhost:5001/v1"
+                ),
+                default_temperature=temperature,
+                default_max_tokens=max_tokens,
+                backend=provider,
+            )
+        raise ValueError(f"Unknown LLM provider: {provider!r}")
+
+    @classmethod
+    def _from_registry(
+        cls,
+        cfg: Config,
+        role: str,
+        name: str,
+        spec: dict,
+        temperature: float,
+        max_tokens: int,
+        model_override: str | None = None,
+        inherit_role_model: bool = True,
+    ) -> "LLMClient":
         """Build a client from a `providers:` entry.
 
         The provider owns the backend facts (endpoint, model, which env var
@@ -160,7 +256,9 @@ class LLMClient:
             )
 
         spec_model = spec.get("model")
-        role_model = cfg.get(f"{role}.model")
+        role_model = (
+            cfg.get(f"{role}.model") if inherit_role_model else model_override
+        )
         model = role_model or spec_model
         if not model:
             raise ValueError(
@@ -173,9 +271,17 @@ class LLMClient:
         # a localhost proxy) — the OpenAI SDK still wants a non-empty string.
         key_env = spec.get("api_key_env")
         if key_env:
-            api_key = (cfg.secret(key_env) if spec.get("api_key_optional")
+            raw_key = (cfg.secret(key_env) if spec.get("api_key_optional")
                        else cfg.require_secret(key_env))
-            api_key = api_key or "not-needed"
+            expected_prefix = str(spec.get("api_key_prefix") or "")
+            if (raw_key and expected_prefix
+                    and not raw_key.startswith(expected_prefix)):
+                raise RuntimeError(
+                    f"{key_env} has the wrong credential type for "
+                    f"providers.{name}; expected a key beginning with "
+                    f"{expected_prefix!r}"
+                )
+            api_key = raw_key or "not-needed"
         else:
             api_key = "not-needed"
 
@@ -194,6 +300,7 @@ class LLMClient:
             base_url=spec.get("base_url"),
             default_temperature=temperature,
             default_max_tokens=max_tokens,
+            backend=name,
         )
 
     def _build_client(self, provider: str, api_key, base_url):

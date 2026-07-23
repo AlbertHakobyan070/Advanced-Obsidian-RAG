@@ -15,14 +15,14 @@ per-answer confidence line.
 <img alt="Local first" src="https://img.shields.io/badge/Runs-Free%20%2F%20Local-2ea44f">
 </p>
 
-> **Scale:** ~170,000 retrieval chunks across **4,400+ documents** — markdown lecture
-> notes, 280+ textbooks, lecture PDFs, passed homework, Jupyter/R notebooks and
-> scripts, and OCR'd scanned books — spanning **24+ courses** and **9 knowledge
-> domains**, all served from **~4 GB** of prebuilt indexes on a laptop.
+> **Scale:** a mixed corpus of markdown lecture notes, textbooks, lecture PDFs,
+> passed homework, Jupyter/R notebooks and scripts, and OCR'd scanned books, all
+> served from prebuilt local indexes on a laptop. `GET /stats` reports the live
+> corpus shape instead of relying on a copied snapshot that goes stale.
 >
 > **Runs entirely on free / local infrastructure:** CPU embeddings, on-disk vector +
-> sparse indexes, and *any* OpenAI-compatible endpoint for generation (a local model
-> server, a free-tier proxy, or a cloud API — one config line).
+> sparse indexes, and *any* OpenAI- or Anthropic-compatible endpoint for generation
+> (a local model server, a free-tier proxy, or a cloud API — one config line).
 
 ---
 
@@ -122,11 +122,18 @@ curl -s -X POST http://127.0.0.1:8051/query \
 Every response echoes exactly what ran (`retrieval: {preset, rerank_top_k, hyde_used, …}`),
 so results are always explainable.
 
+For one-question experiments, `POST /compare` runs a bounded tree of preset,
+reranker, or provider branches. Retrieval comparisons report common and unique
+stable evidence ids, rank shifts, and pairwise overlap rather than comparing
+incompatible raw score scales. Provider-only branches reuse the exact same
+evidence, so answer differences come from generation rather than retrieval
+noise. `GET /schema` publishes the live branch limits and choices.
+
 ## Two services + a console
 
 | Surface | Port | What it's for |
 |---|---|---|
-| **Query API** (`serve_api`) | `:8051` | Warm FastAPI endpoint — `/query`, `/search`, `/config`, `/history` (recent calls with their knobs + retrieval echo, for agents iterating on hyperparameters). |
+| **Query API** (`serve_api`) | `:8051` | Warm FastAPI endpoint — `/query`, `/search`, `/compare`, `/providers`, `/chunks/{id}`, `/config`, and `/history`. `GET /schema` is the live agent contract. |
 | **Corpus Ledger console** (`manage_api`) | `:8052` | Visual management: Query (rendered md + LaTeX answers *and* sources), Documents (search / filter / retag / delete), Vault browser, Ingest (per-file settings with **destination folders** — files move to their vault home before parsing, so indexed paths stay stable; web import as `.md` or printed `.pdf`; previews), Jobs, Settings (theme presets + font pickers, Obsidian-style vault switcher, config surface with folder pickers), and an **Info** tab that diagrams the whole pipeline in-app. |
 
 The console's import lane pulls online sources straight into the corpus pipeline:
@@ -137,7 +144,7 @@ numbers guide OCR-range picking), then promote it into the normal ingest flow.
 
 ## Evaluation — honest by design
 
-A 94-question, exam-grounded suite (`eval/golden_queries.yaml`) scored automatically in
+A labelled, exam-grounded suite (`eval/golden_queries.yaml`) scored automatically in
 three tiers, each one clear about what it can and cannot prove. Every run writes a JSON
 result and a markdown scorecard side by side under `eval/`, and **every metric reports
 the number of questions it was actually scored over** — a metric with no ground truth in
@@ -191,10 +198,11 @@ run on different providers (generate locally, judge with something stronger):
 ```yaml
 providers:
   minimax:
-    kind: openai                       # the wire protocol, not the vendor
-    base_url: "https://api.minimax.io/v1"
-    model: "MiniMax-M2"
-    api_key_env: MINIMAX_API_KEY       # the NAME of an env var
+    kind: anthropic                    # the wire protocol, not the vendor
+    base_url: "https://api.minimax.io/anthropic"
+    model: "MiniMax-M3"
+    api_key_env: MINIMAX_API_KEY       # Token Plan sk-cp- Subscription Key
+    api_key_prefix: "sk-cp-"           # catches the wrong MiniMax key type
 generation:
   provider: minimax
 ```
@@ -207,11 +215,16 @@ ever displaying the value. Switching provider there rewrites the model id to
 match, since a new endpoint plus the old provider's model id is the failure
 mode you'd otherwise hit at call time.
 
+MiniMax Token Plan is a genuine API subscription, but its `sk-cp-` Subscription
+Key is distinct from MiniMax's `sk-api-` pay-as-you-go key. The latter consumes
+account balance and does not draw from the Token Plan quota.
+
 ## Quickstart
 
 ```bash
 pip install -r requirements.txt
 cp .env.example .env                 # add your generation API key (or point at a local server)
+cp config.example.yaml config.yaml
 # edit config.yaml: parser.vault_path -> your Obsidian vault
 
 # 1. Parse markdown notes -> data/chunks.jsonl
@@ -249,10 +262,11 @@ mkdocs serve        # http://127.0.0.1:8000
 
 ## Run it anywhere with Docker
 
-The project ships a self-contained Docker bundle that runs both services plus a
-generation backend with **two commands** — no Python, no venv, no path surgery — and
-mounts your vault so the full console (including the Vault browser and Ingest) works on
-a second machine:
+Docker deployment uses the separately packaged `rag-docker-bundle` tree, which
+contains the Compose file, Dockerfile, container config, and this source under
+`app/`. A plain source clone does not contain that scaffold. Once you have unpacked
+the bundle, it runs both services plus a generation backend with **two commands** —
+no Python or venv setup:
 
 ```bash
 docker compose up --build -d     # query API :8051 · console :8052 · generation :3001
@@ -275,11 +289,11 @@ src/
   embeddings/  # embedder — builds ChromaDB + bm25s from chunk JSONL
   retrieval/   # retriever (hybrid + RRF + code lane), reranker, hyde, scope, context_expand
   generation/  # generator — grounded answers + citation verification
-  llm/         # unified OpenAI-compatible / local client
+  llm/         # unified OpenAI-/Anthropic-compatible client
   prompts/     # versioned YAML prompt templates + loader
   utils/       # config_loader (comment-preserving persistence), logger
   pipeline.py  # wires the query path together
-eval/          # 94-question golden suite, tiered runner + pure metric layer (metrics.py)
+eval/          # golden suite, tiered runner + pure metric layer (metrics.py)
 tests/         # pytest suite (chunking, jobs, loaders)
 docs/          # MkDocs documentation site
 ```

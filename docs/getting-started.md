@@ -3,52 +3,58 @@
 ## Requirements
 
 - **Python 3.11**
-- Disk space proportional to your corpus (the on-disk vector + sparse
-  indexes scale with it)
-- A generation endpoint — **any** OpenAI-compatible API. That can be a cloud
-  provider, a free-tier proxy, or a fully local model server. Retrieval works
-  with no LLM at all.
+- Enough disk for your JSONL sources plus the derived dense and sparse indexes. Read
+  the size from the bundle or local data directory rather than a copied estimate.
+- A generation endpoint — any configured OpenAI- or Anthropic-compatible API. That can
+  be a cloud provider, a free-tier proxy, or a fully local model server. Retrieval
+  works with no LLM at all.
 
-CPU is enough: embeddings (bge-small) and the cross-encoder reranker both
-run on CPU.
+CPU is enough: embeddings (bge-small) and the cross-encoder reranker both run on CPU.
 
 ## Install
 
 ```bash
 pip install -r requirements.txt
 cp .env.example .env      # add your generation key, or point at a local server
-cp config.example.yaml config.yaml   # then edit parser.vault_path
 ```
 
 ## Configure
 
-All tunables live in `config.yaml` (copy `config.example.yaml` if you're
-starting fresh). The two things to set first:
+All tunables live in `config.yaml` (copy `config.example.yaml` if you're starting
+fresh). Set the vault path, then select a named generation provider:
 
 ```yaml
 parser:
   vault_path: "/path/to/your/obsidian/vault"   # where your notes live
 
+providers:
+  local_generation:
+    kind: openai
+    base_url: "http://127.0.0.1:3001/v1"
+    model: "your-model-id"
+    api_key_optional: true
+
 generation:
-  base_url: "http://127.0.0.1:3001/v1"          # any OpenAI-compatible endpoint
+  provider: local_generation
   model: "your-model-id"
 ```
 
-Secrets stay in `.env` (gitignored); everything else is in `config.yaml`,
-which the system can also rewrite in place (comment-preserving) when you
-change defaults live.
+Secrets stay in `.env` (gitignored); everything else is in `config.yaml`, which the
+system can also rewrite in place (comment-preserving) when you change defaults live.
+After starting the query service, `GET /providers` shows the active registry entry and
+whether each configured key is present and type-compatible, without returning values.
+
+!!! note "MiniMax M3 Token Plan credentials"
+    The shipped `minimax` provider targets MiniMax M3 through its
+    Anthropic-compatible Token Plan endpoint. Use the plan subscription key beginning
+    `sk-cp-`; a pay-as-you-go `sk-api-` key is a separate credential and does not
+    consume Token Plan quota. Keep the key only in the registry's declared environment
+    variable. The provider-key endpoint rejects the wrong credential type.
 
 !!! tip "Fully local"
-    To run with no cloud dependency at all — local embeddings plus a local
-    model server for generation — follow `RUN_LOCAL.md`. Point
-    `generation.base_url` at your local server and you're done.
-
-## (Optional) Populate the course taxonomy
-
-If you want the parser to recognise your course names in folder paths and
-headings, populate `parser.course_taxonomy` in `config.yaml`. The pipeline
-ships with sensible generic defaults; you add the entries for your
-institution or corpus (see the commented examples in `config.example.yaml`).
+    To run with no cloud dependency at all — local embeddings plus a local model server
+    for generation — follow `RUN_LOCAL.md`. Add a keyless named provider for the local
+    endpoint and select it with `generation.provider`.
 
 ## Build the indexes
 
@@ -60,8 +66,8 @@ python -m src.ingestion.obsidian_parser "path/to/vault" -o data/chunks.jsonl
 python main.py index
 ```
 
-Add other source families and append them (each writes its own JSONL, and
-`index --append` rebuilds the sparse half automatically):
+Add other source families and append them (each writes its own JSONL, and `index
+--append` rebuilds the sparse half automatically):
 
 ```bash
 python main.py ingest-pdfs                        # -> data/pdf_chunks.jsonl
@@ -74,14 +80,13 @@ python main.py index --append data/code_chunks.jsonl
 ```
 
 !!! note "Chunking strategy"
-    Pass `--chunking heading` (default) for structured documents or
-    `--chunking fixed` for OCR walls of text. See
-    [Architecture](architecture.md#ingestion).
+    Pass `--chunking heading` (default) for structured documents or `--chunking fixed`
+    for OCR walls of text. See [Architecture](architecture.md#ingestion).
 
 ## Ask your first question
 
 ```bash
-python main.py query "Explain the central limit theorem from my notes"
+python main.py query "How did I implement knowledge distillation in my capstone?"
 python main.py chat        # interactive REPL
 ```
 
@@ -95,11 +100,11 @@ python -m uvicorn serve_api:app --host 127.0.0.1 --port 8051
 python -m uvicorn manage_api:app --host 127.0.0.1 --port 8052
 ```
 
-Then open **http://127.0.0.1:8052** for the console, or POST to **:8051**
-from code. Next: [Usage](usage.md).
+Then open **http://127.0.0.1:8052** for the console, or POST to **:8051** from code.
+Next: [Usage](usage.md).
 
 ## Prefer containers?
 
-Skip the local Python setup entirely and run everything — both services plus
-a generation backend — with Docker Compose. See
+Skip the local Python setup by using the separately packaged Docker bundle. A plain
+source clone does not include the Compose/Dockerfile scaffold. See
 [Docker deployment](deployment-docker.md).

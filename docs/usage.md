@@ -3,6 +3,12 @@
 Three ways to drive the system: the **CLI**, the warm **HTTP API**, and the **console**.
 They share one pipeline and one config.
 
+!!! info "Agent-facing query surface"
+    The warm API exposes live capability and provider discovery, stable source lookup,
+    and bounded comparison trees in addition to single `/search` and `/query` calls.
+    Fetch `/schema` and `/providers` at runtime instead of copying preset or backend
+    lists into an agent prompt.
+
 ## CLI
 
 ```bash
@@ -46,25 +52,101 @@ The warm endpoint keeps the indexes and models hot, so queries never pay startup
       -d '{"q": "docker networking", "top_k": 7}'
     ```
 
+=== "Compare branches"
+
+    ```bash
+    curl -s -X POST http://127.0.0.1:8051/compare \
+      -H "Content-Type: application/json" \
+      -d '{
+        "q": "Explain conjugate priors from my notes",
+        "mode": "search",
+        "branches": [
+          {"id": "baseline", "label": "Config baseline", "auto_preset": false},
+          {"id": "concept", "preset": "concept"},
+          {"id": "lexical", "rerank": "lexical"}
+        ]
+      }'
+    ```
+
+=== "Discover providers"
+
+    ```bash
+    curl -s http://127.0.0.1:8051/providers
+    ```
+
 === "Change defaults live"
 
     ```bash
-    # persist: true also rewrites config.yaml, comment-preserving
+    # Live-only is the safe default and reverts on restart.
     curl -s -X POST http://127.0.0.1:8051/config \
-      -d '{"rerank_top_k": 10, "persist": true}'
+      -d '{"rerank_top_k": 10}'
     ```
 
-Every `/query` response echoes what actually ran:
+    Set `persist:true` only with operator authorization; it rewrites
+    `config.yaml`. Prefer the management Settings API for deliberate persistent
+    changes.
+
+Every `/query` response identifies what actually ran. Every source has a stable
+evidence id, and generated answers report the resolved backend/model rather than
+leaving the caller to infer them from config:
 
 ```json
-"retrieval": { "preset": "code", "rerank_top_k": 10, "hyde_used": false,
-               "dense_top_k": 40, "sparse_top_k": 40, "scopes": ["code"] }
+{
+  "sources": [
+    {
+      "id": "<stable-evidence-id>",
+      "origin_id": "<retrieval-id>",
+      "lookup_available": true,
+      "n": 1,
+      "label": "<source label>",
+      "cited": true
+    }
+  ],
+  "retrieval": {
+    "preset": "code",
+    "rerank_top_k": 10,
+    "hyde_used": false,
+    "reranker_model": "<resolved-reranker>"
+  },
+  "generation": {
+    "backend": "<provider-registry-name>",
+    "protocol": "<wire-protocol>",
+    "model": "<resolved-model>",
+    "usage": {}
+  }
+}
 ```
 
 `GET /history` returns the last `/search` + `/query` calls (newest first, in-memory):
 the question, the knobs the caller explicitly set, the full retrieval echo of what
 actually ran, confidence and timing — so an agent tuning hyperparameters can see what
 it already tried instead of re-deriving it.
+
+`GET /chunks/{chunk_id}` fetches the current evidence record behind a stable id returned
+from `/search`, `/query`, or `/compare` when `lookup_available` is true.
+Parent-expanded sections use a `parent:<id>` evidence id and also report the indexed
+child as `origin_id`, so overlap is computed from the text each branch actually
+received. Live Omnisearch excerpts use a content-derived `live:<hash>` evidence id and
+set `lookup_available` to false because they are not stored index records.
+`GET /schema` advertises the current request fields, branch limits, preset registry,
+and endpoint map.
+
+### Comparison-tree semantics
+
+`POST /compare` accepts a question, `mode: search|query`, and a bounded list of named
+branches. Read the live `/schema` for the current limits. A branch can override the
+same retrieval controls as `/search`; query-mode branches may additionally override
+the configured `provider` and `model`.
+
+The response contains every branch plus `comparison`: common and branch-unique source
+ids, per-branch ranks, rank spread, and pairwise overlap. It intentionally does not
+compare raw scores, because cross-encoder logits, lexical scores, HTTP reranker scores,
+and fused RRF values are on different scales.
+
+Branches that differ only by provider/model reuse one exact evidence set. This makes a
+generation-backend comparison about answer behavior instead of retrieval noise. A
+generation failure stays on that branch; a retrieval/reranker failure marks the branch
+as a retrieval error without discarding successful siblings.
 
 `fetch-web --format pdf` prints the fully rendered page through headless Chromium
 (LaTeX, tables and highlighted code exactly as the site shows them) instead of
@@ -88,16 +170,40 @@ retrieval:
 | Knob | Effect |
 |---|---|
 | `preset` | Apply a named bundle (`code` / `concept` / `synthesis`). |
+| `auto_preset` | `false` suppresses implicit code-intent preset selection for a config-only baseline. Explicit `preset` still wins. |
 | `top_k` / `rerank_top_k` | How many reranked chunks reach the generator. |
 | `dense_top_k` / `sparse_top_k` | Candidate-pool width per lane before fusion. |
 | `use_hyde` / `hype` | Toggle query expansion. |
-| `rerank` | Rerank method for this call: `cross_encoder` (semantic scoring, the config default), `lexical` (model-free query-term coverage — exact-keyword hunts), `none` (raw fused order). Config default: `retrieval.rerank_mode`. |
+| `rerank` | Rerank method for this call: `cross_encoder` (in-process semantic scoring), `http` (configured external `/v1/rerank` service), `lexical` (model-free query-term coverage), or `none` (raw fused order). Config default: `retrieval.rerank_mode`. |
 | `parent_context` / `neighbor_context` | E2 small-to-big, post-rerank: swap note chunks for their full section / append a PDF hit's adjacent pages. Carried by the `synthesis` preset; per-call override beats preset beats config. |
 | `max_tokens` | Cap the answer length. |
+| `provider` / `model` | `/query` and query-mode `/compare` only: select a configured provider and optionally override its default model. Endpoints and secrets cannot be supplied per request. |
 
 !!! warning "`max_tokens` and citations"
     A very small `max_tokens` can truncate the citation footer and drop the answer's
     confidence to `UNKNOWN`. Leave enough room (a few hundred tokens) for a cited answer.
+
+!!! warning "Reranker failures are retrieval failures"
+    A response beginning `Reranking failed:` did not reach generation. Preserve the
+    underlying model error and inspect `GET /config` for the active reranker. In
+    particular, `BAAI/bge-reranker-base` has a 512-token input limit; configuring it
+    above that limit is invalid. Do not relabel this as a generation-provider outage.
+
+## Generation providers
+
+Provider definitions live in the `providers:` registry in `config.yaml`. A request can
+name a configured backend, but it cannot inject a URL or secret. `GET /providers` returns
+the active backend plus each configured backend's protocol, endpoint, default model,
+secret environment-variable name, and readiness flags; it never returns secret values.
+`available` means the required key is present and type-compatible, not that a remote
+endpoint has been contacted.
+
+The MiniMax entry is for MiniMax M3 through the Token Plan's Anthropic-compatible API.
+Its subscription key begins `sk-cp-`. A MiniMax pay-as-you-go key begins `sk-api-` and
+does not consume Token Plan quota. Put the subscription key only in the environment
+variable declared by the registry, or store it through the console/provider-key API;
+the configured prefix check rejects the wrong credential type. Restart the query
+service after changing a provider secret.
 
 ## The Corpus Ledger console (`:8052`)
 
@@ -106,7 +212,9 @@ Open **http://127.0.0.1:8052**. Tabs:
 - **Query** — Ask / Search with every knob in labeled groups (pool sizes, extra lanes
   HyDE/HyPE/Omnisearch, rerank method, E2 parents/neighbors), plus copy and `.md` export
   (Obsidian-ready). The Markdown + LaTeX **Preview** toggle renders the answer *and every
-  source chunk* — math, tables and fenced code included.
+  source chunk* — math, tables and fenced code included. Its **Query comparison tree**
+  fans the current question across live-config presets and generation backends or the
+  built-in rerank baselines, with evidence-only and generated-answer modes.
 - **Documents** — search, `#tag` filter, **retag** (domain / course / tags —
   metadata-only, no re-embed), and **delete** from the index.
 - **Vault** — browse the mounted vault tree read-only.
@@ -136,49 +244,18 @@ Open **http://127.0.0.1:8052**. Tabs:
   from its chip; **font pickers** for headings / body / mono (system serif and sans
   choices like Times New Roman, Georgia, Arial — or any installed font by name; applied
   over every theme, browser-local); an Obsidian-style **vault switcher** that remembers
-  every vault ever opened together with its own settings and swaps the whole set
-  atomically — vault root, chunks JSONL, Chroma dir, BM25 pickle, collection name,
-  inbox folder, browse root and manifest cache all travel with the vault, so a second
-  vault never inherits the first one's browse root or cached in-RAG status; and the editable config surface with **📁 folder pickers**: vault root,
+  every vault ever opened together with its own path/index settings and swaps the whole
+  set atomically; and the editable config surface with **📁 folder pickers**: vault root,
   Chroma / BM25 / chunks paths, embedding + cross-encoder models, default rerank &
   chunking, generation endpoint. Saves rewrite `config.yaml` in place (comments
   preserved); nothing hot-applies — the response says which service to restart.
-  Three panels sit under the fields.
-  **Reranker** offers four ready-made profiles — *Default* (works on any machine),
-  *Higher quality*, *Old / low-power machine* (`rerank_mode: lexical`: no model, nothing
-  to download, answers in milliseconds), and *External rerank server* (`http`, scoring
-  against a `/v1/rerank` endpoint you run) — plus a **Use** button on every known
-  cross-encoder. Costs are quoted as ratios, not seconds: absolute timings are a
-  property of the machine, not the model. The device dropdown lists only what PyTorch
-  can actually reach here (adding `mps` on Apple Silicon, `cuda:N` per visible GPU),
-  since picking an absent accelerator fails silently into a much slower path — while
-  never dropping a value your config already holds, so a config written on a GPU box
-  stays selectable on a CPU one.
-  **OCR** reports the two engines separately, because they are different in kind:
-  Tesseract is a *binary* that is installed or not (with its version and language
-  packs), while the VLM lane is a *vision model served over HTTP elsewhere* that is up
-  or down. **Probe** re-checks the endpoint; **Warm up** sends one tiny page through the
-  real OCR path, because `GET /models` answers "is the server up", not "is the model
-  loaded" — and `pdf.vlm_ocr.launch_hint` is free text shown verbatim when it is down,
-  so the command to start it is where you need it.
-  **Generation backends** lists the `providers:` registry and is *actionable*:
-  **Use** points generation at a backend and carries its model and endpoint
-  along, because a provider plus the previous provider's model id is the one
-  combination that fails at call time. Each backend also has a key box that
-  writes to `.env` (gitignored) — the value is never read back by any endpoint,
-  the panel only ever reports whether the variable is *set*, and the writer
-  accepts only env-var names the registry actually declares.
-
-  Each panel hosts the config fields it drives, directly beneath the buttons, so
-  a click visibly changes the inputs you are about to save; the matching row
-  lights up as **active** or **selected — Save to apply**, including when you
-  type a model id by hand.
-
-  The **folder pickers** browse the *server's* filesystem, not yours: a web page cannot
-  open a native folder dialog for a path the server has to read, and under Docker the
-  server only sees what is bind-mounted. On Windows they start at the drive list, on
-  Linux/macOS at your home folder, the current vault, `/Volumes` and `/`; any entry also
-  accepts a typed path.
+  Two panels sit under the fields: **Generation backends**, listing the
+  `providers:` registry with each backend's endpoint/model and whether its API-key
+  environment variable is set and type-compatible (never the value), plus controls
+  to activate a backend or write its declared key to the gitignored `.env`; and
+  **Reranker**, which suggests known-good cross-encoders with their measured cost and
+  states what PyTorch can actually reach — a `cuda` device on a CPU-only torch build
+  would otherwise fail silently into a much slower path.
 - **Info** — an in-app diagram of the whole pipeline with a query/ingestion toggle and a
   per-knob influence table.
 
@@ -194,5 +271,7 @@ queries with their knobs.
 
 `manage_api` exposes `GET /api/schema` — a machine-readable, permission-tiered map of
 every management operation (read / mutating / destructive) so an agent can discover what
-it may call before it calls it. Pair it with the query API: **ask** → `:8051`, **change
-the corpus** → `:8052`.
+it may call before it calls it. The query service has its own `GET /schema`: pair the
+two maps rather than assuming a copied capability list. **Ask/search/compare/inspect
+evidence or change warm retrieval defaults** → `:8051`; **manage the corpus,
+persistent install settings, or provider secrets** → `:8052`.

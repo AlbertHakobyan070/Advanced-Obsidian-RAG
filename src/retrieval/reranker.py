@@ -30,6 +30,10 @@ RERANK_MODES = ("cross_encoder", "http", "lexical", "none")
 _TOKEN_RE = re.compile(r"[a-z0-9_]+")
 
 
+class RerankerExecutionError(RuntimeError):
+    """The configured cross-encoder loaded, but failed while scoring pairs."""
+
+
 def _lexical_score(query_terms: dict[str, float], text: str) -> float:
     """Cheap query-term coverage score: sum of IDF-ish weights for each query
     term present, damped by repeat count, normalized by doc length. No model,
@@ -59,11 +63,15 @@ def _lexical_score(query_terms: dict[str, float], text: str) -> float:
 KNOWN_RERANKERS = {
     "cross-encoder/ms-marco-MiniLM-L-6-v2": {
         "label": "MiniLM-L6 — 22M params, the baseline cost (1x)",
+        # max_length is the console's recommended interactive setting;
+        # context_length is the hard model limit validated at construction.
         "max_length": 512,
+        "context_length": 512,
     },
     "BAAI/bge-reranker-base": {
         "label": "bge-reranker-base — 278M, roughly 10x MiniLM's cost",
         "max_length": 512,
+        "context_length": 512,
     },
     "BAAI/bge-reranker-v2-m3": {
         # XLM-RoBERTa-large, multilingual, 8k context. Stronger on public
@@ -71,6 +79,7 @@ KNOWN_RERANKERS = {
         # which makes it a GPU-or-offline choice rather than an interactive one.
         "label": "bge-reranker-v2-m3 — 568M, multilingual/8k, ~22x MiniLM (GPU advised)",
         "max_length": 512,
+        "context_length": 8192,
     },
 }
 
@@ -146,6 +155,13 @@ class Reranker:
                              f"got {mode!r}")
         self.mode = mode
         self.max_length = int(max_length)
+        known = KNOWN_RERANKERS.get(self.model_name)
+        if known and self.max_length > known["context_length"]:
+            raise ValueError(
+                "retrieval.cross_encoder_max_length="
+                f"{self.max_length} exceeds {self.model_name!r}'s "
+                f"{known['context_length']}-token context limit"
+            )
         # None => let sentence-transformers choose (cuda when torch sees a GPU).
         # An explicit "cuda:1" pins a specific card; "cpu" forces CPU even on a
         # GPU box, which is what you want when VRAM is busy with something else.
@@ -204,22 +220,30 @@ class Reranker:
                 "(e.g. http://127.0.0.1:8101/v1)")
         payload = {"model": self.http_model, "query": query,
                    "documents": [d.text for d in docs], "top_n": len(docs)}
-        r = httpx.post(f"{self.http_url}/rerank", json=payload,
-                       timeout=self.http_timeout)
-        r.raise_for_status()
-        data = r.json()
-        # llama.cpp returns {"results":[{"index":i,"relevance_score":x},...]}
-        results = data.get("results")
-        if not isinstance(results, list):
-            raise ValueError(f"unexpected /rerank response keys: {sorted(data)}")
-        for item in results:
-            i = item.get("index")
-            score = item.get("relevance_score", item.get("score"))
-            if i is None or score is None or not (0 <= i < len(docs)):
-                raise ValueError(f"bad /rerank result entry: {item}")
-            docs[i].rerank_score = float(score)
-        if any(d.rerank_score is None for d in docs):
-            raise ValueError("/rerank did not score every document")
+        try:
+            r = httpx.post(f"{self.http_url}/rerank", json=payload,
+                           timeout=self.http_timeout)
+            r.raise_for_status()
+            data = r.json()
+            # llama.cpp returns
+            # {"results":[{"index":i,"relevance_score":x},...]}
+            results = data.get("results")
+            if not isinstance(results, list):
+                raise ValueError(
+                    f"unexpected /rerank response keys: {sorted(data)}")
+            for item in results:
+                i = item.get("index")
+                score = item.get("relevance_score", item.get("score"))
+                if i is None or score is None or not (0 <= i < len(docs)):
+                    raise ValueError(f"bad /rerank result entry: {item}")
+                docs[i].rerank_score = float(score)
+            if any(d.rerank_score is None for d in docs):
+                raise ValueError("/rerank did not score every document")
+        except Exception as e:
+            raise RerankerExecutionError(
+                f"HTTP reranker {self.http_url!r} failed while scoring "
+                f"{len(docs)} candidate(s): {type(e).__name__}: {e}"
+            ) from e
         reranked = sorted(docs, key=lambda d: d.rerank_score, reverse=True)
         log.info("http-reranked %d candidates -> top %d via %s",
                  len(docs), k, self.http_url)
@@ -270,9 +294,19 @@ class Reranker:
             log.info("lexical-reranked %d candidates -> top %d", len(docs), k)
             return reranked[:k]
 
-        model = self._get_model()
         pairs = [(query, d.text) for d in docs]
-        scores = model.predict(pairs)
+        try:
+            # Model resolution belongs inside the typed boundary too: missing
+            # files, download failures, and invalid devices are reranker
+            # failures just as much as predict-time tensor errors.
+            model = self._get_model()
+            scores = model.predict(pairs)
+        except Exception as e:
+            raise RerankerExecutionError(
+                f"cross-encoder {self.model_name!r} failed while loading or scoring "
+                f"{len(pairs)} candidate(s) at max_length={self.max_length}: "
+                f"{type(e).__name__}: {e}"
+            ) from e
 
         for doc, score in zip(docs, scores):
             doc.rerank_score = float(score)

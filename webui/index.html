@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark light">
-<title>Corpus Ledger — RAG Management Console</title>
+<title>Corpus Ledger — Personal RAG</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='3' y='3' width='5' height='18' rx='1' fill='%23E8A33D'/%3E%3Crect x='10' y='3' width='5' height='18' rx='1' fill='%238A6423'/%3E%3Crect x='17' y='6' width='4' height='15' rx='1' fill='%23A99F8F'/%3E%3C/svg%3E">
 <script>/* theme + fonts are applied BEFORE first paint to avoid a flash of the wrong look */
 document.documentElement.dataset.theme=localStorage.getItem("ledger-theme")||"dark";
@@ -370,9 +370,6 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
 #tab-query .qw-mark svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
 #tab-query .qw-title h2{margin:0;font-size:17px}
 #tab-query .qw-title p{margin:2px 0 0;color:var(--ink-dim);font-size:12px}
-#tab-query .qw-badge{font:10px var(--mono);text-transform:uppercase;letter-spacing:.08em;
-  color:var(--green);border:1px solid var(--line);border-radius:999px;padding:5px 9px;white-space:nowrap}
-#tab-query .qw-badge:before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:currentColor;margin-right:6px}
 #tab-query .desc{margin:12px 20px 0}
 #tab-query .q-top{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;padding:14px 20px 0}
 #tab-query .q-tool{display:flex;flex-direction:column;gap:5px;min-width:0}
@@ -427,21 +424,71 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
 #tab-query .q-field>span{font:9.5px var(--mono);color:var(--ink-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #tab-query .q-field input,#tab-query .q-field select{width:100%;min-width:0;box-sizing:border-box;height:34px;padding:6px 8px}
 #tab-query .q-lanes{display:grid;grid-template-columns:1fr;gap:7px}
-#tab-query .q-toggle{display:grid;grid-template-columns:16px 1fr;align-items:center;column-gap:8px;
-  padding:8px 9px;border:1px solid var(--line);border-radius:8px;background:var(--panel);cursor:pointer}
+#tab-query .q-toggle{display:grid;grid-template-columns:minmax(0,1fr) 96px;align-items:center;column-gap:8px;
+  padding:7px 8px 7px 9px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
 #tab-query .q-toggle:hover{border-color:var(--amber-dim)}
-#tab-query .q-toggle input{width:14px;height:14px;padding:0;accent-color:var(--amber);grid-row:1/3}
+#tab-query .q-toggle select{width:96px;height:30px;min-width:0;padding:4px 6px;font-size:10.5px}
 #tab-query .q-toggle b{font-size:11.5px;font-weight:600;color:var(--ink)}
 #tab-query .q-toggle small{display:block;font-size:9.5px;color:var(--ink-faint);margin-top:1px}
 #tab-query .q-context-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 #tab-query .q-context-grid .q-field:last-child{grid-column:1/-1}
+#tab-query .q-compare{margin:0 20px 20px;border:1px solid var(--line);border-radius:calc(var(--r) + 1px);
+  background:var(--panel-2);padding:13px}
+#tab-query .qcmp-head{display:flex;align-items:flex-start;gap:10px;flex-wrap:wrap}
+#tab-query .qcmp-title{min-width:180px;flex:1 1 280px}
+#tab-query .qcmp-title h3{margin:0;font-size:13px}
+#tab-query .qcmp-title p{margin:3px 0 0;font-size:10.5px;color:var(--ink-faint)}
+#tab-query .qcmp-controls{display:flex;align-items:flex-end;gap:7px;flex-wrap:wrap}
+#tab-query .qcmp-controls .q-tool{min-width:132px}
+#tab-query .qcmp-controls .q-tool select{height:34px}
+#tab-query #q-compare-run,#tab-query #q-catalog-retry{height:34px}
+#tab-query .qcmp-catalog{font-size:10.5px;margin:8px 0 0;color:var(--ink-faint)}
+#tab-query .qcmp-catalog.bad{color:var(--red)}
+#tab-query .qcmp-choices{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+#tab-query .qcmp-choice{display:flex;align-items:center;gap:6px;max-width:100%;padding:5px 8px;
+  border:1px solid var(--line);border-radius:999px;background:var(--panel);font-size:11px;color:var(--ink-dim)}
+#tab-query .qcmp-choice:has(input:checked){border-color:var(--amber-dim);color:var(--ink)}
+#tab-query .qcmp-choice:has(input:disabled){opacity:.48}
+#tab-query .qcmp-choice input{width:13px;height:13px;margin:0;accent-color:var(--amber)}
+#tab-query .qcmp-choice small{color:var(--ink-faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#tab-query .qcmp-root{position:relative;margin:13px auto 18px;max-width:660px;padding:9px 12px;
+  border:1px solid var(--amber-dim);border-radius:8px;background:var(--panel);text-align:center}
+#tab-query .qcmp-root:after{content:"";position:absolute;left:50%;top:100%;height:19px;border-left:1px solid var(--amber-dim)}
+#tab-query .qcmp-root b{display:block;font-size:11px;color:var(--amber);text-transform:uppercase;letter-spacing:.07em}
+#tab-query .qcmp-root span{display:block;margin-top:3px;font-size:12px;color:var(--ink);word-break:break-word}
+#tab-query .qcmp-summary{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+#tab-query .qcmp-grid{position:relative;display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:10px}
+#tab-query .qcmp-grid:before{content:"";position:absolute;left:5%;right:5%;top:-10px;border-top:1px solid var(--amber-dim)}
+#tab-query .qcmp-branch{position:relative;min-width:0;border:1px solid var(--line);border-top:3px solid var(--amber-dim);
+  border-radius:8px;background:var(--panel);padding:10px}
+#tab-query .qcmp-branch:before{content:"";position:absolute;left:50%;bottom:100%;height:10px;border-left:1px solid var(--amber-dim)}
+#tab-query .qcmp-branch h4{margin:0;font-size:12.5px}
+#tab-query .qcmp-prov{font:10px var(--mono);color:var(--ink-faint);margin-top:4px;word-break:break-word}
+#tab-query .qcmp-answer{margin:9px 0;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--panel-2)}
+#tab-query .qcmp-answer summary{cursor:pointer;font-size:11px;color:var(--ink-dim)}
+#tab-query .qcmp-answer .answer{margin-top:8px;font-size:12px;max-height:320px;overflow:auto}
+#tab-query .qcmp-source{margin-top:7px;padding-top:7px;border-top:1px solid var(--line);font-size:11px}
+#tab-query .qcmp-source:first-child{border-top:0}
+#tab-query .qcmp-source-head{display:flex;gap:6px;align-items:flex-start}
+#tab-query .qcmp-rank{font:600 10.5px var(--mono);color:var(--amber);flex:none}
+#tab-query .qcmp-source-label{min-width:0;word-break:break-word}
+#tab-query .qcmp-id{display:block;margin-top:3px;font:9px var(--mono);color:var(--ink-faint);word-break:break-all}
+#tab-query .qcmp-members{margin-top:3px;font-size:9.5px;color:var(--ink-faint)}
+#tab-query .qcmp-evidence{margin-top:5px}
+#tab-query .qcmp-evidence summary{cursor:pointer;font-size:9.5px;color:var(--ink-dim)}
+#tab-query .qcmp-evidence div{margin-top:5px;padding:6px;border-left:2px solid var(--line);
+  background:var(--panel-2);font:10.5px/1.45 var(--body);white-space:pre-wrap;word-break:break-word;
+  max-height:220px;overflow:auto}
+#tab-query .qcmp-pairs{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+#tab-query .qcmp-pair{padding:5px 7px;border:1px solid var(--line);border-radius:6px;background:var(--panel);
+  font:9.5px var(--mono);color:var(--ink-dim)}
 @media(max-width:1120px){
   #tab-query .fsets{grid-template-columns:1fr 1fr}
   #tab-query .fset-context{grid-column:1/-1}
   #tab-query .q-lanes{grid-template-columns:repeat(3,1fr)}
 }
 @media(max-width:760px){
-  #tab-query .qw-head{align-items:flex-start}.qw-badge{display:none}
+  #tab-query .qw-head{align-items:flex-start}
   #tab-query .q-preset-tool{flex:1 1 180px}
   #tab-query .q-history-tool{flex:1 1 100%}
   #tab-query .q-composer{grid-template-columns:1fr}
@@ -450,6 +497,11 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
   #tab-query .fsets{grid-template-columns:1fr}
   #tab-query .fset-context{grid-column:auto}
   #tab-query .q-lanes{grid-template-columns:1fr}
+  #tab-query .q-compare{margin-left:12px;margin-right:12px}
+  #tab-query .qcmp-controls{width:100%}
+  #tab-query .qcmp-controls .q-tool{flex:1 1 120px}
+  #tab-query .qcmp-grid{grid-template-columns:1fr}
+  #tab-query .qcmp-grid:before{display:none}
 }
 @media(prefers-reduced-motion:reduce){.infocard{transition:none} .infocard:hover{transform:none}}
 </style>
@@ -754,12 +806,11 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
         <span class="qw-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 12h4l2.2-6 3.6 12L16 12h4"/></svg></span>
         <div><h2>Query workspace</h2><p class="hint">Shape retrieval, inspect evidence, then generate a grounded answer.</p></div>
       </div>
-      <span class="qw-badge">warm API · :8051</span>
     </div>
 
     <div class="q-top">
       <label class="q-tool q-preset-tool"><span>Query preset</span>
-        <select id="q-preset" title="A named bundle of every knob below. Blank = auto (code-intent queries self-apply the code preset)."><option value="">Automatic</option><option>code</option><option>concept</option><option>synthesis</option></select>
+        <select id="q-preset" title="Live named bundles from :8051/schema. Automatic may self-apply a matching preset; Base config suppresses that routing."><option value="">Automatic</option><option value="__base__">Base config · no auto preset</option><option disabled>Loading live presets…</option></select>
       </label>
       <label class="q-tool q-history-tool"><span>Recent queries</span>
         <select id="q-history" title="Last 20 queries from this browser — picking one restores the question and its settings."><option value="">Choose from history…</option></select>
@@ -794,19 +845,36 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
       <div class="fset">
         <div class="fset-head"><span class="fset-icon"><svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6 5.6 18.4"/></svg></span><div class="fset-copy"><div class="fset-t">Retrieval lanes</div><small>Widen or reshape the search</small></div></div>
         <div class="q-lanes">
-          <label class="q-toggle" title="Search with a hypothetical answer instead of the raw question"><input type="checkbox" id="q-hyde" checked><div><b>HyDE</b><small>Concept expansion</small></div></label>
-          <label class="q-toggle" title="Match against pre-generated hypothetical questions"><input type="checkbox" id="q-hype"><div><b>HyPE</b><small>Question matching</small></div></label>
-          <label class="q-toggle" title="Fuse live-vault hits from Obsidian Omnisearch"><input type="checkbox" id="q-omni"><div><b>Omnisearch</b><small>Live vault lane</small></div></label>
+          <label class="q-toggle" title="Search with a hypothetical answer instead of the raw question"><div><b>HyDE</b><small>Concept expansion</small></div><select id="q-hyde"><option value="">Preset default</option><option value="on">Enabled</option><option value="off">Disabled</option></select></label>
+          <label class="q-toggle" title="Match against pre-generated hypothetical questions"><div><b>HyPE</b><small>Question matching</small></div><select id="q-hype"><option value="">Preset default</option><option value="on">Enabled</option><option value="off">Disabled</option></select></label>
+          <label class="q-toggle" title="Fuse live-vault hits from Obsidian Omnisearch"><div><b>Omnisearch</b><small>Live vault lane</small></div><select id="q-omni"><option value="">Preset default</option><option value="on">Enabled</option><option value="off">Disabled</option></select></label>
         </div>
       </div>
       <div class="fset fset-context">
         <div class="fset-head"><span class="fset-icon"><svg viewBox="0 0 24 24"><path d="M4 7h10m4 0h2M4 17h2m4 0h10M14 4v6M6 14v6"/></svg></span><div class="fset-copy"><div class="fset-t">Ranking &amp; context</div><small>Order results and expand evidence</small></div></div>
         <div class="q-context-grid">
-          <label class="q-field"><span>Reranker</span><select id="q-rerank" title="Choose semantic, lexical, or fused ordering"><option value="">Config default</option><option value="cross_encoder">Cross-encoder</option><option value="lexical">Lexical</option><option value="none">None · fused order</option></select></label>
+          <label class="q-field"><span>Reranker</span><select id="q-rerank" title="Choose semantic, external HTTP, lexical, or fused ordering"><option value="">Config default</option><option value="cross_encoder">Cross-encoder</option><option value="http">HTTP rerank service</option><option value="lexical">Lexical</option><option value="none">None · fused order</option></select></label>
           <label class="q-field"><span>Parent sections</span><select id="q-parent" title="Swap matched note chunks for their full enclosing section"><option value="">Preset default</option><option value="on">Enabled</option><option value="off">Disabled</option></select></label>
           <label class="q-field"><span>Page neighbors</span><select id="q-neigh" title="Append adjacent PDF pages as supplementary sources"><option value="">Preset default</option><option value="on">Enabled</option><option value="off">Disabled</option></select></label>
         </div>
       </div>
+    </div>
+    <div class="q-compare">
+      <div class="qcmp-head">
+        <div class="qcmp-title">
+          <h3>Query comparison tree</h3>
+          <p>Fan one question into 2–6 evidence branches, or up to 3 generated answers. Membership and rank are compared by stable evidence ID; raw score scales are not mixed.</p>
+        </div>
+        <div class="qcmp-controls">
+          <label class="q-tool"><span>Compare</span><select id="q-compare-dim"><option value="preset">Presets</option><option value="reranker">Rerankers</option><option value="provider">LM backends</option></select></label>
+          <label class="q-tool"><span>Output</span><select id="q-compare-mode"><option value="search">Evidence only</option><option value="query">Generated answers</option></select></label>
+          <button class="btn" id="q-catalog-retry" title="Reload live presets and generation backends from :8051">Reload choices</button>
+          <button class="btn primary" id="q-compare-run">Run branches</button>
+        </div>
+      </div>
+      <div class="qcmp-catalog" id="q-catalog-msg" role="status">Loading live presets and providers from :8051…</div>
+      <div class="qcmp-choices" id="q-compare-choices" aria-label="Comparison branches"></div>
+      <div id="q-compare-out" aria-live="polite"></div>
     </div>
     <div id="q-out" style="margin-top:14px"></div>
   </div>
@@ -1259,7 +1327,7 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
         <tr><td>HyDE</td><td>Searches with a hypothetical <i>answer</i> instead of the raw question — helps conceptual recall.</td><td>ON for concepts/paraphrase. <b>OFF for code / exact-term / “my script”</b> queries (the prose hypothetical drags in lecture notes). The <code>code</code> preset turns it off for you.</td></tr>
         <tr><td>HyPE</td><td>Adds a lane matching your query against pre-generated hypothetical <i>questions</i> per chunk.</td><td>ON when your wording differs from how the material is written. Safe to try — fails soft if a chunk wasn’t HyPE-indexed. Default off.</td></tr>
         <tr><td>Omnisearch</td><td>Fuses live-vault hits from Obsidian (notes not yet ingested).</td><td>ON for “this week / today / just wrote”. Needs Obsidian open with the Omnisearch HTTP server; else zero live hits, no error.</td></tr>
-        <tr><td>rerank</td><td>How the fused candidates are reordered before the top-k cut. <code>cross-encoder</code> = semantic (query, chunk) scoring (the config default); <code>lexical</code> = model-free query-term coverage; <code>none</code> = keep the raw RRF fusion order.</td><td><code>lexical</code> for exact-keyword / identifier hunts where semantic opinion hurts, or when you want zero model load; <code>none</code> to inspect what fusion itself surfaced. <code>default</code> = config (<code>retrieval.rerank_mode</code>).</td></tr>
+        <tr><td>rerank</td><td>How the fused candidates are reordered before the top-k cut. <code>cross_encoder</code> = in-process semantic scoring; <code>http</code> = the configured external <code>/v1/rerank</code> service; <code>lexical</code> = model-free query-term coverage; <code>none</code> = keep raw RRF order.</td><td>Use <code>http</code> when a reranker runs on better host hardware, <code>lexical</code> for exact identifiers or zero model load, and <code>none</code> to inspect fusion itself. <code>default</code> follows <code>retrieval.rerank_mode</code>.</td></tr>
         <tr><td>parents / neighbors</td><td>E2 small-to-big, post-rerank: <b>parents</b> swaps a matched note chunk for its FULL enclosing section; <b>neighbors</b> appends a PDF hit’s adjacent pages as marked supplementary sources.</td><td>ON when citations are on-topic but fragmentary (the <code>synthesis</code> preset carries both). OFF to keep sources tight. <code>default</code> = preset/config value.</td></tr>
       </tbody>
     </table>
@@ -1284,7 +1352,10 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
 <script>
 "use strict";
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
-const state={ragApi:"http://127.0.0.1:8051",jsonls:[],docsOffset:0,docsQuery:{},selDocs:new Set(),job:null,jobOffset:0,timers:{}};
+const state={ragApi:"http://127.0.0.1:8051",jsonls:[],docsOffset:0,docsQuery:{},selDocs:new Set(),job:null,jobOffset:0,timers:{},
+  queryCatalog:{presets:[],providers:[],schemaError:"",providersError:""},
+  compareSelected:{preset:new Set(),reranker:new Set(),provider:new Set()},
+  queryProviderActive:null,queryBusy:false};
 const fmt=n=>typeof n==="number"?n.toLocaleString("en-US"):n;
 const gb=b=>b>1<<30?(b/(1<<30)).toFixed(2)+" GB":(b/(1<<20)).toFixed(1)+" MB";
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -1292,6 +1363,22 @@ function toast(msg,err){const t=document.createElement("div");t.className="tst"+
   $("#toast").append(t);setTimeout(()=>t.remove(),err?7000:4200)}
 async function api(path,opts){const r=await fetch(path,opts);const j=await r.json().catch(()=>({}));
   if(!r.ok||j.ok===false)throw new Error(j.error||j.detail||r.status);return j}
+function apiDetail(v){
+  if(v==null)return "";
+  if(typeof v==="string")return v;
+  if(Array.isArray(v))return v.map(x=>x&&x.msg
+    ?`${Array.isArray(x.loc)?x.loc.join(".")+": ":""}${x.msg}`:JSON.stringify(x)).join("; ");
+  try{return JSON.stringify(v)}catch(e){return String(v)}
+}
+async function ragCall(path,opts){
+  let r;
+  try{r=await fetch(state.ragApi+path,opts)}
+  catch(e){throw new Error(`${path}: could not reach ${state.ragApi} (${e.message})`)}
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok)throw new Error(`${path}: ${apiDetail(j.detail||j.error)||`HTTP ${r.status}`}`);
+  if(j.error)throw new Error(`${path}: ${apiDetail(j.error)}`);
+  return j;
+}
 
 /* ---------- modal (file preview + folder picker) ---------- */
 function openModal(title,html){$("#modal-title").textContent=title;
@@ -2081,6 +2168,166 @@ $("#v-go").onclick=async()=>{
 $("#v-q").addEventListener("keydown",e=>{if(e.key==="Enter")$("#v-go").click()});
 
 /* ---------- query console ---------- */
+function renderQueryPresetOptions(){
+  const sel=$("#q-preset"),cur=sel.value;
+  const live=state.queryCatalog.presets.map(p=>
+    `<option value="${esc(p.name)}">${esc(p.name)}</option>`).join("");
+  const failed=state.queryCatalog.schemaError
+    ?`<option disabled>Live preset catalog unavailable</option>`:"";
+  sel.innerHTML=`<option value="">Automatic</option>`+
+    `<option value="__base__">Base config · no auto preset</option>${live}${failed}`;
+  if([...sel.options].some(o=>o.value===cur))sel.value=cur;
+}
+function compareCandidates(dim){
+  if(dim==="preset"){
+    const named=state.queryCatalog.presets.map((p,i)=>{
+      const bits=Object.entries(p.settings||{}).slice(0,3).map(([k,v])=>`${k}=${v}`);
+      return {key:p.name,id:`preset_${i+2}`,label:p.name,
+        detail:bits.join(" · ")||"configured bundle",patch:{preset:p.name,auto_preset:true}};
+    });
+    return [
+      {key:"__auto__",id:"preset_0",label:"Automatic",detail:"intent routing allowed",patch:{auto_preset:true}},
+      {key:"__base__",id:"preset_1",label:"Base config",detail:"intent routing suppressed",patch:{auto_preset:false}},
+      ...named,
+    ];
+  }
+  if(dim==="reranker")return [
+    {key:"cross_encoder",id:"reranker_cross",label:"Cross-encoder",detail:"semantic pair scoring",patch:{rerank:"cross_encoder"}},
+    {key:"http",id:"reranker_http",label:"HTTP service",detail:"configured external /v1/rerank",patch:{rerank:"http"}},
+    {key:"lexical",id:"reranker_lexical",label:"Lexical",detail:"query-term ordering",patch:{rerank:"lexical"}},
+    {key:"none",id:"reranker_none",label:"Fused order",detail:"no downstream rerank",patch:{rerank:"none"}},
+  ];
+  const active=state.queryProviderActive||{};
+  const activeBackend=active.backend||active.protocol||"configured backend";
+  const choices=[{
+    key:"__default__",id:"provider_default",
+    label:`Default · ${activeBackend}`,
+    detail:active.model||"current configured model",
+    description:"Use the currently active generator without an override",
+    patch:{},
+  }];
+  state.queryCatalog.providers
+    .filter(p=>p.name!==activeBackend)
+    .forEach((p,i)=>{
+    const available=p.available!==undefined?p.available:
+      (!p.api_key_env||p.key_optional||(p.key_present&&p.key_compatible!==false));
+    const readiness=!p.key_present&&p.api_key_env
+      ?`missing ${p.api_key_env}`
+      :(p.key_compatible===false?`wrong key type in ${p.api_key_env}`:
+        `${p.model||"default model"}${available?"":" · unavailable"}`);
+    choices.push({key:p.name,id:`provider_${i}`,label:p.label||p.name,
+      detail:readiness,description:p.description||"",disabled:!available,
+      patch:{provider:p.name}});
+  });
+  return choices;
+}
+function compareCap(){
+  return $("#q-compare-mode").value==="query"?3:6;
+}
+function renderCompareChoices(){
+  const dim=$("#q-compare-dim").value,mode=$("#q-compare-mode");
+  if(dim==="provider"){mode.value="query";mode.disabled=true}else mode.disabled=false;
+  const choices=compareCandidates(dim),selected=state.compareSelected[dim];
+  const valid=new Set(choices.map(c=>c.key));
+  [...selected].forEach(k=>{if(!valid.has(k))selected.delete(k)});
+  if(!selected.size)choices.filter(c=>!c.disabled).slice(0,Math.min(3,compareCap()))
+    .forEach(c=>selected.add(c.key));
+  const cap=compareCap();
+  if(selected.size>cap){
+    const keep=choices.filter(c=>selected.has(c.key)).slice(0,cap).map(c=>c.key);
+    selected.clear();keep.forEach(k=>selected.add(k));
+  }
+  const box=$("#q-compare-choices");
+  box.innerHTML=choices.length?choices.map((c,i)=>`
+    <label class="qcmp-choice" title="${esc(c.description||c.detail||"")}">
+      <input type="checkbox" data-choice="${i}" ${selected.has(c.key)?"checked":""} ${c.disabled?"disabled":""}>
+      <span>${esc(c.label)}</span>${c.detail?`<small>${esc(c.detail)}</small>`:""}
+    </label>`).join(""):`<span class="empty">${
+      dim==="provider"?"No available provider choices were returned by /providers.":"No comparison choices are available."
+    }</span>`;
+  $$(`#q-compare-choices input[data-choice]`).forEach(input=>input.onchange=()=>{
+    const choice=choices[+input.dataset.choice];if(!choice)return;
+    if(input.checked&&selected.size>=compareCap()){
+      input.checked=false;
+      toast(`This output mode allows at most ${compareCap()} branches`,1);
+      return;
+    }
+    input.checked?selected.add(choice.key):selected.delete(choice.key);
+  });
+}
+async function loadQueryCatalogs(){
+  const msg=$("#q-catalog-msg");
+  msg.classList.remove("bad");msg.textContent="Loading live presets and providers from :8051…";
+  const [schemaResult,providersResult]=await Promise.allSettled([
+    ragCall("/schema"),ragCall("/providers")
+  ]);
+  if(schemaResult.status==="fulfilled"){
+    const presets=schemaResult.value.presets;
+    if(!presets||typeof presets!=="object"||Array.isArray(presets)){
+      state.queryCatalog.presets=[];
+      state.queryCatalog.schemaError="/schema did not return a presets object";
+    }else{
+      state.queryCatalog.presets=Object.entries(presets).map(([name,settings])=>({name,settings}));
+      state.queryCatalog.schemaError="";
+    }
+  }else{
+    state.queryCatalog.presets=[];
+    state.queryCatalog.schemaError=schemaResult.reason.message;
+  }
+  if(providersResult.status==="fulfilled"){
+    const providers=providersResult.value.providers;
+    if(!Array.isArray(providers)){
+      state.queryCatalog.providers=[];
+      state.queryCatalog.providersError="/providers did not return a providers array";
+    }else{
+      state.queryCatalog.providers=providers;
+      state.queryProviderActive=providersResult.value.active||null;
+      state.queryCatalog.providersError="";
+    }
+  }else{
+    state.queryCatalog.providers=[];
+    state.queryProviderActive=null;
+    state.queryCatalog.providersError=providersResult.reason.message;
+  }
+  renderQueryPresetOptions();renderCompareChoices();
+  const errors=[state.queryCatalog.schemaError,state.queryCatalog.providersError].filter(Boolean);
+  if(errors.length){
+    msg.classList.add("bad");
+    msg.textContent=`Live choice discovery failed: ${errors.join(" · ")}. Reload choices after :8051 is ready.`;
+  }else{
+    const ready=state.queryCatalog.providers.filter(p=>p.available!==undefined?p.available:
+      (!p.api_key_env||p.key_optional||(p.key_present&&p.key_compatible!==false))).length;
+    msg.classList.remove("bad");
+    msg.textContent=`Live choices loaded · ${state.queryCatalog.presets.length} preset(s) · ${ready}/${state.queryCatalog.providers.length} configured provider credential(s) compatible`;
+  }
+}
+function setTriState(body,id,key){
+  const value=$(id).value;
+  if(value)body[key]=value==="on";
+}
+function buildQueryBody(q,retrieveOnly){
+  const body={q,include_text:900};
+  const preset=$("#q-preset").value;
+  if(preset==="__base__")body.auto_preset=false;
+  else if(preset)body.preset=preset;
+  setTriState(body,"#q-hyde","hyde");
+  setTriState(body,"#q-hype","hype");
+  setTriState(body,"#q-omni","omnisearch");
+  const rr=$("#q-rerank").value;if(rr)body.rerank=rr;
+  const pc=$("#q-parent").value;if(pc)body.parent_context=(pc==="on");
+  const nc=$("#q-neigh").value;if(nc)body.neighbor_context=(nc==="on");
+  const tk=$("#q-topk").value;if(tk)body.top_k=+tk;
+  const dk=$("#q-densek").value;if(dk)body.dense_top_k=+dk;
+  const sk=$("#q-sparsek").value;if(sk)body.sparse_top_k=+sk;
+  const mt=$("#q-maxtok").value;if(mt&&!retrieveOnly)body.max_tokens=+mt;
+  return body;
+}
+function setQueryBusy(on,message){
+  state.queryBusy=on;
+  $("#q-busy").style.display=on?"block":"none";
+  if(message)$("#q-busy-msg").textContent=message;
+  ["#q-ask","#q-search","#q-compare-run"].forEach(id=>$(id).disabled=on);
+}
 /* Render the answer body as raw text or (Preview) markdown + LaTeX. Degrades
    to raw text if the marked/KaTeX CDNs didn't load (offline). */
 function renderAnswerBody(el,text){
@@ -2167,41 +2414,156 @@ function renderResult(){
     renderSourceBodies();};
 }
 
+function comparisonProvenance(branch){
+  const req=branch.request||{},rt=branch.retrieval||{},gen=branch.generation||{};
+  const requested=[];
+  if(req.preset)requested.push(`preset ${req.preset}`);
+  else if(req.auto_preset===false)requested.push("base config · auto preset off");
+  else requested.push("automatic preset");
+  if(req.rerank)requested.push(`rerank ${req.rerank}`);
+  if(req.provider)requested.push(`provider ${req.provider}`);
+  if(req.model)requested.push(`model ${req.model}`);
+  ["hyde","hype","omnisearch"].forEach(k=>{
+    if(Object.prototype.hasOwnProperty.call(req,k))requested.push(`${k} ${req[k]?"on":"off"}`);
+  });
+  const effective=[];
+  if(rt.preset)effective.push(`preset ${rt.preset}`);
+  effective.push(`rerank ${rt.rerank_mode||req.rerank||"config default"}`);
+  if(rt.reranker_model)effective.push(rt.reranker_model);
+  if(rt.rerank_top_k!=null)effective.push(`top ${rt.rerank_top_k}`);
+  if(typeof rt.hyde_used==="boolean")effective.push(`HyDE ${rt.hyde_used?"on":"off"}`);
+  if(typeof rt.hype==="boolean")effective.push(`HyPE ${rt.hype?"on":"off"}`);
+  if(rt.live_hits)effective.push(`${rt.live_hits} live`);
+  const generation=gen.backend||gen.model
+    ?`generation · ${gen.backend||gen.protocol||"backend"}${gen.model?` / ${gen.model}`:""}`:"";
+  return `<div class="qcmp-prov">request · ${requested.map(esc).join(" · ")}</div>`+
+    `<div class="qcmp-prov">ran · ${effective.map(esc).join(" · ")}</div>`+
+    (generation?`<div class="qcmp-prov">${esc(generation)}</div>`:"");
+}
+function renderComparison(data){
+  state.lastCompare=data;
+  const cmp=data.comparison||{},branches=data.branches||[];
+  const labels=Object.fromEntries(branches.map(b=>[b.id,b.label||b.id]));
+  const common=new Set(cmp.common_source_ids||[]);
+  const success=new Set(cmp.successful_branches||[]);
+  const branchCards=branches.map((b,bi)=>{
+    const unique=new Set((cmp.unique_source_ids||{})[b.id]||[]);
+    const sources=(b.sources||[]).map((s,i)=>{
+      const id=String(s.id||"");
+      const members=(cmp.membership||{})[id]||[b.id];
+      const ranks=(cmp.ranks||{})[id]||{[b.id]:s.n??i+1};
+      const spread=(cmp.rank_spread||{})[id];
+      const kind=common.has(id)?"common":(unique.has(id)?"unique":`shared ${members.length}/${success.size||1}`);
+      const kindCls=common.has(id)?"done":(unique.has(id)?"run":"");
+      const rankTrail=Object.entries(ranks).map(([branchId,rank])=>
+        `${labels[branchId]||branchId} #${rank}`).join(" · ");
+      return `<div class="qcmp-source">
+        <div class="qcmp-source-head"><span class="qcmp-rank">#${esc(s.n??i+1)}</span>
+          <span class="qcmp-source-label">${esc(s.label||"source")}</span>
+          <span class="pill ${kindCls}">${esc(kind)}</span></div>
+        <code class="qcmp-id" title="Stable evidence ID">${esc(id||"(no stable id returned)")}</code>
+        ${s.origin_id&&String(s.origin_id)!==id
+          ?`<code class="qcmp-id" title="Indexed child that found this parent section">origin ${esc(s.origin_id)}</code>`:""}
+        ${s.lookup_available===false
+          ?`<div class="qcmp-members">live excerpt · direct lookup unavailable</div>`:""}
+        <div class="qcmp-members">${esc(rankTrail)}${spread?` · rank spread ${esc(spread.spread)}`:""}</div>
+        ${s.text?`<details class="qcmp-evidence"><summary>Evidence excerpt</summary><div>${esc(s.text)}</div></details>`:""}
+      </div>`;
+    }).join("");
+    const confCls={HIGH:"done",MEDIUM:"run",LOW:"failed",UNKNOWN:"failed",ERROR:"failed",RETRIEVE_ONLY:"live"}[b.confidence]||"";
+    return `<article class="qcmp-branch">
+      <div class="row" style="gap:6px"><h4>${esc(b.label||b.id)}</h4><span style="flex:1"></span>
+        <span class="pill ${confCls}">${esc(b.confidence||"?")}</span></div>
+      ${comparisonProvenance(b)}
+      ${b.error?`<div class="hint" style="color:var(--red);margin:8px 0 0">${esc(b.error)}</div>`:""}
+      ${b.answer?`<details class="qcmp-answer" open><summary>Generated answer</summary><div class="answer" id="qcmp-answer-${bi}"></div></details>`:""}
+      <div class="qcmp-prov" style="margin-top:8px">${(b.sources||[]).length} evidence chunk(s)</div>
+      <div>${sources||`<div class="empty">No evidence returned.</div>`}</div>
+    </article>`;
+  }).join("");
+  const uniquePills=branches.filter(b=>success.has(b.id)).map(b=>
+    `<span class="pill">${esc(b.label||b.id)} · ${((cmp.unique_source_ids||{})[b.id]||[]).length} unique</span>`).join("");
+  const pairs=(cmp.pairwise||[]).map(p=>{
+    const rate=p.overlap_rate==null?"—":`${(p.overlap_rate*100).toFixed(0)}%`;
+    const jac=p.jaccard==null?"—":p.jaccard.toFixed(2);
+    return `<span class="qcmp-pair">${esc(labels[p.left]||p.left)} ↔ ${esc(labels[p.right]||p.right)} · overlap@${esc(p.depth)} ${esc(p.overlap)}/${esc(p.depth)} (${rate}) · Jaccard ${jac}</span>`;
+  }).join("");
+  $("#q-compare-out").innerHTML=`
+    <div class="qcmp-root"><b>${esc(data.mode||"compare")} tree</b><span>${esc(data.q||"")}</span></div>
+    <div class="qcmp-summary"><span class="pill done">${success.size} successful</span>
+      <span class="pill">${common.size} common stable ID(s)</span>${uniquePills}</div>
+    <div class="qcmp-grid">${branchCards||`<div class="empty">No branches returned.</div>`}</div>
+    ${pairs?`<div class="qcmp-pairs">${pairs}</div>`:""}
+    <div class="hint" style="margin:9px 0 0">${esc(cmp.note||"Raw scores are intentionally not compared across ranking methods.")}</div>`;
+  branches.forEach((b,i)=>{
+    const el=$("#qcmp-answer-"+i);if(el&&b.answer)renderAnswerBody(el,b.answer);
+  });
+}
+async function runComparison(){
+  if(state.queryBusy)return;
+  const q=$("#q-text").value.trim();if(!q)return toast("Type a question first",1);
+  const dim=$("#q-compare-dim").value,mode=$("#q-compare-mode").value;
+  const choices=compareCandidates(dim);
+  const selected=state.compareSelected[dim];
+  const branches=choices.filter(c=>selected.has(c.key)&&!c.disabled);
+  if(branches.length<2)return toast("Select at least 2 available branches",1);
+  if(branches.length>compareCap())return toast(`Select at most ${compareCap()} branches for this output mode`,1);
+  const base=buildQueryBody(q,mode==="search");
+  const branchKeys=["top_k","dense_top_k","sparse_top_k","preset","auto_preset",
+    "hyde","omnisearch","parent_context","neighbor_context","hype","rerank"];
+  const common=Object.fromEntries(branchKeys.filter(k=>Object.prototype.hasOwnProperty.call(base,k))
+    .map(k=>[k,base[k]]));
+  if(dim==="preset"){delete common.preset;delete common.auto_preset}
+  if(dim==="reranker")delete common.rerank;
+  const body={q,mode,include_text:base.include_text,
+    branches:branches.map(c=>({id:c.id,label:c.label,...common,...c.patch}))};
+  if(mode==="query"&&base.max_tokens)body.max_tokens=base.max_tokens;
+  saveQueryHistory(q);
+  setQueryBusy(true,mode==="query"?"retrieving + generating branches…":"retrieving branches…");
+  $("#q-out").innerHTML="";state.lastQ=null;
+  $("#q-compare-out").innerHTML=`<div class="empty">Running ${branches.length} branches sequentially…</div>`;
+  try{
+    renderComparison(await ragCall("/compare",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(body)}));
+  }catch(e){
+    $("#q-compare-out").innerHTML=`<div class="empty" style="color:var(--red)">${esc(e.message)}</div>`;
+  }finally{setQueryBusy(false)}
+}
+
 async function runQuery(retrieveOnly){
+  if(state.queryBusy)return;
   const q=$("#q-text").value.trim();if(!q)return toast("Type a question first",1);
   saveQueryHistory(q);
-  const body={q,include_text:900,hyde:$("#q-hyde").checked,hype:$("#q-hype").checked,
-    omnisearch:$("#q-omni").checked};
-  const preset=$("#q-preset").value;if(preset)body.preset=preset;
-  const rr=$("#q-rerank").value;if(rr)body.rerank=rr;
-  const pc=$("#q-parent").value;if(pc)body.parent_context=(pc==="on");
-  const nc=$("#q-neigh").value;if(nc)body.neighbor_context=(nc==="on");
-  const tk=$("#q-topk").value;if(tk)body.top_k=+tk;
-  const dk=$("#q-densek").value;if(dk)body.dense_top_k=+dk;
-  const sk=$("#q-sparsek").value;if(sk)body.sparse_top_k=+sk;
-  const mt=$("#q-maxtok").value;if(mt&&!retrieveOnly)body.max_tokens=+mt;
-  $("#q-busy").style.display="block";$("#q-busy-msg").textContent=retrieveOnly?"retrieving…":"retrieving + generating…";
+  const body=buildQueryBody(q,retrieveOnly);
+  setQueryBusy(true,retrieveOnly?"retrieving…":"retrieving + generating…");
   $("#q-out").innerHTML="";state.lastQ=null;
+  $("#q-compare-out").innerHTML="";state.lastCompare=null;
   try{
-    const url=state.ragApi+(retrieveOnly?"/search":"/query");
-    const r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-    if(!r.ok)throw new Error("query API "+r.status+" — is serve_api running on :8051?");
-    const j=await r.json();
+    const j=await ragCall(retrieveOnly?"/search":"/query",
+      {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
     const rt=j.retrieval||{};
+    const gen=j.generation||{};
     const echo=j.retrieval?[
-      rt.preset?`preset ${esc(rt.preset)}`:"",
-      `rerank ${rt.rerank_top_k??"—"}`,
+      rt.preset?`preset ${rt.preset}`:(rt.auto_preset===false?"base config":""),
+      `rerank ${rt.rerank_mode||"config"} · top ${rt.rerank_top_k??"—"}`,
+      rt.reranker_model?`model ${rt.reranker_model}`:"",
       (rt.dense_top_k||rt.sparse_top_k)?`dense ${rt.dense_top_k} · sparse ${rt.sparse_top_k}`:"",
       `hyde ${rt.hyde_used?"on":"off"}`,`hype ${rt.hype?"on":"off"}`,
       rt.live_hits?`${rt.live_hits} live hit(s)`:"",
+      gen.backend||gen.model?`${gen.backend||gen.protocol} / ${gen.model||"default model"}`:"",
     ].filter(Boolean).join(" · "):"";
-    state.lastQ={q,answer:j.answer,confidence:j.confidence,echo,sources:j.sources||j.results||[]};
+    state.lastQ={q,answer:j.answer,confidence:j.confidence,echo,generation:gen,
+      sources:j.sources||j.results||[]};
     renderResult();
   }catch(e){$("#q-out").innerHTML=`<div class="empty" style="color:var(--red)">${esc(e.message)}</div>`}
-  $("#q-busy").style.display="none";
+  finally{setQueryBusy(false)}
 }
 $("#q-ask").onclick=()=>runQuery(false);
 $("#q-search").onclick=()=>runQuery(true);
+$("#q-compare-run").onclick=runComparison;
+$("#q-catalog-retry").onclick=loadQueryCatalogs;
+$("#q-compare-dim").onchange=renderCompareChoices;
+$("#q-compare-mode").onchange=renderCompareChoices;
 /* Submit from the composer. Ctrl/Cmd+Enter is the convention for a multi-line
    box where plain Enter has to stay a newline; Shift picks the cheap lane. */
 $("#q-text").addEventListener("keydown",e=>{
@@ -2670,23 +3032,28 @@ function renderProviders(s){
   if(!list.length){box.innerHTML="";return}
   const rows=list.map(p=>{
     const keyed=!!p.api_key_env;
+    const incompatible=keyed&&p.key_present&&p.key_compatible===false;
     const status=!keyed
       ?`<span class="hint" style="margin:0">keyless</span>`
-      :(p.key_present
+      :(incompatible
+        ?`<span class="pill failed" title="A credential exists, but it is not the key type this provider requires">${esc(p.api_key_env)} wrong key type</span>`
+        :(p.key_present
         ?`<span class="pill done">${esc(p.api_key_env)} set</span>`
-        :`<span class="pill${p.key_optional?"":" failed"}">${esc(p.api_key_env)} ${p.key_optional?"unset (optional)":"NOT set"}</span>`);
+        :`<span class="pill${p.key_optional?"":" failed"}">${esc(p.api_key_env)} ${p.key_optional?"unset (optional)":"NOT set"}</span>`));
     /* The key box writes into .env and is never read back — /api/settings
        reports only whether the variable is set, never its value. */
     const keyBox=keyed?`<div class="row" style="margin-top:6px;flex-wrap:nowrap;gap:6px">
         <input type="password" id="key-${esc(p.api_key_env)}" spellcheck="false" autocomplete="off"
-               placeholder="${p.key_present?"replace "+esc(p.api_key_env):"paste "+esc(p.api_key_env)}"
+               placeholder="${incompatible?"replace incompatible credential":(p.key_present?"replace "+esc(p.api_key_env):"paste "+esc(p.api_key_env))}"
                style="flex:1;min-width:120px"
                title="Written to .env (gitignored). Never displayed again — leave blank and press Save key to clear it.">
         <button class="btn pv-key-save" data-env="${esc(p.api_key_env)}" title="Write this key into .env and apply it to this console now">Save key</button>
       </div>`:"";
     return `<div class="vault-row pv-row" data-provider="${esc(p.name)}" style="align-items:flex-start">
       <div style="flex:1;min-width:0">
-        <span class="nm">${esc(p.name)}</span><span class="pv-state"></span>
+        <span class="nm">${esc(p.label||p.name)}</span>
+        ${p.label&&p.label!==p.name?`<code style="margin-left:5px">${esc(p.name)}</code>`:""}<span class="pv-state"></span>
+        ${p.description?`<div class="hint" style="margin:3px 0 0">${esc(p.description)}</div>`:""}
         <div class="pth">${esc(p.base_url||"(sdk default)")} · ${esc(p.model||"—")} · ${esc(p.kind)}</div>
         ${keyBox}
       </div>
@@ -2776,18 +3143,30 @@ function qhRender(){
 }
 function saveQueryHistory(q){
   const entry={q,preset:$("#q-preset").value,topk:$("#q-topk").value,densek:$("#q-densek").value,
-    sparsek:$("#q-sparsek").value,maxtok:$("#q-maxtok").value,hyde:$("#q-hyde").checked,
-    hype:$("#q-hype").checked,omni:$("#q-omni").checked,rerank:$("#q-rerank").value,
+    sparsek:$("#q-sparsek").value,maxtok:$("#q-maxtok").value,hyde:$("#q-hyde").value,
+    hype:$("#q-hype").value,omni:$("#q-omni").value,rerank:$("#q-rerank").value,
     parent:$("#q-parent").value,neigh:$("#q-neigh").value,at:Date.now()};
   const h=qhLoad().filter(e=>e.q!==q);h.unshift(entry);
   localStorage.setItem("ledger-qhistory",JSON.stringify(h.slice(0,20)));qhRender();
 }
+function qhTriState(v){
+  if(v==="on"||v==="off"||v==="")return v;
+  /* Entries saved before tri-state controls used booleans. Preserve exactly
+     what those old requests sent instead of turning false into "unset". */
+  if(typeof v==="boolean")return v?"on":"off";
+  return "";
+}
 $("#q-history").onchange=e=>{
   const h=qhLoad(),i=+e.target.value;if(Number.isNaN(i)||!h[i])return;
   const s=h[i];
-  $("#q-text").value=s.q;$("#q-preset").value=s.preset||"";$("#q-topk").value=s.topk||"";
+  $("#q-text").value=s.q;
+  const preset=s.preset||"",presetSelect=$("#q-preset");
+  if(preset&&![...presetSelect.options].some(o=>o.value===preset))
+    presetSelect.insertAdjacentHTML("beforeend",`<option value="${esc(preset)}">${esc(preset)} · history (not in live catalog)</option>`);
+  presetSelect.value=preset;
+  $("#q-topk").value=s.topk||"";
   $("#q-densek").value=s.densek||"";$("#q-sparsek").value=s.sparsek||"";$("#q-maxtok").value=s.maxtok||"";
-  $("#q-hyde").checked=!!s.hyde;$("#q-hype").checked=!!s.hype;$("#q-omni").checked=!!s.omni;
+  $("#q-hyde").value=qhTriState(s.hyde);$("#q-hype").value=qhTriState(s.hype);$("#q-omni").value=qhTriState(s.omni);
   $("#q-rerank").value=s.rerank||"";$("#q-parent").value=s.parent||"";$("#q-neigh").value=s.neigh||"";
   e.target.value="";toast("Restored query + knobs from history");
 };
@@ -2817,6 +3196,7 @@ $("#rag-restart").onclick=async()=>{
 /* ---------- boot ---------- */
 (async()=>{
   try{const s=await api("/api/settings");state.ragApi=s.rag_api;state.jsonls=s.jsonl_files;state.vaultPath=s.vault_path}catch(e){}
+  loadQueryCatalogs();
   loadOverview();loadFacets();loadInbox();loadConverted();
   state.timers.tab=setInterval(loadOverview,10000);
 })();

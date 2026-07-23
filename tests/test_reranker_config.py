@@ -15,7 +15,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest
 
-from src.retrieval.reranker import KNOWN_RERANKERS, Reranker
+from src.retrieval.reranker import (
+    KNOWN_RERANKERS,
+    Reranker,
+    RerankerExecutionError,
+)
 from src.retrieval.retriever import RetrievedDoc
 from src.utils.config_loader import Config
 
@@ -65,6 +69,27 @@ def test_known_rerankers_are_well_formed():
     for model_id, spec in KNOWN_RERANKERS.items():
         assert spec.get("label"), f"{model_id} has no label"
         assert isinstance(spec.get("max_length"), int)
+        assert isinstance(spec.get("context_length"), int)
+        assert 0 < spec["max_length"] <= spec["context_length"]
+
+
+def test_bge_base_rejects_length_above_its_context():
+    valid = Reranker(model_name="BAAI/bge-reranker-base", max_length=512)
+    assert valid.max_length == 512
+
+    with pytest.raises(ValueError, match=(
+        r"cross_encoder_max_length=1024 exceeds "
+        r"'BAAI/bge-reranker-base'.*512-token context limit"
+    )):
+        Reranker(model_name="BAAI/bge-reranker-base", max_length=1024)
+
+
+def test_bge_v2_m3_allows_its_longer_context():
+    valid = Reranker(model_name="BAAI/bge-reranker-v2-m3", max_length=8192)
+    assert valid.max_length == 8192
+
+    with pytest.raises(ValueError, match="8192-token context limit"):
+        Reranker(model_name="BAAI/bge-reranker-v2-m3", max_length=8193)
 
 
 def test_bad_mode_is_rejected():
@@ -142,7 +167,9 @@ def test_http_mode_rejects_a_partial_scoring(monkeypatch):
     monkeypatch.setattr(httpx, "post", lambda *a, **k: FakeResp(
         {"results": [{"index": 0, "relevance_score": 0.7}]}))
     r = Reranker(model_name="x", mode="http", http_url="http://h/v1")
-    with pytest.raises(ValueError, match="did not score every document"):
+    with pytest.raises(
+        RerankerExecutionError, match="did not score every document"
+    ):
         r.rerank("q", docs("a", "b", "c"))
 
 
@@ -150,7 +177,9 @@ def test_http_mode_rejects_a_malformed_response(monkeypatch):
     import httpx
     monkeypatch.setattr(httpx, "post", lambda *a, **k: FakeResp({"data": []}))
     r = Reranker(model_name="x", mode="http", http_url="http://h/v1")
-    with pytest.raises(ValueError, match="unexpected /rerank response"):
+    with pytest.raises(
+        RerankerExecutionError, match="unexpected /rerank response"
+    ):
         r.rerank("q", docs("a"))
 
 
@@ -171,3 +200,54 @@ def test_per_call_mode_override_still_works():
     r = Reranker(model_name="BAAI/bge-reranker-v2-m3", mode="cross_encoder")
     r.rerank("beta", d, mode="lexical")          # must not load the big model
     assert r._model is None
+
+
+def test_cross_encoder_predict_failure_has_a_clear_typed_error():
+    class BrokenModel:
+        def predict(self, pairs):
+            assert len(pairs) == 2
+            raise RuntimeError("index 514 is out of bounds")
+
+    r = Reranker(model_name="BAAI/bge-reranker-base", max_length=512)
+    r._model = BrokenModel()
+
+    with pytest.raises(RerankerExecutionError, match=(
+        r"BAAI/bge-reranker-base.*2 candidate\(s\).*max_length=512.*"
+        r"index 514 is out of bounds"
+    )) as exc:
+        r.rerank("docker detached mode", docs("first", "second"))
+
+    assert isinstance(exc.value.__cause__, RuntimeError)
+
+
+def test_cross_encoder_load_failure_has_the_same_typed_error(monkeypatch):
+    reranker = Reranker(
+        model_name="BAAI/bge-reranker-base",
+        max_length=512,
+    )
+
+    def fail_to_load():
+        raise OSError("model cache is unavailable")
+
+    monkeypatch.setattr(reranker, "_get_model", fail_to_load)
+
+    with pytest.raises(
+        RerankerExecutionError,
+        match=r"failed while loading or scoring.*model cache is unavailable",
+    ) as exc:
+        reranker.rerank("question", docs("candidate"))
+
+    assert isinstance(exc.value.__cause__, OSError)
+
+
+def test_management_settings_reject_known_model_context_overflow(
+        management_module):
+    management = management_module
+
+    response = management.settings_update(management.SettingsIn(changes={
+        "retrieval.cross_encoder_model": "BAAI/bge-reranker-base",
+        "retrieval.cross_encoder_max_length": "1024",
+    }))
+
+    assert response.status_code == 400
+    assert b"512-token context limit" in response.body

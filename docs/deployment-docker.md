@@ -1,12 +1,13 @@
 # Docker deployment
 
-Run the whole system on another machine with **two commands** — no Python, no venv, no
-path surgery. Docker Compose brings up both services plus a generation backend, all
-bound to `127.0.0.1` (nothing is exposed to your network).
+Run the whole system on another machine from the packaged `rag-docker-bundle` tree
+with **two commands** — no Python, no venv, no path surgery. A plain source clone does
+not contain the Compose/Dockerfile scaffold. Docker Compose brings up both services
+plus a generation backend, all bound to `127.0.0.1`.
 
 - **Query API** → `http://127.0.0.1:8051`
 - **Corpus Ledger console** → `http://127.0.0.1:8052`
-- **Generation backend** (OpenAI-compatible) → `http://127.0.0.1:3001`
+- **Bundled generation backend** (when enabled) → `http://127.0.0.1:3001`
 
 ## What's in the bundle
 
@@ -27,7 +28,8 @@ volumes, not baked into the image, so `docker compose build` stays fast.
 
 ## Prerequisite
 
-Install **Docker Desktop** and start it once.
+Install **Docker Desktop**, start it once, and unpack a private or public Docker
+bundle produced by the release packaging workflow.
 
 ## Start it
 
@@ -36,8 +38,8 @@ docker compose up --build -d
 docker compose logs -f rag      # watch startup
 ```
 
-First run builds the image and, on the first query, downloads the embedding + rerank
-models (~150 MB, cached forever after). Wait until:
+First run builds the image and, on the first query, downloads the configured embedding
+and rerank models into the persistent cache. Wait until:
 
 ```bash
 curl -fsS http://127.0.0.1:8051/health   # -> {"ready": true}
@@ -45,10 +47,17 @@ curl -fsS http://127.0.0.1:8051/health   # -> {"ready": true}
 
 ## Point it at a model
 
-The generation backend needs a model provider. Open **http://127.0.0.1:3001** and add
-your key once (it's stored encrypted in the backend's own volume). Prefer a cloud key
-instead? Edit `config.docker.yaml` → `generation.base_url` (and the key) and drop the
-generation service. Retrieval-only (`/search`) needs no model at all.
+Generation resolves through the `providers:` registry in `config.docker.yaml`. Select
+one with `generation.provider`, keep its secret in the environment variable named by
+`api_key_env`, and restart the query service. `GET /providers` shows the active backend
+and whether each configured credential is present and type-compatible, without
+returning secret values.
+
+The bundled local backend can still be managed at **http://127.0.0.1:3001**. For a
+cloud provider, add or select its registry entry and pass the declared secret through
+Compose `.env`; do not put a key in YAML. The MiniMax M3 Token Plan entry expects a
+subscription key beginning `sk-cp-`, not a pay-as-you-go `sk-api-` key. Retrieval-only
+(`/search`) needs no generation provider at all.
 
 ## Mount your vault (optional but recommended)
 

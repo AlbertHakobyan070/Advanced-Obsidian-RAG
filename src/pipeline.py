@@ -88,7 +88,12 @@ class RAGPipeline:
             neighbor_ctx=NeighborContext.from_config(cfg),
         )
 
-    def _resolve_overrides(self, question: str, preset: str | None) -> tuple[dict, str | None]:
+    def _resolve_overrides(
+        self,
+        question: str,
+        preset: str | None,
+        auto_preset: bool = True,
+    ) -> tuple[dict, str | None]:
         """
         Pick the override bundle for this query.
 
@@ -103,7 +108,7 @@ class RAGPipeline:
                     f"Unknown preset {preset!r}. Available: {sorted(self.presets)}"
                 )
             return dict(self.presets[preset]), preset
-        signal = self.hyde.code_intent_signal(question)
+        signal = self.hyde.code_intent_signal(question) if auto_preset else None
         if signal and "code" in self.presets:
             log.info("auto-applying 'code' preset (signal %r)", signal)
             return dict(self.presets["code"]), "code (auto)"
@@ -122,6 +127,7 @@ class RAGPipeline:
         neighbor_context: bool | None = None,
         hype: bool | None = None,
         rerank: str | None = None,
+        auto_preset: bool = True,
     ) -> tuple[list, dict]:
         """
         Retrieval only — everything query() does EXCEPT generation. Returns
@@ -139,10 +145,13 @@ class RAGPipeline:
           parent_context / neighbor_context
                       True/False forces the E2 small-to-big lanes on/off
                       (beats preset, which beats the config default)
+          auto_preset False disables the implicit code preset, giving compare
+                      calls an explicit config-only baseline
         """
         log.info("=== SEARCH: %s", question)
 
-        overrides, preset_label = self._resolve_overrides(question, preset)
+        overrides, preset_label = self._resolve_overrides(
+            question, preset, auto_preset=auto_preset)
         k = top_k or overrides.get("rerank_top_k") or self.rerank_top_k
         # Per-lane pool sizes: explicit per-call beats preset beats config default.
         dk = dense_top_k if dense_top_k is not None else overrides.get("dense_top_k")
@@ -189,6 +198,7 @@ class RAGPipeline:
 
         info = {
             "preset": preset_label,
+            "auto_preset": bool(auto_preset),
             "rerank_top_k": k,
             "dense_top_k": dk or self.retriever.dense_top_k,
             "sparse_top_k": sk or self.retriever.sparse_top_k,
@@ -209,6 +219,16 @@ class RAGPipeline:
             "hype": bool(use_hype if use_hype is not None
                          else self.retriever.hype_enabled),
             "rerank_mode": (rerank_mode or self.reranker.mode),
+            "reranker_model": (
+                self.reranker.model_name
+                if (rerank_mode or self.reranker.mode) == "cross_encoder"
+                else None
+            ),
+            "reranker_max_length": (
+                self.reranker.max_length
+                if (rerank_mode or self.reranker.mode) == "cross_encoder"
+                else None
+            ),
         }
         return top, info
 
@@ -226,6 +246,7 @@ class RAGPipeline:
         hype: bool | None = None,
         rerank: str | None = None,
         max_tokens: int | None = None,
+        auto_preset: bool = True,
     ) -> Answer:
         """
         Run the full RAG path (search + grounded generation). All knobs are
@@ -238,7 +259,7 @@ class RAGPipeline:
             dense_top_k=dense_top_k, sparse_top_k=sparse_top_k,
             hyde=hyde, omnisearch=omnisearch,
             parent_context=parent_context, neighbor_context=neighbor_context,
-            hype=hype, rerank=rerank,
+            hype=hype, rerank=rerank, auto_preset=auto_preset,
         )
         answer = self.generator.generate(question, top, max_tokens=max_tokens)
         answer.retrieval = info

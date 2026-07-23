@@ -68,7 +68,7 @@ RAG_API = CFG.get("webui.rag_api", "http://127.0.0.1:8051")
 COLLECTION = CFG.get("paths.collection_name", "obsidian_vault")
 PAGE = 5000                      # ChromaDB paging batch (see module docstring)
 
-app = FastAPI(title="Personal RAG — Management Console", version="0.1.0")
+app = FastAPI(title="Personal RAG — Management Console", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
@@ -1748,9 +1748,10 @@ def _provider_choices(disk_cfg) -> tuple[list[str], list[dict]]:
     reserved legacy names, so the dropdown can never strand an existing config
     on a value it cannot re-select.
 
-    details carries `key_present` — whether the env var each provider names is
-    actually set — because "I switched to MiniMax and it 500s" is almost always
-    an unset key. The key VALUE is never read or returned, only its presence.
+    details carries `key_present` and `key_compatible` — whether the env var
+    each provider names is set and, when the provider declares a required
+    prefix, whether it is the right credential type.  The key VALUE is never
+    returned.
     """
     from src.llm.llm_client import LLMClient
 
@@ -1760,14 +1761,28 @@ def _provider_choices(disk_cfg) -> tuple[list[str], list[dict]]:
     for name in names:
         spec = registry[name] or {}
         env = spec.get("api_key_env")
+        value = os.environ.get(env, "") if env else ""
+        prefix = str(spec.get("api_key_prefix") or "")
+        present = bool(value) if env else True
+        compatible = (not prefix or value.startswith(prefix)) if present else None
+        optional = bool(spec.get("api_key_optional"))
+        available = bool(
+            (not env)
+            or (not present and optional)
+            or (present and compatible is not False)
+        )
         details.append({
             "name": name,
+            "label": spec.get("label") or name,
+            "description": spec.get("description"),
             "kind": spec.get("kind", "openai"),
             "base_url": spec.get("base_url"),
             "model": spec.get("model"),
             "api_key_env": env,
-            "key_optional": bool(spec.get("api_key_optional")),
-            "key_present": bool(os.environ.get(env)) if env else True,
+            "key_optional": optional,
+            "key_present": present,
+            "key_compatible": compatible,
+            "available": available,
         })
     return names + list(LLMClient.RESERVED_PROVIDERS), details
 
@@ -1986,19 +2001,71 @@ def settings_update(body: SettingsIn) -> dict:
     # id to the NEW endpoint, which fails at call time with a confusing 4xx.
     # Carry the new provider's default model along unless the caller set one.
     new_provider = changes.get("generation.provider")
-    if new_provider and "generation.model" not in changes:
+    if new_provider:
         spec = (disk_cfg.get("providers", {}) or {}).get(new_provider) or {}
-        default_model = spec.get("model")
-        if default_model and default_model != disk_cfg.get("generation.model"):
-            changes["generation.model"] = str(default_model)
-            restarts.add(EDITABLE_SETTINGS["generation.model"]["restart"])
-            notes.append(f"generation.model set to {default_model!r} to match "
-                         f"provider {new_provider!r}")
+        if "generation.model" not in changes:
+            default_model = spec.get("model")
+            if default_model and default_model != disk_cfg.get("generation.model"):
+                changes["generation.model"] = str(default_model)
+                restarts.add(EDITABLE_SETTINGS["generation.model"]["restart"])
+                notes.append(
+                    f"generation.model set to {default_model!r} to match "
+                    f"provider {new_provider!r}")
         env = spec.get("api_key_env")
-        if env and not spec.get("api_key_optional") and not os.environ.get(env):
-            notes.append(f"WARNING: {env} is not set in this environment — "
-                         f"{new_provider} will fail until you export it "
-                         f"(or add it to .env)")
+        if env:
+            key_value = os.environ.get(env, "")
+            expected_prefix = str(spec.get("api_key_prefix") or "")
+            if not key_value and not spec.get("api_key_optional"):
+                notes.append(f"WARNING: {env} is not set in this environment — "
+                             f"{new_provider} will fail until you export it "
+                             f"(or add it to .env)")
+            elif expected_prefix and not key_value.startswith(expected_prefix):
+                notes.append(
+                    f"WARNING: {env} has the wrong credential type for "
+                    f"{new_provider}; it must begin with {expected_prefix!r}")
+
+    # A known cross-encoder's hard context window is not a performance hint:
+    # sentence-transformers can accept a larger configured max_length and then
+    # fail inside the model with an opaque position-embedding IndexError. Catch
+    # that invalid pair before it is persisted and before :8051 is restarted.
+    reranker_keys = {
+        "retrieval.cross_encoder_model",
+        "retrieval.cross_encoder_max_length",
+    }
+    if reranker_keys.intersection(changes):
+        from src.retrieval.reranker import KNOWN_RERANKERS
+
+        model = str(changes.get(
+            "retrieval.cross_encoder_model",
+            disk_cfg.get("retrieval.cross_encoder_model"),
+        ))
+        raw_length = changes.get(
+            "retrieval.cross_encoder_max_length",
+            disk_cfg.get("retrieval.cross_encoder_max_length"),
+        )
+        try:
+            max_length = int(raw_length)
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"ok": False,
+                 "error": "retrieval.cross_encoder_max_length must be an integer"},
+                status_code=400,
+            )
+        if max_length < 1:
+            return JSONResponse(
+                {"ok": False,
+                 "error": "retrieval.cross_encoder_max_length must be positive"},
+                status_code=400,
+            )
+        known = KNOWN_RERANKERS.get(model)
+        if known and max_length > int(known["context_length"]):
+            return JSONResponse(
+                {"ok": False,
+                 "error": "retrieval.cross_encoder_max_length="
+                          f"{max_length} exceeds {model!r}'s "
+                          f"{known['context_length']}-token context limit"},
+                status_code=400,
+            )
 
     if not changes:
         return {"ok": True, "written": [], "note": "nothing changed"}
@@ -2094,6 +2161,18 @@ def provider_key(body: ProviderKeyIn) -> dict:
     if any(c in value for c in "\r\n"):
         return JSONResponse({"ok": False, "error": "key contains a newline"},
                             status_code=400)
+    expected_prefix = None
+    for spec in (disk_cfg.get("providers", {}) or {}).values():
+        spec = spec or {}
+        if spec.get("api_key_env") == name and spec.get("api_key_prefix"):
+            expected_prefix = str(spec["api_key_prefix"])
+            break
+    if value and expected_prefix and not value.startswith(expected_prefix):
+        return JSONResponse(
+            {"ok": False,
+             "error": f"{name} has the wrong key type; this provider expects "
+                      f"a key beginning with {expected_prefix!r}"},
+            status_code=400)
     try:
         action = _write_env_var(_env_file(), name, value)
     except OSError as e:
@@ -2645,8 +2724,10 @@ def api_schema() -> dict:
 
     Every operation carries a `permission` tier the calling agent MUST honor:
       * read       — safe, no confirmation needed (stats, search, status, logs)
-      * mutating   — changes the index; ask the author first (ingest/append/retag/OCR)
-      * destructive— removes content; ALWAYS confirm with the author, echo exactly
+      * mutating   — changes local state or invokes a potentially billed
+                     external action; ask the operator first
+                     (config/secrets/ingest/append/retag/OCR warm)
+      * destructive— removes content; ALWAYS confirm with the operator, echo exactly
                      what will be deleted, and never run unprompted.
     This is a POLICY the agent enforces (the local API has no auth) — the tiers
     exist so a toolkit/skill can gate calls. See the rag-ops skill.
@@ -2658,7 +2739,8 @@ def api_schema() -> dict:
         "query_api": RAG_API,
         "permission_tiers": {
             "read": "safe; no confirmation",
-            "mutating": "changes the index; ask the author before running",
+            "mutating": "changes local state or invokes an external action; "
+                        "ask the operator before running",
             "destructive": "removes content; ALWAYS confirm, echo the exact "
                            "targets, never run unprompted",
         },
@@ -2666,6 +2748,9 @@ def api_schema() -> dict:
                   "Restart serve_api (:8051) after any index change so the warm "
                   "pipeline reloads.",
         "endpoints": {
+            "GET /api/schema": {
+                "permission": "read",
+                "purpose": "this machine-readable management capability map"},
             "GET /api/overview": {
                 "permission": "read",
                 "purpose": "corpus summary: chunk/doc counts, per-domain + "
@@ -2764,6 +2849,13 @@ def api_schema() -> dict:
                 "purpose": "serve one staged/inbox .md or .pdf for preview "
                            "(pdf shows page numbers -> pick OCR page ranges)",
                 "query": {"name": "plain filename", "where": "converted|inbox"}},
+            "GET /api/import/ocr_scan": {
+                "permission": "read",
+                "purpose": "inspect a staged PDF and report which pages appear "
+                           "to need OCR before conversion or ingest",
+                "query": {"name": "plain PDF filename",
+                          "where": "converted|inbox",
+                          "limit": "<=400 pages"}},
             "GET /api/browse": {
                 "permission": "read",
                 "purpose": "one level of the local filesystem, folders only "
@@ -2806,13 +2898,32 @@ def api_schema() -> dict:
                            "the embedding model needs a FULL RE-EMBED (ask "
                            "the operator).",
                 "body": {"changes": "{dotted.key: value} from GET editable"}},
+            "POST /api/providers/key": {
+                "permission": "mutating",
+                "purpose": "set or clear one api_key_env already named by the "
+                           "provider registry. Writes .env, never returns the "
+                           "secret, and rejects declared credential-prefix "
+                           "mismatches.",
+                "body": {"env": "configured environment-variable name",
+                         "value": "secret value, or blank to clear"}},
+            "GET /api/ocr/status": {
+                "permission": "read",
+                "purpose": "resolved Tesseract/VLM OCR capability, model "
+                           "reachability, and active OCR configuration"},
+            "POST /api/ocr/warm": {
+                "permission": "mutating",
+                "purpose": "send one tiny image request to the configured VLM "
+                           "OCR endpoint so readiness can be verified before a "
+                           "large ingest job; may allocate or bill the model"},
             "POST /api/service/restart": {
                 "permission": "mutating",
                 "purpose": "kill + relaunch the warm query API (:8051) so it "
                            "serves the current indexes. /health flips ready "
-                           "after ~1-3 min. Windows lane only (Docker: restart "
-                           "the container). webui.auto_restart_rag=true does "
-                           "this automatically after index-changing jobs."},
+                           "after model/index loading. Native Windows and POSIX "
+                           "hosts are supported; a containerized deployment "
+                           "should restart the service/container. "
+                           "webui.auto_restart_rag=true does this automatically "
+                           "after index-changing jobs."},
             "POST /api/jobs": {
                 "permission": "mutating",
                 "purpose": "queue a job. Kinds + params under `job_kinds` below.",
