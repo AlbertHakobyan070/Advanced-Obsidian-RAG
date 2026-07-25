@@ -1,9 +1,9 @@
 # Advanced Obsidian RAG
 
 **Grounded, cited question-answering over a large personal Obsidian vault** — built
-for real interview and exam preparation, where a wrong-but-confident answer is worse
+for all sorts of RAG use-cases, where a wrong-but-confident answer is worse
 than none. Ask a question in your own words and get an answer assembled *only* from
-your own notes, textbooks, homework and notebooks, with inline `[n]` citations and a
+your own notes, books, md, pdf, codes and notebooks, with inline `[n]` citations and a
 per-answer confidence line.
 
 <p>
@@ -15,9 +15,9 @@ per-answer confidence line.
 <img alt="Local first" src="https://img.shields.io/badge/Runs-Free%20%2F%20Local-2ea44f">
 </p>
 
-> **Scale:** a mixed corpus of markdown lecture notes, textbooks, lecture PDFs,
-> passed homework, Jupyter/R notebooks and scripts, and OCR'd scanned books, all
-> served from prebuilt local indexes on a laptop. `GET /stats` reports the live
+> **Scale:** a mixed corpus of markdown notes, textbooks, lecture PDFs
+> Jupyter/R notebooks and scripts, and OCR'd scanned books, all
+> served from prebuilt local indexes on a laptop or PC. `GET /stats` reports the live
 > corpus shape instead of relying on a copied snapshot that goes stale.
 >
 > **Runs entirely on free / local infrastructure:** CPU embeddings, on-disk vector +
