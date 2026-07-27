@@ -1,8 +1,8 @@
-# Advanced Obsidian RAG
+# Noetrix
 
 **Grounded, cited question-answering over your own documents.** Point it at a
-folder — an Obsidian vault, a research library, a docs tree, a pile of scanned
-PDFs — and ask questions in plain language. Answers are assembled *only* from
+folder: a notes vault, a research library, a docs tree, a pile of scanned PDFs.
+Ask questions in plain language and answers are assembled *only* from
 what you indexed, with inline `[n]` citations and a per-answer confidence line.
 When your corpus is silent on something, it says so instead of inventing.
 
@@ -38,9 +38,9 @@ management console, an agent-facing HTTP API, and a reproducible evaluation
 suite.
 
 It reads Markdown, PDFs (including scanned ones, via OCR), Jupyter/R notebooks,
-source code in most languages, and Office documents. Obsidian is the reference
-case — wikilinks and frontmatter are understood natively — but nothing requires
-it. A directory of files is enough.
+source code in most languages, and Office documents. Wikilinks and YAML
+frontmatter are understood natively, so a Markdown knowledge base drops straight
+in, but nothing is required beyond a directory of files.
 
 ## How a query flows
 

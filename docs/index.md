@@ -1,16 +1,16 @@
-# Advanced Obsidian RAG
+# Noetrix
 
 **Grounded, cited question-answering over your own documents.**
 
-Point it at a folder — an Obsidian vault, a research library, a documentation
-tree, a pile of scanned PDFs — and ask questions in plain language. Answers are
+Point it at a folder: a notes vault, a research library, a documentation tree,
+a pile of scanned PDFs. Ask questions in plain language. Answers are
 assembled *only* from what you indexed, with inline `[n]` citations and a
 per-answer confidence line. When your corpus is silent on something, it says so
 rather than inventing an answer.
 
 !!! quote "At a glance"
-    - **Reads what you already have**: Markdown (Obsidian wikilinks and
-      frontmatter included), PDFs — scanned ones too, via OCR — Jupyter and R
+    - **Reads what you already have**: Markdown (wikilinks and YAML
+      frontmatter included), PDFs (scanned ones too, via OCR), Jupyter and R
       notebooks, source code in most languages, and Office documents.
     - **Free / local by default**: CPU embeddings, on-disk vector and sparse
       indexes, no managed service. Generation is the only part that can be

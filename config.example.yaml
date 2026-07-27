@@ -10,7 +10,7 @@ parser:
   # ${NAME} or ${NAME:-default} — useful for containers, where the vault path
   # has to match a bind-mount. An unset ${NAME} stays literal rather than
   # becoming "", which would point the parser at the filesystem root.
-  vault_path: "path/to/your/obsidian/vault"
+  vault_path: "path/to/your/documents"
   max_chunk_size: 3000
   min_chunk_size: 200
   overlap_size: 150

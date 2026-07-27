@@ -228,7 +228,7 @@ Open **http://127.0.0.1:8052**. Tabs:
 
 - **Query** — Ask / Search with every knob in labeled groups (pool sizes, extra lanes
   HyDE/HyPE/Omnisearch, rerank method, E2 parents/neighbors), plus copy and `.md` export
-  (Obsidian-ready). The Markdown + LaTeX **Preview** toggle renders the answer *and every
+  (ready to paste into any Markdown editor). The Markdown + LaTeX **Preview** toggle renders the answer *and every
   source chunk* — math, tables and fenced code included. Its **Query comparison tree**
   fans the current question across live-config presets and generation backends or the
   built-in rerank baselines, with evidence-only and generated-answer modes.
@@ -260,7 +260,7 @@ Open **http://127.0.0.1:8052**. Tabs:
   export the active theme as CSS variables, tweak, save under a name, rename or delete
   from its chip; **font pickers** for headings / body / mono (system serif and sans
   choices like Times New Roman, Georgia, Arial — or any installed font by name; applied
-  over every theme, browser-local); an Obsidian-style **vault switcher** that remembers
+  over every theme, browser-local); a **vault switcher** that remembers
   every vault ever opened together with its own path/index settings and swaps the whole
   set atomically; and the editable config surface with **📁 folder pickers**: vault root,
   Chroma / BM25 / chunks paths, embedding + cross-encoder models, default rerank &

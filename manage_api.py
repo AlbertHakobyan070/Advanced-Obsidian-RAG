@@ -1,5 +1,5 @@
 """
-manage_api.py — Corpus management console (backend) for Advanced Obsidian RAG.
+manage_api.py — Corpus management console (backend) for Noetrix.
 
 Everything serve_api.py deliberately is NOT: ingest, index, OCR passes,
 document search/inspection, deletion, uploads — driven from a browser at
@@ -49,6 +49,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
+from src.utils.branding import CONSOLE_API_TITLE, CONSOLE_SERVICE
 from src.utils.config_loader import Config, load_config
 from src.utils.logger import configure_logging, get_logger
 
@@ -68,7 +69,7 @@ RAG_API = CFG.get("webui.rag_api", "http://127.0.0.1:8051")
 COLLECTION = CFG.get("paths.collection_name", "obsidian_vault")
 PAGE = 5000                      # ChromaDB paging batch (see module docstring)
 
-app = FastAPI(title="Advanced Obsidian RAG — Management Console", version="0.2.0")
+app = FastAPI(title=CONSOLE_API_TITLE, version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
@@ -1677,7 +1678,7 @@ def vault_search(q: str, limit: int = 60) -> dict:
 # none of it hot-applies — the response says which services need a restart.
 EDITABLE_SETTINGS: dict[str, dict] = {
     "parser.vault_path":            {"kind": "dir",  "restart": ":8051 + :8052",
-                                     "label": "Obsidian vault root"},
+                                     "label": "Vault / documents root"},
     "paths.chunks_file":            {"kind": "str",  "restart": ":8052",
                                      "label": "Markdown chunks JSONL (data dir anchor)"},
     "paths.chroma_dir":             {"kind": "str",  "restart": ":8051 + :8052",
@@ -2661,7 +2662,7 @@ def browse(path: str = "") -> dict:
     return {"path": str(p), "parent": parent, "sep": os.sep, "dirs": dirs}
 
 
-# ---- vault switcher (Obsidian-style: every vault ever opened stays listed,
+# ---- vault switcher (every vault ever opened stays listed,
 #      and each vault remembers its own index/path settings) ----
 
 # The per-vault settings snapshot: everything that must travel WITH a vault.
@@ -2755,7 +2756,7 @@ def vaults_list() -> dict:
 def vaults_switch(body: VaultSwitchIn) -> dict:
     """
     Switch the console (and, after restarts, the whole RAG) to another vault.
-    Obsidian-style: the CURRENT vault's settings are snapshotted into the
+    The CURRENT vault's settings are snapshotted into the
     registry first, then the target's last-known settings are restored — or,
     for a never-seen vault, a fresh per-vault index trio is scaffolded next to
     the current one (empty corpus is a valid state; ingest fills it).
@@ -3080,7 +3081,7 @@ def api_schema() -> dict:
     exist so a toolkit/skill can gate calls. See the rag-ops skill.
     """
     return {
-        "service": "advanced-obsidian-rag-console",
+        "service": CONSOLE_SERVICE,
         "version": app.version,
         "base_url": f"http://127.0.0.1:{CFG.get('webui.port', 8052)}",
         "query_api": RAG_API,
@@ -3209,7 +3210,7 @@ def api_schema() -> dict:
                            "('' = drives) — powers the Settings path pickers"},
             "GET /api/vaults": {
                 "permission": "read",
-                "purpose": "vault registry (Obsidian-style): every vault ever "
+                "purpose": "vault registry: every vault ever "
                            "opened, with labels + which one is active"},
             "POST /api/vaults/switch": {
                 "permission": "mutating",

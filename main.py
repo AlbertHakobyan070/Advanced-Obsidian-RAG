@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-main.py — CLI entry point for Advanced Obsidian RAG.
+main.py — CLI entry point for Noetrix.
 
     python main.py index                      # build dense + sparse indexes from chunks.jsonl
     python main.py query "What is ARIMA?"      # one-shot question
@@ -317,7 +317,7 @@ def cmd_chat(args):
     from src.pipeline import RAGPipeline
 
     rag = RAGPipeline.from_config(cfg)
-    print("Advanced Obsidian RAG — interactive mode. Type 'exit' or Ctrl-C to quit.\n")
+    print("Noetrix — interactive mode. Type 'exit' or Ctrl-C to quit.\n")
     try:
         while True:
             q = input("❓ ").strip()

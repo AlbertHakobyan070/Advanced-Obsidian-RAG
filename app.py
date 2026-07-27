@@ -1,5 +1,5 @@
 """
-app.py — Streamlit interface for Advanced Obsidian RAG.
+app.py — Streamlit interface for Noetrix.
 
     streamlit run app.py      (or: python main.py serve)
 
@@ -21,7 +21,7 @@ import streamlit as st
 from src.pipeline import RAGPipeline
 from src.utils.config_loader import load_config, persist_config_values
 
-st.set_page_config(page_title="Advanced Obsidian RAG", page_icon="📚", layout="wide")
+st.set_page_config(page_title="Noetrix", page_icon="📚", layout="wide")
 
 
 @st.cache_resource(show_spinner="Loading pipeline…")
@@ -76,8 +76,8 @@ def main():
         st.caption("Answers are grounded in your own lecture notes. "
                    "Citations are audited by a second model pass.")
 
-    st.title("📚 Advanced Obsidian RAG")
-    st.caption("Ask anything from your Obsidian vault — grounded, cited answers from your own notes.")
+    st.title("📚 Noetrix")
+    st.caption("Ask anything about your documents — grounded, cited answers from your own material.")
 
     if "history" not in st.session_state:
         st.session_state.history = []

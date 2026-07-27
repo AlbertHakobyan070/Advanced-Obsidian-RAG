@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark light">
-<title>Corpus Ledger — Advanced Obsidian RAG</title>
+<title>Corpus Ledger — Noetrix</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='3' y='3' width='5' height='18' rx='1' fill='%23E8A33D'/%3E%3Crect x='10' y='3' width='5' height='18' rx='1' fill='%238A6423'/%3E%3Crect x='17' y='6' width='4' height='15' rx='1' fill='%23A99F8F'/%3E%3C/svg%3E">
 <script>/* theme + fonts are applied BEFORE first paint to avoid a flash of the wrong look */
 document.documentElement.dataset.theme=localStorage.getItem("ledger-theme")||"dark";
@@ -525,7 +525,7 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
 <header>
   <div class="hrow">
     <div class="wordmark"><svg class="mark" viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><rect x="3" y="3" width="5" height="18" rx="1"/><rect x="10" y="3" width="5" height="18" rx="1" opacity=".55"/><rect x="17" y="6" width="4" height="15" rx="1" opacity=".3"/></svg>Corpus <em>Ledger</em></div>
-    <div class="sub">Advanced Obsidian RAG — management console · :8052</div>
+    <div class="sub">Noetrix — management console · :8052</div>
     <div class="hctrl">
       <span class="st"><span class="dot" id="dot-manage"></span>manage</span>
       <span class="st"><span class="dot" id="dot-rag"></span>query api :8051</span>
@@ -941,9 +941,9 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
   </div>
 
   <div class="panel">
-    <h2>Vaults <span class="hint" style="margin:0;display:inline">— Obsidian-style switcher</span></h2>
+    <h2>Vaults <span class="hint" style="margin:0;display:inline">— switch document sets</span></h2>
     <p class="hint">Every vault ever opened stays listed. Switching snapshots the current vault's path/index settings, then restores the target's last-known ones — a brand-new vault gets its own empty index trio scaffolded. Nothing hot-applies: restart :8051 + :8052 after switching.</p>
-    <div class="desc">This is the same mental model as Obsidian's vault switcher: the console remembers each vault's <b>own</b> settings (vault root, chunks JSONL, Chroma dir, BM25 pickle, collection, inbox) and swaps the whole set atomically. Indexes are <b>never</b> shared between vaults — a new vault starts empty and fills through the normal ingest lanes. <b>Forget</b> only drops the registry entry; nothing on disk is touched.</div>
+    <div class="desc">One vault at a time, each with its own everything: the console remembers each vault's <b>own</b> settings (vault root, chunks JSONL, Chroma dir, BM25 pickle, collection, inbox) and swaps the whole set atomically. Indexes are <b>never</b> shared between vaults — a new vault starts empty and fills through the normal ingest lanes. <b>Forget</b> only drops the registry entry; nothing on disk is touched.</div>
     <div id="vault-list"><div class="skel"></div></div>
     <div class="row" style="margin-top:12px">
       <button class="btn primary" id="vault-add" title="Pick a folder to open as a vault (added to this list, switched to immediately)">＋ Add / open vault…</button>
@@ -971,7 +971,7 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
 <section id="tab-info">
   <div class="panel">
     <h2>How this RAG works</h2>
-    <p class="hint">A hybrid-retrieval RAG over your Obsidian vault. Its <b>core</b> is two search lanes — <b>Dense</b> (semantic / vectors) and <b>Sparse</b> (keyword / BM25) — run together and <b>fused</b> with Reciprocal Rank Fusion; optional branches can widen or reshape the query and add extra lanes. The fused pool is <b>re-ranked</b> by a cross-encoder, then a cited answer is <b>grounded</b> in your own materials. Everything up to generation is local; only the final answer needs the LLM.</p>
+    <p class="hint">A hybrid-retrieval RAG over your own documents. Its <b>core</b> is two search lanes — <b>Dense</b> (semantic / vectors) and <b>Sparse</b> (keyword / BM25) — run together and <b>fused</b> with Reciprocal Rank Fusion; optional branches can widen or reshape the query and add extra lanes. The fused pool is <b>re-ranked</b> by a cross-encoder, then a cited answer is <b>grounded</b> in your own materials. Everything up to generation is local; only the final answer needs the LLM.</p>
     <div class="row" style="margin:0 0 12px">
       <button class="btn dgbtn on" data-dg="query">Query pipeline</button>
       <button class="btn dgbtn" data-dg="ingest">Ingestion pipeline</button>
@@ -2369,7 +2369,7 @@ function renderAnswerBody(el,text){
       throwOnError:false});}catch(e){}}
   }else{el.textContent=text||"";}
 }
-/* answer + sources as portable markdown (renders in Obsidian) */
+/* answer + sources as portable markdown (pastes into any markdown editor) */
 function resultToMarkdown(r){
   let md=`# ${r.q||"RAG answer"}\n\n`;
   if(r.answer)md+=r.answer.trim()+"\n\n";
@@ -2422,7 +2422,7 @@ function renderResult(){
       ${r.answer?`<button class="btn" id="q-copy" title="Copy the answer + sources as markdown">⧉ Copy</button>
       <button class="btn" id="q-dl" title="Download the answer + sources as a .md file">↓ .md</button>`:""}
       <span style="flex:1"></span>
-      <label class="chk" title="Render the answer AND the source chunks as Obsidian-style markdown + LaTeX + code, vs raw text"><input type="checkbox" id="q-preview" ${preview?"checked":""}>Preview (md + LaTeX)</label>
+      <label class="chk" title="Render the answer AND the source chunks as markdown + LaTeX + code, vs raw text"><input type="checkbox" id="q-preview" ${preview?"checked":""}>Preview (md + LaTeX)</label>
     </div>`:"";
   $("#q-out").innerHTML=(r.answer?`<div class="panel" style="margin-bottom:12px">${bar}<div class="answer" id="q-answer"></div>
       <div class="hint" style="margin-top:10px">confidence: <span class="pill ${confCls}">${esc(r.confidence||"?")}</span>${r.echo?` · ${esc(r.echo)}`:""}</div></div>`:bar)+
@@ -3206,7 +3206,7 @@ function renderProviders(s){
     <div id="pv-fields" class="grid g2" style="margin-top:8px"></div>`;
 }
 
-/* ---------- vault switcher (Obsidian-style) ---------- */
+/* ---------- vault switcher ---------- */
 async function loadVaults(){
   const box=$("#vault-list");if(!box)return;
   try{

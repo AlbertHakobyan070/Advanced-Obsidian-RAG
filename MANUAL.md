@@ -1,4 +1,4 @@
-# Advanced Obsidian RAG — User Manual
+# Noetrix — User Manual
 
 A practical cookbook for day-to-day use. The repo serves a personal knowledge
 base of markdown notes, textbooks, lecture PDFs, and notebooks behind a local

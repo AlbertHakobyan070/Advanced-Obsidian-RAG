@@ -76,6 +76,7 @@ from src.llm.llm_client import LLMClient
 from src.pipeline import RAGPipeline
 from src.retrieval.reranker import RERANK_MODES, RerankerExecutionError
 from src.utils.config_loader import load_config, persist_config_values
+from src.utils.branding import QUERY_API_TITLE, QUERY_SERVICE
 from src.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -141,8 +142,7 @@ async def lifespan(app: FastAPI):
     _STATE.clear()
 
 
-app = FastAPI(title="Advanced Obsidian RAG — Query API", version="0.4.0",
-              lifespan=lifespan)
+app = FastAPI(title=QUERY_API_TITLE, version="0.4.0", lifespan=lifespan)
 
 # The management web UI (manage_api.py, default :8052) calls this API from the
 # browser; same-machine, different port = CORS. Localhost-only origins.
@@ -1227,7 +1227,7 @@ def schema() -> dict:
                               "\"\" disables a configured instruction for one call",
     }
     return {
-        "service": "advanced-obsidian-rag-query",
+        "service": QUERY_SERVICE,
         "version": app.version,
         "endpoints": {
             "GET /health": "readiness probe -> {ready: bool, state: "
