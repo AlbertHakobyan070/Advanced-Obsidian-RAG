@@ -251,3 +251,161 @@ def test_management_settings_reject_known_model_context_overflow(
 
     assert response.status_code == 400
     assert b"512-token context limit" in response.body
+
+
+# ---------------------------------------------------- preflight (/api/rerank/check)
+
+def test_cache_probe_finds_a_model_in_the_sentence_transformers_root(
+        tmp_path, monkeypatch, management_module):
+    """The probe must look where the model is ACTUALLY loaded from.
+
+    sentence-transformers honours SENTENCE_TRANSFORMERS_HOME over HF_HOME, and
+    HF_HUB_CACHE can be set machine-wide to a third place. Probing only the
+    hub's idea of the cache reported a present model as missing — which told the
+    operator to expect a long download that was not going to happen.
+    """
+    st_root = tmp_path / "st"
+    snap = st_root / "models--cross-encoder--tiny" / "snapshots" / "abc123"
+    snap.mkdir(parents=True)
+    (snap / "model.safetensors").write_bytes(b"weights")
+
+    monkeypatch.setenv("SENTENCE_TRANSFORMERS_HOME", str(st_root))
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "empty-hub"))
+
+    cached, where = management_module._model_is_cached("cross-encoder/tiny")
+    assert cached is True
+    assert str(snap) == where
+
+
+def test_cache_probe_rejects_a_metadata_only_directory(
+        tmp_path, monkeypatch, management_module):
+    """A snapshot with no weights file is a failed download, not a cached model."""
+    st_root = tmp_path / "st"
+    snap = st_root / "models--cross-encoder--tiny" / "snapshots" / "abc123"
+    snap.mkdir(parents=True)
+    (snap / "config.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setenv("SENTENCE_TRANSFORMERS_HOME", str(st_root))
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "empty-hub"))
+
+    cached, _ = management_module._model_is_cached("cross-encoder/tiny")
+    assert cached is False
+
+
+def test_preflight_reports_a_cached_model_as_usable_offline(
+        tmp_path, monkeypatch, management_module):
+    """Cached beats unreachable: a model already on disk needs no hub at all."""
+    st_root = tmp_path / "st"
+    snap = st_root / "models--cross-encoder--ms-marco-MiniLM-L-6-v2" / "snapshots" / "s1"
+    snap.mkdir(parents=True)
+    (snap / "model.safetensors").write_bytes(b"weights")
+    monkeypatch.setenv("SENTENCE_TRANSFORMERS_HOME", str(st_root))
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "empty-hub"))
+
+    # Simulate no network: model_info raises for every id.
+    import huggingface_hub
+    def boom(*a, **k):
+        raise OSError("offline")
+    monkeypatch.setattr(huggingface_hub, "model_info", boom)
+
+    out = management_module.rerank_check(management_module.RerankCheckIn(
+        model="cross-encoder/ms-marco-MiniLM-L-6-v2", max_length=512))
+    assert out["cached"] is True
+    assert out["reachable"] is False
+    assert out["usable"] is True          # it is on disk; the hub is irrelevant
+    assert not any("would fail to build" in w for w in out["warnings"])
+
+
+def test_preflight_still_flags_an_over_long_max_length(
+        tmp_path, monkeypatch, management_module):
+    """The context-limit guard is the one check that needs no network or disk."""
+    monkeypatch.setenv("SENTENCE_TRANSFORMERS_HOME", str(tmp_path / "nope"))
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "nope-hub"))
+    out = management_module.rerank_check(management_module.RerankCheckIn(
+        model="BAAI/bge-reranker-base", max_length=8192))
+    assert any("512-token limit" in w for w in out["warnings"])
+
+
+# ------------------------------------------------ rerank instruction routing
+
+from src.retrieval.reranker import INSTRUCTION_FORMATS, Reranker
+
+
+def _rr(**kw):
+    return Reranker(model_name="cross-encoder/ms-marco-MiniLM-L-6-v2", **kw)
+
+
+def test_instruction_is_joined_for_the_modes_that_can_use_it():
+    rr = _rr(instruction="prefer worked procedures")
+    for mode in ("cross_encoder", "http"):
+        out = rr.scoring_query("how do I rotate keys", mode)
+        assert out == "prefer worked procedures\nhow do I rotate keys"
+
+
+def test_instruction_is_ignored_by_lexical_and_none():
+    """Lexical scoring is query-term coverage. Folding a sentence of
+    instruction into the term set would dilute every real query term, so the
+    instruction must not reach it — and the caller must be able to see that."""
+    rr = _rr(instruction="prefer worked procedures")
+    for mode in ("lexical", "none"):
+        assert rr.scoring_query("how do I rotate keys", mode) == "how do I rotate keys"
+
+
+def test_lexical_ignore_is_warned_once_not_silent(caplog):
+    rr = _rr(instruction="prefer primary sources")
+    with caplog.at_level("WARNING"):
+        rr.scoring_query("q", "lexical")
+        rr.scoring_query("q", "lexical")
+    assert sum("rerank instruction ignored" in r.message for r in caplog.records) == 1
+
+
+def test_instruct_format_uses_the_labelled_template():
+    rr = _rr(instruction="rank by recency", instruction_format="instruct")
+    assert rr.scoring_query("q", "cross_encoder") == "<Instruct>: rank by recency\n<Query>: q"
+
+
+def test_per_call_instruction_overrides_the_configured_one():
+    rr = _rr(instruction="configured criterion")
+    assert rr.scoring_query("q", "cross_encoder", "call criterion") == "call criterion\nq"
+
+
+def test_empty_string_disables_a_configured_instruction_for_one_call():
+    """"" is a real value, not "unset" — it is how a caller opts out per call."""
+    rr = _rr(instruction="configured criterion")
+    assert rr.scoring_query("q", "cross_encoder", "") == "q"
+
+
+def test_no_instruction_leaves_the_query_untouched():
+    rr = _rr()
+    assert rr.scoring_query("q", "cross_encoder") == "q"
+
+
+def test_unknown_instruction_format_is_refused_at_construction():
+    with pytest.raises(ValueError, match="rerank_instruction_format"):
+        _rr(instruction_format="freestyle")
+
+
+def test_every_declared_format_renders_both_placeholders():
+    for name, tmpl in INSTRUCTION_FORMATS.items():
+        out = tmpl.format(instruction="I", query="Q")
+        assert "I" in out and "Q" in out, name
+
+
+def test_instruction_reaches_the_scored_pairs_not_the_retrieval(monkeypatch):
+    """The criterion must change what the RERANKER sees and nothing else."""
+    from src.retrieval.retriever import RetrievedDoc
+    rr = _rr(instruction="prefer runnable examples")
+    docs = [RetrievedDoc(id="a", text="alpha", metadata={}, score=1.0),
+            RetrievedDoc(id="b", text="beta", metadata={}, score=0.5)]
+    seen = {}
+
+    class _Model:
+        @staticmethod
+        def predict(pairs):
+            seen["pairs"] = pairs
+            return [0.1, 0.9]
+
+    monkeypatch.setattr(rr, "_get_model", lambda: _Model())
+    out = rr.rerank("how do I parse dates", docs, top_k=2)
+    assert [q for q, _ in seen["pairs"]] == ["prefer runnable examples\nhow do I parse dates"] * 2
+    assert [d.text for d, in [(d,) for d in out]] == ["beta", "alpha"]

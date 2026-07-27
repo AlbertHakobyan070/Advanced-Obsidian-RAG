@@ -1,35 +1,40 @@
 # Docker deployment
 
-Run the whole system on another machine from the packaged `rag-docker-bundle` tree
-with **two commands** — no Python, no venv, no path surgery. A plain source clone does
-not contain the Compose/Dockerfile scaffold. Docker Compose brings up both services
-plus a generation backend, all bound to `127.0.0.1`.
+Run the whole system on another machine from the packaged `rag-docker-bundle`
+tree with **two commands** — no Python, no venv, no path surgery. A plain source
+clone does not contain the Compose/Dockerfile scaffold.
 
-- **Query API** → `http://127.0.0.1:8051`
-- **Corpus Ledger console** → `http://127.0.0.1:8052`
-- **Bundled generation backend** (when enabled) → `http://127.0.0.1:3001`
+Everything binds to `127.0.0.1`. Nothing is exposed to your network.
+
+| Service | Port | Starts by default | Stop it when |
+|---|---|---|---|
+| `rag` — query API + console | `8051`, `8052` | yes | never; it *is* the RAG |
+| `freellmapi` — generation proxy | `3001` | yes | you generate through a direct cloud backend |
+| `paddleocr` — OCR for scanned PDFs | `8103` | **no** (`--profile ocr`) | you are not ingesting scanned material |
+| `rerank` — external reranker | `8102` | **no** (`--profile rerank`) | you are not using an external reranker |
 
 ## What's in the bundle
 
 ```
-docker-compose.yml        # the two services + generation backend, 127.0.0.1-bound
+docker-compose.yml        # the services, 127.0.0.1-bound, with opt-in profiles
 Dockerfile                # CPU-only PyTorch, both APIs in one container
 config.docker.yaml        # container config (Linux paths); copied to config.yaml in the image
-docker-entrypoint.sh      # runs serve_api (:8051) + manage_api (:8052) together
-.env.example              # generation-backend settings template
+docker-entrypoint.sh      # supervises serve_api (:8051) alongside manage_api (:8052)
+paddleocr/                # the OCR sidecar image + its tiny HTTP service
+.env.example              # settings + provider-key template
 app/                      # the application source
 data/                     # JSONL chunk files (the source of truth)
 rag_data/                 # prebuilt ChromaDB + BM25 indexes
 ```
 
-The image installs **CPU-only PyTorch first**, so it never drags in multi-gigabyte GPU
-wheels — the embedder and cross-encoder run on CPU. The data and indexes are mounted as
-volumes, not baked into the image, so `docker compose build` stays fast.
+The image installs **CPU-only PyTorch first**, so it never drags in
+multi-gigabyte GPU wheels. Data and indexes are mounted as volumes rather than
+baked into the image, so `docker compose build` stays fast.
 
 ## Prerequisite
 
-Install **Docker Desktop**, start it once, and unpack a private or public Docker
-bundle produced by the release packaging workflow.
+Install **Docker Desktop**, start it once, and unpack a bundle produced by the
+release packaging workflow.
 
 ## Start it
 
@@ -38,67 +43,136 @@ docker compose up --build -d
 docker compose logs -f rag      # watch startup
 ```
 
-First run builds the image and, on the first query, downloads the configured embedding
-and rerank models into the persistent cache. Wait until:
+First run builds the image and, on the first query, downloads the configured
+embedding and rerank models into a persistent cache volume. Wait until:
 
 ```bash
-curl -fsS http://127.0.0.1:8051/health   # -> {"ready": true}
+curl -fsS http://127.0.0.1:8051/health   # -> {"ready":true,"state":"ready",...}
 ```
+
+## One path to set
+
+Set `RAG_HOST_HOME` in `.env` to your home folder:
+
+```bash
+RAG_HOST_HOME=/Users/yourname        # Linux: /home/yourname
+```
+
+Compose bind-mounts that folder **at the same absolute path inside the
+container**, which is the whole trick: `/Users/yourname/Notes` means the same
+thing to your file manager and to the RAG, so there is no translation layer to
+drift. Every document folder under your home directory becomes browsable and
+selectable from the console's vault switcher with no further edits.
+
+!!! note "Folders outside your home directory"
+    The console can only offer paths the **container** can see. A collection on
+    an external drive needs its own entry in the `volumes:` list of the `rag`
+    service.
 
 ## Point it at a model
 
-Generation resolves through the `providers:` registry in `config.docker.yaml`. Select
-one with `generation.provider`, keep its secret in the environment variable named by
-`api_key_env`, and restart the query service. `GET /providers` shows the active backend
-and whether each configured credential is present and type-compatible, without
-returning secret values.
+Generation resolves through the `providers:` registry in `config.docker.yaml`.
+Select one with `generation.provider`, keep its secret in the environment
+variable named by `api_key_env`, and restart the query service. `GET /providers`
+shows the active backend and whether each configured credential is present and
+type-compatible, without returning secret values.
 
-The bundled local backend can still be managed at **http://127.0.0.1:3001**. For a
-cloud provider, add or select its registry entry and pass the declared secret through
-Compose `.env`; do not put a key in YAML. The MiniMax M3 Token Plan entry expects a
-subscription key beginning `sk-cp-`, not a pay-as-you-go `sk-api-` key. Retrieval-only
-(`/search`) needs no generation provider at all.
+The console's **Settings → Generation backends** panel does all of this with
+buttons, including writing a key into the mounted `.env` so it survives a
+rebuild. Never put a key in the YAML.
 
-## Mount your vault (optional but recommended)
+The bundled proxy has its own dashboard at **http://127.0.0.1:3001**.
+Retrieval-only (`/search`) needs no generation provider at all.
 
-To use the **Vault browser** and the **Ingest** tab on the target machine, mount your
-Obsidian vault into the container. In `docker-compose.yml`, under the `rag` service:
+!!! warning "`[decrypt failed]` in the proxy dashboard"
+    The proxy encrypts the keys you add through its dashboard with
+    `ENCRYPTION_KEY` from `.env`, and stores them in a **named volume** that
+    outlives that file. If `.env` is replaced with one carrying a different key
+    — for instance by unpacking a newer archive — every stored key becomes
+    unreadable. Restore the previous `ENCRYPTION_KEY`, or reset the store and
+    re-enter the keys:
 
-```yaml
-    volumes:
-      - "/path/to/your/vault:/vault"     # host vault -> container /vault
+    ```bash
+    docker compose down
+    docker volume rm rag-docker-bundle_freellmapi-data
+    docker compose up -d
+    ```
+
+## OCR for scanned PDFs
+
+The container image ships **Tesseract** ready to use (`pdf.ocr_engine: auto`).
+For scanned books it is the weakest of the three lanes; the **PaddleOCR
+sidecar** is the one worth turning on:
+
+```bash
+docker compose --profile ocr up -d --build paddleocr
+# then set pdf.ocr_engine: paddle  (Settings, or --ocr-engine paddle per job)
+docker compose stop paddleocr        # when the scanned material is indexed
 ```
 
-The container config points `parser.vault_path` at `/vault`, and the console's Vault tab
-browses `webui.vault_tree_root` beneath it. With the vault mounted, everything works —
-Query, Documents, the Vault tree, and Ingest. Without it, Query / Documents / Jobs still
-work fully against the shipped corpus; only the vault-dependent tabs are inert.
+It is a separate image because its dependency tree is larger than the rest of
+the stack put together and it is only needed while ingesting. Recognition
+weights download once into the `paddle-cache` volume. The console's
+**Settings → OCR** panel distinguishes *not configured* from *container
+stopped*, so a deliberately-stopped sidecar never looks like a fault.
 
-!!! tip "Read-only vs read-write"
-    Mount read-only (`:ro`) for a safe demo where nothing can alter the vault, or
-    read-write if you want the Ingest tab and inbox uploads to write new material into
-    the mounted vault.
+The third lane, a document **vision model**, is reached over HTTP and
+deliberately lives in no image here: on container CPU it is minutes per page.
+Run one on the host and the container reaches it at `host.docker.internal`.
+
+## An external reranker
+
+`retrieval.rerank_mode: http` scores candidates against a `/v1/rerank` endpoint,
+so a large reranker can run outside the query API's memory budget:
+
+```bash
+# put a reranker GGUF in ./models and name it in .env (RERANK_MODEL_FILE)
+docker compose --profile rerank up -d rerank
+# console: Settings -> Reranker -> "External rerank server"
+# set retrieval.rerank_http.base_url to http://rerank:8102/v1
+```
 
 ## Day-to-day
 
 ```bash
-docker compose stop      # stop, keep data + models
-docker compose start     # fast start, no rebuild
-docker compose down      # remove containers (named volumes persist)
+docker compose ps                  # what is actually running
+docker compose stop               # stop everything, keep data + models
+docker compose start              # fast start, no rebuild
+docker compose stop paddleocr     # stop just one service
+docker compose down               # remove containers (named volumes persist)
 ```
 
-## Re-packaging after corpus changes
+## Restarting the query API
 
-New material is added on the machine that owns the full vault, then the bundle is
-re-packaged (the packaging script copies the current JSONLs + prebuilt indexes and
-archives everything). Ship the archive, unpack, and `docker compose up` on the target.
+After changing settings or switching document folders, press **⟳ restart :8051**
+in the console header. This works *inside* the container: the entrypoint
+supervises the query API, so the button restarts that process rather than
+needing `docker compose restart`.
+
+If it does not come back, the console now prints the query API's startup log
+instead of spinning. The cause is almost always the setting that was just
+changed — a reranker id that cannot be downloaded, an embedding model with a
+typo, an index path that moved:
+
+```bash
+curl -s http://127.0.0.1:8051/health                    # {"state":"failed","error":...}
+curl -s "http://127.0.0.1:8052/api/service/log?lines=60"
+```
+
+Before switching cross-encoder, press **Check** on the model row — it reports
+whether the id resolves and whether the weights are already cached, which are
+the two things that make the following restart fail.
 
 ## Troubleshooting
 
-- **Console loads but the query dot is red** — the container is still loading the index
-  or downloading models. Give it a minute; check `docker compose logs -f rag` for
+- **Console loads but the query dot is red** — still loading the index or
+  downloading models. Check `docker compose logs -f rag` for
   `Application startup complete`.
-- **Ask returns a generation error** — the generation backend has no provider key yet, or
-  a free quota is exhausted. `Search only` still works.
-- **Port already in use** — change the left-hand host port in `docker-compose.yml`
-  (e.g. `"127.0.0.1:9051:8051"`).
+- **`docker compose up` fails with "set RAG_HOST_HOME in .env"** — Compose
+  refuses to guess where your home folder is. See [One path to set](#one-path-to-set).
+- **Ask returns a generation error** — the backend has no key yet, or a free
+  quota is exhausted. `/search` and evidence comparison trees still work.
+- **Port already in use** — change the left-hand host port in
+  `docker-compose.yml` (e.g. `"127.0.0.1:9051:8051"`).
+- **Model download is slow the first time** — expected; it is cached in a named
+  volume afterwards.

@@ -287,6 +287,7 @@ class PDFLoader:
         ocr_language: str = "eng",
         ocr_engine_pref: str = "auto",
         vlm_ocr=None,
+        paddle_ocr=None,
         only_book_folders: bool = False,
         skip_books: bool = False,
         include_path: str | None = None,
@@ -362,8 +363,10 @@ class PDFLoader:
         # OCR engine resolution. "auto" keeps the historical behavior
         # (Tesseract-first probe); "vlm" routes scanned pages through the
         # configured vision endpoint (pdf.vlm_ocr — Unlimited-OCR reference);
+        # "paddle" routes them through a PaddleOCR sidecar (pdf.paddle_ocr);
         # "tesseract" pins the classic path; "none" disables OCR outright.
         self.vlm_ocr = vlm_ocr
+        self.paddle_ocr = paddle_ocr
         self.ocr_engine_pref = (ocr_engine_pref or "auto").lower()
         self.ocr_engine = self._resolve_ocr_engine(self.ocr_engine_pref)
 
@@ -394,8 +397,9 @@ class PDFLoader:
         """Map an engine preference to what is actually usable, never raising.
 
         Fallback ladder keeps the existing contract (text pages always survive):
-          vlm w/o a configured client  -> auto-detect (tesseract) with a warning
-          tesseract w/o tessdata       -> None (pages stay sparse) with a warning
+          vlm w/o a configured client    -> auto-detect (tesseract) with a warning
+          paddle w/o a configured client -> auto-detect (tesseract) with a warning
+          tesseract w/o tessdata         -> None (pages stay sparse) with a warning
         """
         if not self.ocr_enabled or pref == "none":
             return None
@@ -403,6 +407,12 @@ class PDFLoader:
             if self.vlm_ocr is not None:
                 return "vlm"
             log.warning("pdf.ocr_engine=vlm but no pdf.vlm_ocr block is "
+                        "configured — falling back to auto-detection.")
+            return detect_ocr_engine()
+        if pref == "paddle":
+            if self.paddle_ocr is not None:
+                return "paddle"
+            log.warning("pdf.ocr_engine=paddle but no pdf.paddle_ocr block is "
                         "configured — falling back to auto-detection.")
             return detect_ocr_engine()
         if pref == "tesseract":
@@ -436,6 +446,7 @@ class PDFLoader:
             ocr_language=cfg.get("pdf.ocr_language", "eng"),
             ocr_engine_pref=cfg.get("pdf.ocr_engine", "auto"),
             vlm_ocr=cls._build_vlm(cfg),
+            paddle_ocr=cls._build_paddle(cfg),
             only_book_folders=cfg.get("pdf.only_book_folders", False),
             skip_books=cfg.get("pdf.skip_books", False),
             include_path=cfg.get("pdf.include_path"),
@@ -461,6 +472,14 @@ class PDFLoader:
             return None
         from src.ingestion.ocr_vlm import VLMOCR
         return VLMOCR.from_config(cfg)
+
+    @staticmethod
+    def _build_paddle(cfg: Config):
+        """PaddleOCR client iff pdf.paddle_ocr is configured (no network here)."""
+        if not (cfg.get("pdf.paddle_ocr") or {}):
+            return None
+        from src.ingestion.ocr_paddle import PaddleOCRClient
+        return PaddleOCRClient.from_config(cfg)
 
     # ---- discovery ----
 
@@ -654,11 +673,11 @@ class PDFLoader:
 
         # Decide OCR strategy for this document
         use_ocr = bool(scanned_pages) and self.ocr_enabled and self.ocr_engine is not None
-        # VLM engine: pymupdf4llm extracts with OCR OFF (its adaptor is never
-        # touched), then scanned pages are re-parsed through the vision
-        # endpoint and injected back — see _apply_vlm_ocr below.
-        vlm_mode = use_ocr and self.ocr_engine == "vlm"
-        pymupdf_ocr = use_ocr and not vlm_mode
+        # Off-process engines (vlm, paddle): pymupdf4llm extracts with OCR OFF
+        # (its adaptor is never touched), then scanned pages are re-parsed
+        # through the remote endpoint and injected back — see _apply_remote_ocr.
+        remote_mode = use_ocr and self.ocr_engine in ("vlm", "paddle")
+        pymupdf_ocr = use_ocr and not remote_mode
         if scanned_pages and not use_ocr:
             self.stats["pages_scanned_skipped"] += len(scanned_pages)
             log.warning(
@@ -717,9 +736,9 @@ class PDFLoader:
                 return []
 
         self.stats["pages_total"] += page_count
-        if vlm_mode:
+        if remote_mode:
             # scanned_pages is already restricted to the pages we actually read.
-            done = self._apply_vlm_ocr(filepath, md_chunks, scanned_pages)
+            done = self._apply_remote_ocr(filepath, md_chunks, scanned_pages)
             self.stats["pages_ocr"] += done
             self.stats["pages_scanned_skipped"] += len(scanned_pages) - done
         else:
@@ -732,18 +751,34 @@ class PDFLoader:
             self.stats["pdfs_processed"] += 1
         return chunks
 
-    def _apply_vlm_ocr(self, filepath: Path, md_chunks, scanned_pages: list[int]) -> int:
+    def _remote_ocr_client(self):
+        """The OCR client that runs OUTSIDE this process, for the active engine.
+
+        Both remote lanes render a page and post it somewhere; only the wire
+        format differs, and each client owns that. Selecting on the resolved
+        engine (not on which client happens to be configured) keeps a
+        configured-but-unselected sidecar from hijacking the other's pages.
         """
-        VLM-mode step 2: parse the scanned pages through the vision endpoint
-        (self.vlm_ocr) and inject the returned markdown into the matching
-        page_chunks entries, so the normal chunker downstream never knows the
-        difference. Returns the number of pages successfully OCR'd; pages that
-        fail keep their (near-empty) extracted text and stay sparse — exactly
-        the graceful-degradation contract the classic path has.
+        if self.ocr_engine == "vlm":
+            return self.vlm_ocr
+        if self.ocr_engine == "paddle":
+            return self.paddle_ocr
+        return None
+
+    def _apply_remote_ocr(self, filepath: Path, md_chunks, scanned_pages: list[int]) -> int:
         """
-        if not scanned_pages or self.vlm_ocr is None:
+        Remote-mode step 2: parse the scanned pages through the off-process OCR
+        endpoint (vision model or PaddleOCR sidecar) and inject the returned
+        text into the matching page_chunks entries, so the normal chunker
+        downstream never knows the difference. Returns the number of pages
+        successfully OCR'd; pages that fail keep their (near-empty) extracted
+        text and stay sparse — exactly the graceful-degradation contract the
+        classic path has.
+        """
+        client = self._remote_ocr_client()
+        if not scanned_pages or client is None:
             return 0
-        texts = self.vlm_ocr.ocr_pages(filepath, scanned_pages)
+        texts = client.ocr_pages(filepath, scanned_pages)
         if not texts:
             return 0
         for md in md_chunks:
@@ -757,7 +792,7 @@ class PDFLoader:
                 # Scanned pages have no layout boxes, so the box-class
                 # has_formula detection in _chunks_from_md can't fire on
                 # them — mark the entry so a text-level check runs instead.
-                md["vlm_injected"] = True
+                md["remote_ocr_injected"] = True
         return len(texts)
 
     def _find_scanned_pages(self, doc) -> list[int]:
@@ -853,12 +888,12 @@ class PDFLoader:
             meta_in = md.get("metadata", {}) or {}
             page_no = self._safe_int(meta_in.get("page_number"))
 
-            # Detect special content via page_boxes class tags. VLM-injected
-            # pages have no boxes (they were scanned), so detect LaTeX
-            # markers in the parsed markdown instead.
+            # Detect special content via page_boxes class tags. Pages injected
+            # by a remote OCR lane have no boxes (they were scanned), so detect
+            # LaTeX markers in the parsed markdown instead.
             box_classes = {b.get("class") for b in md.get("page_boxes", []) if isinstance(b, dict)}
             has_formula = "formula" in box_classes or bool(
-                md.get("vlm_injected")
+                md.get("remote_ocr_injected")
                 # $...$ must contain a LaTeX-ish char so currency spans
                 # ("5$ ... 10$") don't count as math.
                 and re.search(

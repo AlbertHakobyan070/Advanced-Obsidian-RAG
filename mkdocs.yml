@@ -1,12 +1,9 @@
 site_name: Advanced Obsidian RAG
 site_description: >-
-  Grounded, cited question-answering over a personal knowledge base of markdown
-  notes, textbooks, lecture PDFs, and notebooks — hybrid retrieval, scope
-  routing, a code lane, cross-encoder reranking, and citation-audited
-  generation, running on free / local infrastructure.
+  Grounded, cited question-answering over your own documents — hybrid
+  retrieval, scope routing, a code lane, swappable reranking, and
+  citation-audited generation, running on free / local infrastructure.
 site_url: ""
-# Set repo_url to the public URL of THIS fork / publication. The default
-# below assumes the original project; override after forking/moving.
 repo_url: https://github.com/AlbertHakobyan070/Advanced-Obsidian-RAG
 repo_name: Advanced-Obsidian-RAG
 edit_uri: ""
@@ -45,9 +42,11 @@ theme:
 
 nav:
   - Home: index.md
-  - Architecture: architecture.md
   - Getting started: getting-started.md
+  - Architecture: architecture.md
   - Usage: usage.md
+  - API reference: api.md
+  - Agent integration: agents.md
   - Evaluation: evaluation.md
   - Operations: operations.md
   - Docker deployment: deployment-docker.md

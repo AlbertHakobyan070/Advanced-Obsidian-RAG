@@ -29,6 +29,20 @@ RERANK_MODES = ("cross_encoder", "http", "lexical", "none")
 
 _TOKEN_RE = re.compile(r"[a-z0-9_]+")
 
+# How a rerank instruction is joined to the question before scoring.
+#
+#   prefix   — "<instruction>\n<question>". Query REFRAMING: it works with any
+#              cross-encoder because it simply changes the text the model is
+#              matching against. This is the default precisely because it makes
+#              no claim about the model understanding instructions.
+#   instruct — the labelled form instruction-tuned rerankers are trained on.
+#              Only worth selecting for a model documented to expect it; on a
+#              plain cross-encoder the literal tags are just noise in the query.
+INSTRUCTION_FORMATS = {
+    "prefix": "{instruction}\n{query}",
+    "instruct": "<Instruct>: {instruction}\n<Query>: {query}",
+}
+
 
 class RerankerExecutionError(RuntimeError):
     """The configured cross-encoder loaded, but failed while scoring pairs."""
@@ -147,7 +161,9 @@ class Reranker:
                  mode: str = "cross_encoder", max_length: int = 512,
                  device: str | None = None,
                  http_url: str | None = None, http_model: str | None = None,
-                 http_timeout: int = 120):
+                 http_timeout: int = 120,
+                 instruction: str | None = None,
+                 instruction_format: str = "prefix"):
         self.model_name = model_name
         self.top_k = top_k
         if mode not in RERANK_MODES:
@@ -178,6 +194,27 @@ class Reranker:
         self.http_timeout = int(http_timeout)
         self._model = None
 
+        # ---- rerank instruction ------------------------------------------
+        # WHAT IT IS FOR. A cross-encoder answers "how relevant is this passage
+        # to this query" — but relevant *for what* is left implicit, and the
+        # model's own idea of it comes from whatever it was trained on. Two
+        # passages can be equally on-topic while only one is the kind of thing
+        # you wanted: a worked procedure rather than a definition, a primary
+        # source rather than a summary, code rather than prose about code.
+        #
+        # The instruction makes that criterion explicit and applies it at
+        # ranking time — after retrieval has already found the on-topic pool, so
+        # it costs nothing in recall. It is a ranking-criterion knob, not a
+        # filter: it re-weights an existing candidate set and can never remove
+        # material from it.
+        self.instruction = (instruction or "").strip() or None
+        if instruction_format not in INSTRUCTION_FORMATS:
+            raise ValueError(
+                f"retrieval.rerank_instruction_format must be one of "
+                f"{sorted(INSTRUCTION_FORMATS)}, got {instruction_format!r}")
+        self.instruction_format = instruction_format
+        self._warned_lexical_instruction = False
+
     # Back-compat: some call sites check .enabled
     @property
     def enabled(self) -> bool:
@@ -199,7 +236,48 @@ class Reranker:
             http_url=cfg.get("retrieval.rerank_http.base_url"),
             http_model=cfg.get("retrieval.rerank_http.model"),
             http_timeout=cfg.get("retrieval.rerank_http.timeout", 120),
+            instruction=cfg.get("retrieval.rerank_instruction"),
+            instruction_format=str(
+                cfg.get("retrieval.rerank_instruction_format", "prefix")),
         )
+
+    # ---- instruction ---------------------------------------------------
+
+    def scoring_query(self, query: str, mode: str,
+                      instruction: str | None = None) -> str:
+        """The text the reranker actually scores against.
+
+        Routed PER MODE, because the modes can genuinely use it or genuinely
+        cannot:
+
+          cross_encoder — joined to the question. The model reads the pair
+                          together, so a stated criterion shifts what counts as
+                          a good match. This is the lane the feature is for.
+          http          — same joined text goes to the external service, which
+                          is the only channel the /v1/rerank shape gives us. A
+                          service that is instruction-tuned benefits; one that
+                          is not sees a longer query, exactly as above.
+          lexical       — IGNORED, deliberately. Lexical scoring is query-term
+                          coverage; folding a sentence of instruction into the
+                          term set would dilute every real query term and
+                          quietly make ranking worse. Warned once, not silent.
+          none          — nothing is scored at all.
+        """
+        text = (instruction if instruction is not None else self.instruction)
+        text = (text or "").strip()
+        if not text:
+            return query
+        if mode in ("lexical", "none"):
+            if not self._warned_lexical_instruction:
+                self._warned_lexical_instruction = True
+                log.warning(
+                    "rerank instruction ignored: mode=%r scores query-term "
+                    "coverage, and mixing instruction words into the term set "
+                    "would dilute the query's own terms. Use "
+                    "rerank_mode=cross_encoder or http to apply it.", mode)
+            return query
+        return INSTRUCTION_FORMATS[self.instruction_format].format(
+            instruction=text, query=query)
 
     # ---- http lane -----------------------------------------------------
 
@@ -267,10 +345,15 @@ class Reranker:
 
     def rerank(
         self, query: str, docs: list[RetrievedDoc], top_k: int | None = None,
-        mode: str | None = None,
+        mode: str | None = None, instruction: str | None = None,
     ) -> list[RetrievedDoc]:
-        """Reorder + truncate the fused candidates. `mode` overrides the
-        configured method for this call: cross_encoder | lexical | none."""
+        """Reorder + truncate the fused candidates.
+
+        `mode` overrides the configured method for this call
+        (cross_encoder | http | lexical | none). `instruction` overrides the
+        configured ranking criterion; pass "" to switch it off for one call
+        while the config keeps it on.
+        """
         k = top_k or self.top_k
         m = (mode or self.mode).lower()
         if m not in RERANK_MODES:
@@ -281,11 +364,16 @@ class Reranker:
             # No reranking — just truncate the fused ranking.
             return docs[:k]
 
+        # The instruction changes only what the RERANKER scores against. The
+        # retrieval that produced `docs` already happened against the real
+        # question, so a criterion can reweight the pool but never shrink it.
+        scoring_query = self.scoring_query(query, m, instruction)
+
         if m == "http":
-            return self._rerank_http(query, docs, k)
+            return self._rerank_http(scoring_query, docs, k)
 
         if m == "lexical":
-            terms = _TOKEN_RE.findall(query.lower())
+            terms = _TOKEN_RE.findall(scoring_query.lower())
             # rarer-looking (longer) terms weigh more; stopword-ish shorties less
             qw = {t: min(len(t), 8) / 8.0 for t in terms if len(t) > 2}
             for doc in docs:
@@ -294,7 +382,7 @@ class Reranker:
             log.info("lexical-reranked %d candidates -> top %d", len(docs), k)
             return reranked[:k]
 
-        pairs = [(query, d.text) for d in docs]
+        pairs = [(scoring_query, d.text) for d in docs]
         try:
             # Model resolution belongs inside the typed boundary too: missing
             # files, download failures, and invalid devices are reranker

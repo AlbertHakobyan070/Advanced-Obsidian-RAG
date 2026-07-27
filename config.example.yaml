@@ -62,31 +62,91 @@ embedding:
   dimensions: 384
 
 # ---------------------------------------------------------------------------
-# Named LLM backends. Any role (generation / eval.judge / ...) points at one by
-# name. Add an entry for anything speaking an OpenAI-compatible
-# /v1/chat/completions or an Anthropic-compatible endpoint.
+# Generation backends. `kind` is the WIRE PROTOCOL (openai | anthropic), not
+# the vendor — anything that speaks one of those two drops in here.
 #
-# SECRETS NEVER LIVE HERE — `api_key_env` is the NAME of an environment
-# variable. Put the value in .env (gitignored) or export it in your shell.
+# Three names are RESERVED and always selectable without an entry: openai,
+# anthropic, local. Never add an entry under one of those.
 #
-# `kind` is the WIRE PROTOCOL (openai | anthropic), not the vendor.
-# RESERVED: never name an entry openai / anthropic / local — those always take
-# the pre-registry code path so older configs keep resolving the same way.
+# A key is NEVER written here. An entry names the environment variable that
+# holds it (`api_key_env`); the console's Settings tab writes that variable
+# into the gitignored .env and reports only whether it is set.
 #
-# Note: a consumer SUBSCRIPTION is usually not API access. ChatGPT Plus grants
-# no platform.openai.com quota and X Premium grants no x.ai quota; both need
-# separately-billed API keys. Check your provider before assuming otherwise.
+# MODEL IDS MOVE. The ones below were the current default for each endpoint
+# when this file was written and are only a starting point — every endpoint
+# lists what it actually serves at GET <base_url>/models, and the console
+# copies an entry's `model` into generation.model when you activate it.
+#
+# Nothing here costs anything or runs until you select it as
+# generation.provider AND its key is present.
 # ---------------------------------------------------------------------------
 providers:
   freellmapi:
+    label: "FreeLLMAPI proxy"
+    description: "Local proxy that fronts free-tier providers; keys live in its own dashboard."
     kind: openai
     base_url: "http://localhost:3001/v1"
     model: "auto"
     api_key_env: FREELLMAPI_API_KEY
     api_key_optional: true
+
+  # ---- hosted, OpenAI-compatible ----
+  openrouter:
+    label: "OpenRouter"
+    description: "One key, most models. `openrouter/auto` picks per request."
+    kind: openai
+    base_url: "https://openrouter.ai/api/v1"
+    model: "openrouter/auto"
+    api_key_env: OPENROUTER_API_KEY
+  groq:
+    label: "Groq"
+    description: "Open-weight models on custom silicon; very low latency."
+    kind: openai
+    base_url: "https://api.groq.com/openai/v1"
+    model: "llama-3.3-70b-versatile"
+    api_key_env: GROQ_API_KEY
+  deepseek:
+    label: "DeepSeek"
+    kind: openai
+    base_url: "https://api.deepseek.com/v1"
+    model: "deepseek-chat"
+    api_key_env: DEEPSEEK_API_KEY
+  mistral:
+    label: "Mistral"
+    kind: openai
+    base_url: "https://api.mistral.ai/v1"
+    model: "mistral-large-latest"
+    api_key_env: MISTRAL_API_KEY
+  nvidia_nim:
+    label: "NVIDIA NIM"
+    description: "NVIDIA-hosted inference for open-weight models."
+    kind: openai
+    base_url: "https://integrate.api.nvidia.com/v1"
+    model: "meta/llama-3.3-70b-instruct"
+    api_key_env: NVIDIA_API_KEY
+  together:
+    label: "Together AI"
+    kind: openai
+    base_url: "https://api.together.xyz/v1"
+    model: "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+    api_key_env: TOGETHER_API_KEY
+  kimi:
+    label: "Moonshot / Kimi"
+    kind: openai
+    base_url: "https://api.moonshot.ai/v1"
+    model: "kimi-k2-0711-preview"
+    api_key_env: MOONSHOT_API_KEY
+  grok:
+    label: "xAI / Grok"
+    description: "Needs an x.ai API key — an X Premium subscription is not one."
+    kind: openai
+    base_url: "https://api.x.ai/v1"
+    model: "grok-4"
+    api_key_env: XAI_API_KEY
   # MiniMax Token Plan is an API subscription: paste its sk-cp- Subscription
   # Key into MINIMAX_API_KEY. A pay-as-you-go sk-api key is a different
-  # credential and will not consume the plan's quota.
+  # credential and will not consume the plan's quota — the prefix check below
+  # rejects it rather than letting it bill separately by surprise.
   minimax:
     label: "MiniMax M3 · Token Plan"
     description: "Subscription/Credits key from Billing > Token Plan"
@@ -95,10 +155,27 @@ providers:
     model: "MiniMax-M3"
     api_key_env: MINIMAX_API_KEY
     api_key_prefix: "sk-cp-"
+
+  # ---- models you run yourself (no key, nothing leaves the machine) ----
+  # `model` must name something the server actually has loaded; ask it with
+  #   curl <base_url>/models
+  ollama:
+    label: "Ollama (local)"
+    kind: openai
+    base_url: "http://localhost:11434/v1"
+    model: "llama3.1:8b"
+    api_key_env: null
+  lmstudio:
+    label: "LM Studio (local)"
+    kind: openai
+    base_url: "http://localhost:1234/v1"
+    model: "local-model"
+    api_key_env: null
   kobold:
+    label: "KoboldCPP (local)"
     kind: openai
     base_url: "http://localhost:5001/v1"
-    model: "gemma-4-E4B-it-Q8_k"
+    model: "local-model"
     api_key_env: null
 
 generation:
@@ -140,6 +217,21 @@ retrieval:
     base_url: "http://127.0.0.1:8101/v1"
     model: "bge-reranker-v2-m3"
     timeout: 120
+  # Ranking CRITERION for the reranker, in plain language. Retrieval already
+  # built the candidate pool against the real question; this only changes the
+  # text the RERANKER scores against, so it reweights results and can never
+  # remove any. Blank = off.
+  #   e.g. "prefer worked procedures and runnable examples over definitions"
+  #        "prefer primary sources over summaries of them"
+  # Applies to rerank_mode cross_encoder and http. IGNORED by lexical (it would
+  # dilute the query's own terms) and by none. Per-call override:
+  # {"rerank_instruction": "..."} on /search and /query.
+  rerank_instruction: ""
+  # prefix   = the instruction, a newline, then the question. Works with
+  #            any cross-encoder: it simply reframes the text scored.
+  # instruct = the labelled <Instruct>/<Query> form. Only for a reranker
+  #            documented to expect it.
+  rerank_instruction_format: prefix
   use_hyde: true
   # If a query mentions a course/domain, bias retrieval toward it
   metadata_boost: true
@@ -367,6 +459,20 @@ pdf:
     # Free text shown verbatim in the console's OCR panel when the endpoint is
     # down — your own reminder of how to start it. Never executed.
     launch_hint: "Start your vision server on :8100, then press Probe."
+  # PaddleOCR SIDECAR — the middle lane between Tesseract and a vision model.
+  # Real detection+recognition (far better on skewed, multi-column and
+  # non-Latin scans than Tesseract) at seconds per page on CPU. It runs in its
+  # OWN container/process, so its heavy dependency tree never enters this
+  # environment and you can stop it to reclaim RAM between ingests.
+  # Turn it on with pdf.ocr_engine: paddle. Delete this block to disable the
+  # lane entirely (the console then reports it as "not configured").
+  paddle_ocr:
+    base_url: "http://127.0.0.1:8103"
+    lang: "en"                              # server-side PaddleOCR language code
+    dpi: 200                                # 300 for dense small print (slower)
+    timeout: 120
+    max_pages_per_pdf: null                 # safety cap for huge scanned books
+    max_edge_px: 2000                       # cap the rendered page's long edge
   only_book_folders: false                  # true = only ingest PDFs under Books/ dirs
   max_pages_per_pdf: null                   # cap pages (null = no cap)
 notebooks:

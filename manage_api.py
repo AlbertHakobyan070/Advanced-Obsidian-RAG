@@ -1,5 +1,5 @@
 """
-manage_api.py — Corpus management console (backend) for Personal RAG.
+manage_api.py — Corpus management console (backend) for Advanced Obsidian RAG.
 
 Everything serve_api.py deliberately is NOT: ingest, index, OCR passes,
 document search/inspection, deletion, uploads — driven from a browser at
@@ -68,7 +68,7 @@ RAG_API = CFG.get("webui.rag_api", "http://127.0.0.1:8051")
 COLLECTION = CFG.get("paths.collection_name", "obsidian_vault")
 PAGE = 5000                      # ChromaDB paging batch (see module docstring)
 
-app = FastAPI(title="Personal RAG — Management Console", version="0.2.0")
+app = FastAPI(title="Advanced Obsidian RAG — Management Console", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
@@ -327,8 +327,8 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
         if prm.get("no_ocr"):
             argv.append("--no-ocr")
         if prm.get("ocr_engine"):
-            if prm["ocr_engine"] not in ("auto", "tesseract", "vlm", "none"):
-                raise ValueError("ocr_engine must be auto|tesseract|vlm|none")
+            if prm["ocr_engine"] not in ("auto", "tesseract", "paddle", "vlm", "none"):
+                raise ValueError("ocr_engine must be auto|tesseract|paddle|vlm|none")
             argv += ["--ocr-engine", prm["ocr_engine"]]
         if prm.get("include_files"):
             argv += ["--include-files", _files_csv(prm["include_files"])]
@@ -621,7 +621,7 @@ class DeleteIn(BaseModel):
 
 class InboxIngestIn(BaseModel):
     force: bool = False             # ingest even if a file looks already-indexed
-    ocr_engine: Optional[str] = None  # optional override (auto|tesseract|vlm|none)
+    ocr_engine: Optional[str] = None  # optional override (auto|tesseract|paddle|vlm|none)
     chunking: Optional[str] = None  # heading|fixed|document|none (oversized sections)
     # Batch-level metadata (inbox files carry no course path): stamped on every
     # chunk of this batch. domain feeds scope routing; tags feed tag search +
@@ -1166,9 +1166,9 @@ def ingest_inbox(body: InboxIngestIn) -> dict:
            f"_{uuid.uuid4().hex[:4]}_chunks.jsonl")
     # Validate the enums BEFORE any file moves — a 400 after moving would
     # strand files in the destination with nothing queued for them.
-    if body.ocr_engine and body.ocr_engine not in ("auto", "tesseract", "vlm", "none"):
+    if body.ocr_engine and body.ocr_engine not in ("auto", "tesseract", "paddle", "vlm", "none"):
         return JSONResponse({"ok": False,
-                             "error": "ocr_engine must be auto|tesseract|vlm|none"},
+                             "error": "ocr_engine must be auto|tesseract|paddle|vlm|none"},
                             status_code=400)
     if body.chunking and body.chunking not in ("heading", "fixed", "document", "none"):
         return JSONResponse({"ok": False,
@@ -1440,7 +1440,7 @@ def ingest_custom(body: CustomIngestIn) -> dict:
             problems.append(f"group {gi}: kind must be pdf|code|md|nb")
         if g.chunking and g.chunking not in ("heading", "fixed", "document", "none"):
             problems.append(f"group {gi}: bad chunking {g.chunking!r}")
-        if g.ocr_engine and g.ocr_engine not in ("auto", "tesseract", "vlm", "none"):
+        if g.ocr_engine and g.ocr_engine not in ("auto", "tesseract", "paddle", "vlm", "none"):
             problems.append(f"group {gi}: bad ocr_engine {g.ocr_engine!r}")
         for n in g.files:
             if n not in have:
@@ -1704,8 +1704,15 @@ EDITABLE_SETTINGS: dict[str, dict] = {
                                      "values": ["cross_encoder", "lexical",
                                                 "http", "none"],
                                      "label": "Default rerank method"},
+    # Free text: it IS the feature. Blank turns it off.
+    "retrieval.rerank_instruction": {"kind": "str",  "restart": ":8051",
+                                     "allow_empty": True,
+                                     "label": "Rerank instruction (ranking criterion)"},
+    "retrieval.rerank_instruction_format": {"kind": "enum", "restart": ":8051",
+                                     "values": ["prefix", "instruct"],
+                                     "label": "Rerank instruction format"},
     "pdf.ocr_engine":               {"kind": "enum", "restart": "none (read per job)",
-                                     "values": ["auto", "tesseract", "vlm", "none"],
+                                     "values": ["auto", "tesseract", "paddle", "vlm", "none"],
                                      "label": "OCR engine for scanned pages"},
     # Values are filled in at request time from pdf.vlm_ocr_presets.
     "pdf.vlm_ocr.preset":           {"kind": "enum", "restart": "none (read per job)",
@@ -1713,6 +1720,8 @@ EDITABLE_SETTINGS: dict[str, dict] = {
                                      "label": "VLM-OCR preset (vision model)"},
     "pdf.vlm_ocr.base_url":         {"kind": "str",  "restart": "none (read per job)",
                                      "label": "VLM-OCR endpoint (OpenAI-compatible)"},
+    "pdf.paddle_ocr.base_url":      {"kind": "str",  "restart": "none (read per job)",
+                                     "label": "PaddleOCR sidecar endpoint"},
     "parser.chunking":              {"kind": "enum", "restart": ":8052",
                                      "values": ["heading", "fixed", "document", "none"],
                                      "label": "Default chunking strategy"},
@@ -1787,6 +1796,28 @@ def _provider_choices(disk_cfg) -> tuple[list[str], list[dict]]:
     return names + list(LLMClient.RESERVED_PROVIDERS), details
 
 
+def _hub_credentials() -> list[dict]:
+    """Non-provider credentials the console can manage, and their real state.
+
+    `source` matters: huggingface_hub reads a token from an environment
+    variable OR from a stored login file, and a stale one in EITHER place
+    breaks every model download with a misleading "not found". The console has
+    to be able to show which one is in play, not just whether an env var is set.
+    """
+    rows = []
+    for env, why in _EXTRA_KEY_ENVS.items():
+        value = os.environ.get(env, "")
+        rows.append({"env": env, "why": why, "present": bool(value)})
+    stored = None
+    try:
+        from huggingface_hub import constants, get_token
+        if get_token():
+            stored = str(constants.HF_TOKEN_PATH)
+    except Exception:                            # hub not installed / moved
+        pass
+    return [{"credentials": rows, "stored_token_path": stored}][0]
+
+
 def _with_current(choices: list[str], current: Any) -> list[str]:
     """Enum members + whatever the config already holds.
 
@@ -1846,48 +1877,76 @@ def _torch_devices() -> tuple[dict, list[str]]:
     return info, choices
 
 
-def _persist_section_keys(cfg_path: Path, changes: dict[str, Any]) -> list[str]:
-    """Rewrite `section.leaf` values in config.yaml IN PLACE, preserving
-    comments and layout. Section-aware (unlike persist_config_values) so keys
-    that repeat across sections — vault_path, model — stay unambiguous: the
-    leaf must appear exactly once WITHIN its top-level section block.
+_YAML_KEY_RE = re.compile(
+    r"^(?P<indent>[ \t]*)(?P<key>[A-Za-z0-9_][A-Za-z0-9_.\-]*)"
+    r"(?P<pre_tail>[ \t]*:[ \t]*)(?P<val>[^#\r\n]*?)"
+    r"(?P<post>[ \t]*(?:#[^\r\n]*)?)$")
 
-    Deeper keys (`pdf.vlm_ocr.preset`) are matched on their LAST segment, still
-    scoped to the top-level section. That keeps the guarantee that matters: a
-    leaf occurring more than once in the section raises rather than guessing
-    which nesting level was meant."""
+
+def _yaml_key_index(lines: list[str]) -> list[tuple[int, str, "re.Match[str]"]]:
+    """Index every `key: value` line as (line_no, FULL dotted path, match).
+
+    Nesting comes from indentation, so `generation.model` and
+    `generation.local.model` are two different paths instead of two hits on the
+    same leaf name. That distinction is the whole point: matching on the last
+    segment made every provider switch fail with "found 2 matches", because
+    `generation:` carries both its own `model` and the legacy `local:` block's.
+
+    Blank lines, comments and sequence items are skipped. A sequence item never
+    holds a scalar this writer is allowed to touch, and letting `- name: x`
+    push the indent stack would mis-parent every key after it.
+    """
+    index: list[tuple[int, str, re.Match[str]]] = []
+    stack: list[tuple[int, str]] = []                 # (indent width, key)
+    for i, ln in enumerate(lines):
+        stripped = ln.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith("-"):
+            continue
+        m = _YAML_KEY_RE.match(ln)
+        if not m:
+            continue
+        indent = len(m.group("indent").expandtabs(8))
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        path = ".".join([k for _, k in stack] + [m.group("key")])
+        index.append((i, path, m))
+        stack.append((indent, m.group("key")))
+    return index
+
+
+def _persist_section_keys(cfg_path: Path, changes: dict[str, Any]) -> list[str]:
+    """Rewrite dotted keys in config.yaml IN PLACE, preserving comments and
+    layout.
+
+    Keys are matched on their FULL path (see _yaml_key_index), so a leaf name
+    that repeats at different depths or in different sections — `model`,
+    `base_url`, `vault_path` — is never ambiguous. The safety guarantee is
+    unchanged: a path that does not resolve to exactly one line raises instead
+    of guessing which one was meant.
+    """
     text = cfg_path.read_text(encoding="utf-8")
     lines = text.split("\n")
+    index = _yaml_key_index(lines)
     written: list[str] = []
     for dotted, value in changes.items():
-        section, _, rest = dotted.partition(".")
-        leaf = rest.rsplit(".", 1)[-1]
         sval = ("true" if value else "false") if isinstance(value, bool) else str(value)
         if any(c in sval for c in "\r\n"):
             raise ValueError(f"{dotted}: newlines not allowed")
         # quote strings that YAML would mangle (paths with ':' etc.)
         if not re.fullmatch(r"[\w.\-/]+", sval):
             sval = '"' + sval.replace('"', '\\"') + '"'
-        sec_re = re.compile(rf"^{re.escape(section)}\s*:\s*(#.*)?$")
-        key_re = re.compile(
-            rf"^(?P<pre>[ \t]+{re.escape(leaf)}[ \t]*:[ \t]*)(?P<val>[^#\r\n]*?)(?P<post>[ \t]*(?:#[^\r\n]*)?)$")
-        hits = []
-        in_sec = False
-        for i, ln in enumerate(lines):
-            if sec_re.match(ln):
-                in_sec = True
-                continue
-            if in_sec and ln and not ln[0] in " \t#":
-                in_sec = False               # next top-level key ends the block
-            if in_sec:
-                m = key_re.match(ln)
-                if m:
-                    hits.append((i, m))
-        if len(hits) != 1:
+        hits = [(i, m) for i, path, m in index if path == dotted]
+        if not hits:
+            raise ValueError(f"{dotted}: no such key in {cfg_path.name} — add it "
+                             f"to the file before setting it from the console")
+        if len(hits) > 1:
+            where = ", ".join(f"line {i + 1}" for i, _ in hits)
             raise ValueError(f"{dotted}: found {len(hits)} matches in "
-                             f"{cfg_path.name}; refusing to rewrite ambiguously")
+                             f"{cfg_path.name} ({where}); refusing to rewrite "
+                             f"ambiguously")
         i, m = hits[0]
-        lines[i] = m.group("pre") + sval + m.group("post")
+        lines[i] = m.group("indent") + m.group("key") + m.group("pre_tail") \
+            + sval + m.group("post")
         written.append(dotted)
     if written:
         cfg_path.write_text("\n".join(lines), encoding="utf-8")
@@ -1926,6 +1985,7 @@ def settings() -> dict:
     return {
         "rag_api": RAG_API,
         "providers": provider_details,
+        "hub": _hub_credentials(),
         "judge_provider": disk_cfg.get("eval.judge.provider"),
         "rerankers": [{"id": k, **v} for k, v in KNOWN_RERANKERS.items()],
         "rerank_profiles": [{"id": k, **v} for k, v in RERANK_PROFILES.items()],
@@ -1933,7 +1993,7 @@ def settings() -> dict:
         "vault_path": str(CFG.get("pdf.vault_path") or CFG.get("parser.vault_path")),
         "inbox_dir": CFG.get("webui.inbox_dir") or "Inbox",
         "jsonl_files": [p.name for p in chunk_files()],
-        "ocr_engines": ["auto", "tesseract", "vlm", "none"],
+        "ocr_engines": ["auto", "tesseract", "paddle", "vlm", "none"],
         "taxonomy": _taxonomy(disk_cfg),
         "config_path": str(ROOT / "config.yaml"),
         "editable": editable,
@@ -2093,6 +2153,25 @@ def _env_file() -> Path:
     return ROOT / ".env"
 
 
+# Credentials that are not generation providers but that this system genuinely
+# needs to be able to set. Kept as an explicit allowlist for the same reason
+# the provider names are: the .env writer must never become a way to set
+# arbitrary environment variables for every job the worker spawns.
+#
+# HF_TOKEN earns its place because a WRONG one is actively harmful and almost
+# undiagnosable from outside: the hub answers 401 for an unauthorized request,
+# huggingface_hub reports that as "repository not found", and every public
+# embedding or reranker model then looks like it does not exist. Being able to
+# clear it from the console is as important as being able to set it.
+_EXTRA_KEY_ENVS = {
+    "HF_TOKEN": "Hugging Face token — only needed for GATED or PRIVATE models. "
+                "Public embedding and reranker models need none, and an "
+                "invalid one makes them all fail as 'not found'.",
+    "HUGGING_FACE_HUB_TOKEN": "Legacy name for HF_TOKEN; set only if a tool "
+                              "you use still reads this one.",
+}
+
+
 def _known_key_envs(disk_cfg) -> set[str]:
     """Env-var names this config actually reads a key from.
 
@@ -2102,6 +2181,7 @@ def _known_key_envs(disk_cfg) -> set[str]:
     already declares keeps it to what it is for.
     """
     names = {"OPENAI_API_KEY", "ANTHROPIC_API_KEY"}   # the reserved lanes
+    names |= set(_EXTRA_KEY_ENVS)
     for spec in (disk_cfg.get("providers", {}) or {}).values():
         env = (spec or {}).get("api_key_env")
         if env:
@@ -2188,6 +2268,181 @@ def provider_key(body: ProviderKeyIn) -> dict:
                     f"to pick it up (this console already has it)."}
 
 
+# ---- reranker preflight ----
+
+def _model_cache_roots() -> list[Path]:
+    """Every directory a cached model could actually be sitting in.
+
+    There is no single answer, which is the whole reason this exists. The
+    reranker is loaded by sentence-transformers, which honours
+    SENTENCE_TRANSFORMERS_HOME **over** HF_HOME; meanwhile HF_HUB_CACHE can be
+    set machine-wide to a third location that overrides HF_HOME for
+    huggingface_hub itself. On this project's own machine those really are three
+    different drives, so probing only the hub's idea of the cache reports a
+    model as absent while the pipeline loads it fine from elsewhere.
+    """
+    roots: list[Path] = []
+
+    def add(p: str | None, *suffix: str) -> None:
+        if not p:
+            return
+        cand = Path(p).joinpath(*suffix)
+        if cand not in roots:
+            roots.append(cand)
+
+    add(os.environ.get("SENTENCE_TRANSFORMERS_HOME"))
+    add(os.environ.get("HF_HUB_CACHE"))
+    add(os.environ.get("HUGGINGFACE_HUB_CACHE"))
+    add(os.environ.get("HF_HOME"), "hub")
+    add(os.environ.get("HF_HOME"), "st")
+    try:
+        from huggingface_hub import constants
+        add(constants.HF_HUB_CACHE)
+    except Exception:                            # hub layout changed
+        pass
+    add(str(Path.home() / ".cache" / "huggingface"), "hub")
+    return roots
+
+
+def _model_is_cached(model: str) -> tuple[bool, str | None]:
+    """(is_cached, where). `where` is None when nothing could be inspected.
+
+    Matches the `models--org--name` directory layout both caches share, and
+    requires an actual weights file — a metadata-only directory (a previous
+    failed download, or hub's `.no_exist` bookkeeping) is not a cached model.
+    """
+    slug = "models--" + model.replace("/", "--")
+    looked = False
+    for root in _model_cache_roots():
+        try:
+            if not root.is_dir():
+                continue
+            looked = True
+            snaps = root / slug / "snapshots"
+            if not snaps.is_dir():
+                continue
+            for snap in snaps.iterdir():
+                for name in ("model.safetensors", "pytorch_model.bin",
+                             "model.onnx"):
+                    if (snap / name).exists():
+                        return True, str(snap)
+        except OSError:                          # unreadable drive, permissions
+            continue
+    return False, (str(len(_model_cache_roots())) + " roots" if looked else None)
+
+
+class RerankCheckIn(BaseModel):
+    model: Optional[str] = None          # default: whatever config.yaml holds
+    max_length: Optional[int] = None
+
+
+@app.post("/api/rerank/check")
+def rerank_check(body: RerankCheckIn) -> dict:
+    """Can this cross-encoder actually be used here, and what will it cost?
+
+    Switching reranker is a config write plus a :8051 restart, and until now
+    every way it could go wrong looked identical from the console: the restart
+    just never reported ready. The two real causes are boring and both
+    detectable BEFORE the restart —
+
+      * the id does not exist / the host cannot reach the hub (typo, offline,
+        a container with no egress);
+      * the weights are not in the local cache yet, so the next :8051 boot
+        spends several minutes downloading before it can answer anything.
+
+    No weights are downloaded here: this asks the hub for metadata and looks in
+    the cache. A model that is unreachable AND uncached is reported as not
+    usable, because that restart WILL fail.
+    """
+    from src.utils.config_loader import load_config as _load
+    from src.retrieval.reranker import KNOWN_RERANKERS
+
+    disk_cfg = _load()
+    model = (body.model or disk_cfg.get("retrieval.cross_encoder_model") or "").strip()
+    if not model:
+        return JSONResponse({"ok": False, "error": "no cross-encoder configured"},
+                            status_code=400)
+    raw_len = body.max_length if body.max_length is not None \
+        else disk_cfg.get("retrieval.cross_encoder_max_length")
+    warnings: list[str] = []
+
+    known = KNOWN_RERANKERS.get(model)
+    try:
+        max_length = int(raw_len)
+    except (TypeError, ValueError):
+        max_length = None
+        warnings.append("retrieval.cross_encoder_max_length is not an integer")
+    if known and max_length and max_length > int(known["context_length"]):
+        warnings.append(
+            f"max_length={max_length} exceeds {model}'s "
+            f"{known['context_length']}-token limit — the model raises an "
+            f"opaque position-embedding error at query time")
+
+    cached, cache_hit = _model_is_cached(model)
+    if cache_hit is None:
+        warnings.append("could not inspect the local model cache")
+
+    reachable, detail = None, None
+    try:
+        from huggingface_hub import model_info
+        info = model_info(model)
+        reachable = True
+        detail = f"{info.id} ({info.pipeline_tag or 'no pipeline tag'})"
+    except Exception as e:                       # offline, 404, auth, timeout
+        reachable = False
+        detail = f"{type(e).__name__}: {e}"
+        # A STALE CREDENTIAL LOOKS EXACTLY LIKE A MISSING MODEL. The hub answers
+        # 401 for an unauthorized request and huggingface_hub surfaces that as
+        # RepositoryNotFoundError, so an expired token makes every public
+        # cross-encoder report "does not exist" — and the download :8051
+        # attempts at boot fails the same way, with the same misleading message.
+        #
+        # Retry anonymously to find out which it actually is. The credential can
+        # come from an environment variable OR from a stored login file, so this
+        # does not condition on the env vars alone; it asks where the token
+        # actually came from only to name it in the warning.
+        try:
+            info = model_info(model, token=False)
+        except Exception as e2:
+            detail = (f"{type(e).__name__}: {e} "
+                      f"(anonymous retry also failed: {type(e2).__name__})")
+        else:
+            reachable = True
+            detail = f"{info.id} (reachable anonymously)"
+            where = ", ".join(
+                v for v in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN",
+                            "HUGGINGFACEHUB_API_TOKEN")
+                if os.environ.get(v))
+            if not where:
+                try:
+                    from huggingface_hub import constants
+                    where = f"the stored login at {constants.HF_TOKEN_PATH}"
+                except Exception:
+                    where = "a stored Hugging Face login"
+            warnings.append(
+                f"the Hugging Face hub REJECTED the credential from {where}, "
+                f"but this model is public and reachable without one. Fix or "
+                f"remove that credential — otherwise :8051 hits the same 401 "
+                f"downloading the weights, and reports it as 'model not found'")
+
+    usable = bool(cached or reachable)
+    if not usable:
+        warnings.append(
+            "not in the local cache and the hub is not reachable — restarting "
+            ":8051 with this model would fail to build the pipeline")
+    elif not cached:
+        warnings.append(
+            "not cached yet: the next :8051 start downloads the weights first, "
+            "so 'ready' can take several minutes on a slow link")
+
+    return {"ok": True, "model": model, "usable": usable, "cached": cached,
+            "cache_path": cache_hit if cached else None,
+            "reachable": reachable, "hub": detail,
+            "max_length": max_length,
+            "context_length": known["context_length"] if known else None,
+            "known": bool(known), "warnings": warnings}
+
+
 # ---- OCR engines (status + warm-up) ----
 
 @app.get("/api/ocr/status")
@@ -2254,21 +2509,45 @@ def ocr_status() -> dict:
     except Exception as e:
         vlm["error"] = f"{type(e).__name__}: {e}"
 
+    # --- paddle sidecar ---
+    # A separate container by design, so "configured" and "reachable" are two
+    # genuinely different states here: the config can name a sidecar that is
+    # simply stopped, which is the normal way to give its RAM back between
+    # ingests. The panel says which one it is instead of "OCR is broken".
+    paddle: dict = {"configured": False, "reachable": False, "base_url": None,
+                    "lang": None, "langs": [], "error": None}
+    if disk_cfg.get("pdf.paddle_ocr") or {}:
+        try:
+            from src.ingestion.ocr_paddle import PaddleOCRClient
+            client = PaddleOCRClient.from_config(disk_cfg)
+            paddle.update({"configured": True, "base_url": client.base_url,
+                           "lang": client.lang})
+            import requests
+            r = requests.get(f"{client.base_url}/health", timeout=5)
+            paddle["reachable"] = r.status_code < 500
+            if r.ok and isinstance(r.json(), dict):
+                paddle["langs"] = r.json().get("langs") or []
+        except Exception as e:
+            paddle["error"] = f"{type(e).__name__}: {e}"
+
     engine = str(disk_cfg.get("pdf.ocr_engine", "auto"))
     # What the ingest path would ACTUALLY resolve to, which is not always what
-    # ocr_engine says: "vlm" with no vlm block falls back to auto-detection,
-    # and "auto"/"tesseract" without tessdata resolves to no OCR at all.
+    # ocr_engine says: an off-process engine with no config block falls back to
+    # auto-detection, and "auto"/"tesseract" without tessdata resolves to no
+    # OCR at all.
     if engine == "none" or not disk_cfg.get("pdf.ocr_enabled", True):
         effective = "none"
     elif engine == "vlm":
         effective = "vlm" if vlm["configured"] else (detected or "none")
+    elif engine == "paddle":
+        effective = "paddle" if paddle["configured"] else (detected or "none")
     else:
         effective = detected or "none"
 
     return {"engine": engine, "effective": effective,
             "ocr_enabled": bool(disk_cfg.get("pdf.ocr_enabled", True)),
             "language": disk_cfg.get("pdf.ocr_language", "eng"),
-            "tesseract": tess, "vlm": vlm,
+            "tesseract": tess, "vlm": vlm, "paddle": paddle,
             "launch_hint": disk_cfg.get("pdf.vlm_ocr.launch_hint")}
 
 
@@ -2617,6 +2896,28 @@ _RESTART_LOCK = threading.Lock()
 # pid restarts the query API without restarting the whole container.
 _SERVE_PID_FILE = Path(os.environ.get("RAG_SERVE_PID_FILE")
                        or (ROOT / "logs" / "serve_api.pid"))
+# The supervisor bumps this counter on every launch. It is the only reliable
+# proof that a relaunch HAPPENED: pids can repeat, and "the pid file changed"
+# is not the same statement as "a new process started".
+_SERVE_GEN_FILE = Path(str(_SERVE_PID_FILE) + ".generation")
+
+
+def _serve_api_log_path() -> Path:
+    """Where the query API's startup output lands, on either platform.
+
+    The console needs this because a failed :8051 boot is invisible otherwise:
+    in the container the traceback goes to the supervisor's stdout, which the
+    browser cannot see.
+    """
+    log_dir = Path(os.environ.get("RAG_LOG_DIR") or (ROOT / "logs"))
+    return log_dir / f"serve_api_{_rag_port()}.out.log"
+
+
+def _read_generation() -> int | None:
+    try:
+        return int(_SERVE_GEN_FILE.read_text(encoding="utf-8").strip())
+    except (ValueError, OSError):
+        return None
 
 
 def _restart_rag_api_posix() -> dict:
@@ -2640,6 +2941,7 @@ def _restart_rag_api_posix() -> dict:
         pid = int(_SERVE_PID_FILE.read_text(encoding="utf-8").strip())
     except (ValueError, OSError) as e:
         raise RuntimeError(f"unreadable pid file {_SERVE_PID_FILE}: {e}")
+    old_gen = _read_generation()
     with _RESTART_LOCK:
         try:
             os.kill(pid, signal.SIGTERM)
@@ -2649,21 +2951,36 @@ def _restart_rag_api_posix() -> dict:
                 f"have restarted it already; check the container logs")
         except PermissionError as e:
             raise RuntimeError(f"cannot signal pid {pid}: {e}")
-        # Wait for the supervisor to write a NEW pid (up to 10s). The old pid
-        # dying is not enough — the relaunch is what makes :8051 come back.
-        new_pid = pid
-        for _ in range(20):
+        # Wait for the supervisor to record a NEW launch. The old pid dying is
+        # not enough — the relaunch is what makes :8051 come back. 30s, not the
+        # old 10s: a crashed serve_api takes the supervisor's 5s crash penalty
+        # first, and giving up before that reported a failure that had not
+        # happened yet.
+        new_pid, new_gen, relaunched = pid, old_gen, False
+        for _ in range(60):
             time.sleep(0.5)
+            gen = _read_generation()
             try:
                 new_pid = int(_SERVE_PID_FILE.read_text(encoding="utf-8").strip())
             except (ValueError, OSError):
                 continue
-            if new_pid != pid:
+            # Either signal is enough; a supervisor without the counter file
+            # (an older bundle) still works off the pid change alone.
+            if (gen is not None and old_gen is not None and gen != old_gen) \
+                    or new_pid != pid:
+                new_gen, relaunched = gen, True
                 break
-    log.info("restarted :%d via SIGTERM (old pid %s -> new pid %s)",
-             port, pid, new_pid)
-    return {"port": port, "killed_pid": pid,
-            "new_pid": new_pid if new_pid != pid else None}
+    if not relaunched:
+        raise RuntimeError(
+            f"signalled serve_api (pid {pid}) but the supervisor did not "
+            f"relaunch it within 30s. The container's entrypoint is what "
+            f"relaunches it — if this bundle predates the supervised "
+            f"entrypoint, restart the service instead: "
+            f"docker compose restart rag")
+    log.info("restarted :%d via SIGTERM (old pid %s -> new pid %s, gen %s)",
+             port, pid, new_pid, new_gen)
+    return {"port": port, "killed_pid": pid, "new_pid": new_pid,
+            "generation": new_gen}
 
 
 def _restart_rag_api() -> dict:
@@ -2688,7 +3005,7 @@ def _restart_rag_api() -> dict:
                 if _pid_on_port(port) is None:
                     break
                 time.sleep(0.5)
-        log_path = ROOT / "logs" / "serve_api_8051.out.log"
+        log_path = _serve_api_log_path()
         log_path.parent.mkdir(parents=True, exist_ok=True)
         lf = open(log_path, "ab")
         flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
@@ -2709,10 +3026,40 @@ def service_restart() -> dict:
     try:
         info = _restart_rag_api()
     except (RuntimeError, OSError) as e:
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        return JSONResponse({"ok": False, "error": str(e),
+                             "log": str(_serve_api_log_path())},
+                            status_code=400)
     return {"ok": True, **info,
+            "log": str(_serve_api_log_path()),
             "note": "Warm pipeline reloading — poll /health until ready "
-                    "(~1–3 min; models + both indexes load from scratch)."}
+                    "(~1–3 min; models + both indexes load from scratch). "
+                    "If it does not come back, GET /api/service/log says why."}
+
+
+@app.get("/api/service/log")
+def service_log(lines: int = 80) -> dict:
+    """Tail the query API's startup log.
+
+    This is the missing half of the restart lane. A :8051 that never comes back
+    is almost always a pipeline that cannot build — a cross-encoder that could
+    not be downloaded, a model id with a typo, an index path that moved — and
+    that traceback lives in a file (Windows) or the supervisor's stdout
+    (container) which the browser cannot reach. Without it the console could
+    only report "still not ready", which is a symptom, not a cause.
+    """
+    path = _serve_api_log_path()
+    lines = max(1, min(int(lines), 500))
+    if not path.exists():
+        return {"ok": True, "path": str(path), "exists": False, "lines": [],
+                "note": "no log yet — :8051 has not been started by this "
+                        "console (or by the container entrypoint) since boot"}
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        return JSONResponse({"ok": False, "error": f"cannot read {path}: {e}"},
+                            status_code=500)
+    tail = text.splitlines()[-lines:]
+    return {"ok": True, "path": str(path), "exists": True, "lines": tail}
 
 
 @app.get("/api/schema")
@@ -2727,13 +3074,13 @@ def api_schema() -> dict:
       * mutating   — changes local state or invokes a potentially billed
                      external action; ask the operator first
                      (config/secrets/ingest/append/retag/OCR warm)
-      * destructive— removes content; ALWAYS confirm with the operator, echo exactly
+      * destructive— removes content; ALWAYS confirm with the operator, echo
                      what will be deleted, and never run unprompted.
     This is a POLICY the agent enforces (the local API has no auth) — the tiers
     exist so a toolkit/skill can gate calls. See the rag-ops skill.
     """
     return {
-        "service": "personal-rag-management-console",
+        "service": "advanced-obsidian-rag-console",
         "version": app.version,
         "base_url": f"http://127.0.0.1:{CFG.get('webui.port', 8052)}",
         "query_api": RAG_API,
@@ -2801,7 +3148,7 @@ def api_schema() -> dict:
                 "purpose": "the sanctioned inbox lane: dup-check -> ingest -> "
                            "append (archives processed PDFs). Chains two jobs.",
                 "body": {"force": "bool (past the 409 dup guard)",
-                         "ocr_engine": "auto|tesseract|vlm|none?",
+                         "ocr_engine": "auto|tesseract|paddle|vlm|none?",
                          "chunking": "heading|fixed|document|none?",
                          "domain": "str? (stamped on the batch)",
                          "tags": "list[str]?",
@@ -2906,6 +3253,16 @@ def api_schema() -> dict:
                            "mismatches.",
                 "body": {"env": "configured environment-variable name",
                          "value": "secret value, or blank to clear"}},
+            "POST /api/rerank/check": {
+                "permission": "read",
+                "purpose": "preflight a cross-encoder id before switching to "
+                           "it: is it reachable, is it already in the local "
+                           "model cache, and is max_length within its context "
+                           "limit. Downloads nothing. Call this before writing "
+                           "retrieval.cross_encoder_model — an unreachable, "
+                           "uncached model makes the next :8051 start fail.",
+                "body": {"model": "cross-encoder id (default: the configured one)",
+                         "max_length": "int? (default: the configured one)"}},
             "GET /api/ocr/status": {
                 "permission": "read",
                 "purpose": "resolved Tesseract/VLM OCR capability, model "
@@ -2920,10 +3277,22 @@ def api_schema() -> dict:
                 "purpose": "kill + relaunch the warm query API (:8051) so it "
                            "serves the current indexes. /health flips ready "
                            "after model/index loading. Native Windows and POSIX "
-                           "hosts are supported; a containerized deployment "
-                           "should restart the service/container. "
+                           "hosts are supported; the container's supervised "
+                           "entrypoint makes this work without restarting the "
+                           "container. Returns the relaunch generation counter; "
+                           "if the supervisor does not relaunch within 30s this "
+                           "fails loudly instead of reporting a restart that "
+                           "did not happen. "
                            "webui.auto_restart_rag=true does this automatically "
                            "after index-changing jobs."},
+            "GET /api/service/log?lines=": {
+                "permission": "read",
+                "purpose": "tail the query API's startup log. This is how you "
+                           "diagnose a :8051 that restarts but never reports "
+                           "ready — the pipeline build error (bad model id, "
+                           "undownloadable reranker, moved index path) is "
+                           "here, and GET /health on :8051 carries the same "
+                           "reason as {state: failed, error}."},
             "POST /api/jobs": {
                 "permission": "mutating",
                 "purpose": "queue a job. Kinds + params under `job_kinds` below.",
@@ -2958,7 +3327,7 @@ def api_schema() -> dict:
                            "include_files": "list[str] (exact filenames)",
                            "output": "data/*.jsonl", "max_pages": "int",
                            "pages": '"1-50,60,70-80" (1-based subset)',
-                           "ocr_engine": "auto|tesseract|vlm|none",
+                           "ocr_engine": "auto|tesseract|paddle|vlm|none",
                            "chunking": "heading|fixed|document|none (how "
                                        "oversized sections split; fixed = "
                                        "sliding window for OCR walls, document "

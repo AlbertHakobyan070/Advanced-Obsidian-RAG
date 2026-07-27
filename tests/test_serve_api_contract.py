@@ -292,10 +292,20 @@ class _NoopReranker:
     mode = "cross_encoder"
     model_name = "test/reranker"
     max_length = 512
+    instruction = None
+    instruction_format = "prefix"
 
     @staticmethod
-    def rerank(question, docs, top_k=None, mode=None):
+    def rerank(question, docs, top_k=None, mode=None, instruction=None):
         return docs[:top_k]
+
+    @staticmethod
+    def scoring_query(query, mode, instruction=None):
+        """Mirrors Reranker.scoring_query so the retrieval echo stays truthful."""
+        text = (instruction or "").strip()
+        if not text or mode in ("lexical", "none"):
+            return query
+        return f"{text}\n{query}"
 
 
 def _pipeline_with_code_preset():
@@ -532,3 +542,26 @@ def test_generator_construction_failure_is_configuration_error(monkeypatch):
 
     assert result.confidence == "ERROR"
     assert result.answer.startswith("Generation configuration failed:")
+
+
+# --------------------------------------------- comparison-tree discoverability
+
+def test_branch_limits_are_declared_once_and_enforced():
+    """The caps used to exist three times: a pydantic Field, an inline check,
+    and a sentence of English in the schema. That is exactly the shape of a
+    limit that drifts away from what the endpoint actually enforces."""
+    import serve_api as S
+    field = S.CompareIn.model_fields["branches"]
+    constraints = {type(m).__name__: m for m in field.metadata}
+    assert constraints["MinLen"].min_length == S._BRANCH_MIN
+    assert constraints["MaxLen"].max_length == S._BRANCH_MAX
+    assert S._BRANCH_MAX_QUERY < S._BRANCH_MAX
+
+
+def test_rerank_instruction_is_accepted_by_every_shape_that_reranks():
+    """search, query and a compare branch must all take the criterion, or an
+    agent can use it in one place and silently lose it in another."""
+    import serve_api as S
+    for model in (S.SearchIn, S.QueryIn, S.CompareBranchIn):
+        assert "rerank_instruction" in model.model_fields, model.__name__
+    assert "rerank_instruction" in S._RETRIEVAL_FIELDS

@@ -127,6 +127,7 @@ class RAGPipeline:
         neighbor_context: bool | None = None,
         hype: bool | None = None,
         rerank: str | None = None,
+        rerank_instruction: str | None = None,
         auto_preset: bool = True,
     ) -> tuple[list, dict]:
         """
@@ -174,8 +175,12 @@ class RAGPipeline:
             hype=use_hype,
         )
         rerank_mode = rerank if rerank is not None else overrides.get("rerank_mode")
+        # "" is meaningful here: it turns a configured criterion OFF for this
+        # call, which `or` would silently discard.
+        instruction = (rerank_instruction if rerank_instruction is not None
+                       else overrides.get("rerank_instruction"))
         top = self.reranker.rerank(question, candidates, top_k=k,
-                                   mode=rerank_mode)
+                                   mode=rerank_mode, instruction=instruction)
 
         # E2 small-to-big (post-rerank): per-call beats preset beats config.
         parent_on = parent_context
@@ -219,6 +224,20 @@ class RAGPipeline:
             "hype": bool(use_hype if use_hype is not None
                          else self.retriever.hype_enabled),
             "rerank_mode": (rerank_mode or self.reranker.mode),
+            # Report the criterion that was APPLIED, not the one that was
+            # asked for: `lexical` and `none` ignore it by design, and an echo
+            # that claimed otherwise would make a no-op look like a setting.
+            "rerank_instruction": (
+                (instruction if instruction is not None
+                 else self.reranker.instruction) or None
+                if (rerank_mode or self.reranker.mode) in ("cross_encoder", "http")
+                else None
+            ),
+            "rerank_instruction_applied": (
+                self.reranker.scoring_query(
+                    question, (rerank_mode or self.reranker.mode), instruction)
+                != question
+            ),
             "reranker_model": (
                 self.reranker.model_name
                 if (rerank_mode or self.reranker.mode) == "cross_encoder"
@@ -245,6 +264,7 @@ class RAGPipeline:
         neighbor_context: bool | None = None,
         hype: bool | None = None,
         rerank: str | None = None,
+        rerank_instruction: str | None = None,
         max_tokens: int | None = None,
         auto_preset: bool = True,
     ) -> Answer:
@@ -259,7 +279,8 @@ class RAGPipeline:
             dense_top_k=dense_top_k, sparse_top_k=sparse_top_k,
             hyde=hyde, omnisearch=omnisearch,
             parent_context=parent_context, neighbor_context=neighbor_context,
-            hype=hype, rerank=rerank, auto_preset=auto_preset,
+            hype=hype, rerank=rerank, rerank_instruction=rerank_instruction,
+            auto_preset=auto_preset,
         )
         answer = self.generator.generate(question, top, max_tokens=max_tokens)
         answer.retrieval = info

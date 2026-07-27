@@ -141,7 +141,7 @@ def test_current_value_is_never_stranded():
 
 @needs_config
 def test_nested_dotted_keys_persist(tmp_path):
-    """pdf.vlm_ocr.preset lives two levels deep; only its leaf is matched."""
+    """pdf.vlm_ocr.preset lives two levels deep and is matched by full path."""
     cfg = tmp_path / "c.yaml"
     cfg.write_text(
         "pdf:\n"
@@ -156,10 +156,29 @@ def test_nested_dotted_keys_persist(tmp_path):
 
 
 @needs_config
-def test_an_ambiguous_leaf_still_refuses(tmp_path):
-    """The safety property that made this section-aware in the first place."""
+def test_the_same_leaf_at_two_paths_is_not_ambiguous(tmp_path):
+    """Two sibling blocks may each hold a `model`; the paths differ, so both
+    are addressable.
+
+    This used to raise. The writer matched on the LAST path segment scoped to
+    the top-level section, which made every distinct nesting of a repeated leaf
+    look like a collision — and that is what broke switching the generation
+    backend from the console (`generation.model` vs `generation.local.model`).
+    """
     cfg = tmp_path / "c.yaml"
     cfg.write_text("retrieval:\n  a:\n    model: x\n  b:\n    model: y\n",
+                   encoding="utf-8")
+    M._persist_section_keys(cfg, {"retrieval.a.model": "z"})
+    text = cfg.read_text(encoding="utf-8")
+    assert "    model: z\n" in text
+    assert "    model: y\n" in text          # sibling untouched
+
+
+@needs_config
+def test_a_genuinely_duplicated_path_still_refuses(tmp_path):
+    """The safety property itself: one path, two lines -> refuse, never guess."""
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text("retrieval:\n  a:\n    model: x\n    model: y\n",
                    encoding="utf-8")
     with pytest.raises(ValueError, match="refusing to rewrite ambiguously"):
         M._persist_section_keys(cfg, {"retrieval.a.model": "z"})

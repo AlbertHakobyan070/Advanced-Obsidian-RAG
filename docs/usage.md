@@ -25,6 +25,17 @@ python main.py chat                        # interactive REPL
 python main.py eval [--retrieval-only]     # score the golden suite
 ```
 
+**OCR engines** (`--ocr-engine`, also per job in the console): `auto` — probe for
+Tesseract and use it if present (the default); `tesseract` — pin the classic
+in-process binary; `paddle` — a PaddleOCR service reached over HTTP
+(`pdf.paddle_ocr`), much stronger on skewed, multi-column and non-Latin scans and
+still seconds per page on CPU; `vlm` — a document vision model over HTTP
+(`pdf.vlm_ocr`) for the hardest material; `none` — no OCR, scanned pages stay
+sparse. The two HTTP lanes run out-of-process on purpose, so heavy OCR
+dependencies never enter the query environment and can be shut down when idle.
+Run `GET /api/import/ocr_scan` (the 🔎 button) first — it reports which pages
+actually lack extractable text, so you only OCR those.
+
 **Chunking strategies** (`--chunking`, also selectable per run in the console): `heading` —
 paragraph packing that follows the text's structure (default); `fixed` — strict sliding
 window, for OCR'd / wall-of-text sources; `document` — element-aware packing that never
@@ -41,7 +52,7 @@ The warm endpoint keeps the indexes and models hot, so queries never pay startup
     ```bash
     curl -s -X POST http://127.0.0.1:8051/query \
       -H "Content-Type: application/json" \
-      -d '{"q": "Explain conjugate priors from my notes", "preset": "concept"}'
+      -d '{"q": "What does the retention policy say about backups?", "preset": "concept"}'
     ```
 
 === "Search (retrieval only, no LLM)"
@@ -58,7 +69,7 @@ The warm endpoint keeps the indexes and models hot, so queries never pay startup
     curl -s -X POST http://127.0.0.1:8051/compare \
       -H "Content-Type: application/json" \
       -d '{
-        "q": "Explain conjugate priors from my notes",
+        "q": "What does the retention policy say about backups?",
         "mode": "search",
         "branches": [
           {"id": "baseline", "label": "Config baseline", "auto_preset": false},
@@ -122,6 +133,11 @@ the question, the knobs the caller explicitly set, the full retrieval echo of wh
 actually ran, confidence and timing — so an agent tuning hyperparameters can see what
 it already tried instead of re-deriving it.
 
+`GET /compare/options` returns ready-to-post `/compare` branches for each
+dimension (presets, rerank methods, generation backends) together with the live
+branch caps — so building a comparison never means joining `/schema` and
+`/providers` by hand.
+
 `GET /chunks/{chunk_id}` fetches the current evidence record behind a stable id returned
 from `/search`, `/query`, or `/compare` when `lookup_available` is true.
 Parent-expanded sections use a `parent:<id>` evidence id and also report the indexed
@@ -174,6 +190,7 @@ retrieval:
 | `top_k` / `rerank_top_k` | How many reranked chunks reach the generator. |
 | `dense_top_k` / `sparse_top_k` | Candidate-pool width per lane before fusion. |
 | `use_hyde` / `hype` | Toggle query expansion. |
+| `rerank_instruction` | The **ranking criterion** in plain language: "prefer worked procedures over definitions". Applied only to the text the reranker scores against, so it reorders the candidate pool and can never remove from it. Ignored by `lexical` / `none`; the retrieval echo reports whether it was actually applied. Config default: `retrieval.rerank_instruction`. |
 | `rerank` | Rerank method for this call: `cross_encoder` (in-process semantic scoring), `http` (configured external `/v1/rerank` service), `lexical` (model-free query-term coverage), or `none` (raw fused order). Config default: `retrieval.rerank_mode`. |
 | `parent_context` / `neighbor_context` | E2 small-to-big, post-rerank: swap note chunks for their full section / append a PDF hit's adjacent pages. Carried by the `synthesis` preset; per-call override beats preset beats config. |
 | `max_tokens` | Cap the answer length. |
@@ -198,12 +215,12 @@ secret environment-variable name, and readiness flags; it never returns secret v
 `available` means the required key is present and type-compatible, not that a remote
 endpoint has been contacted.
 
-The MiniMax entry is for MiniMax M3 through the Token Plan's Anthropic-compatible API.
-Its subscription key begins `sk-cp-`. A MiniMax pay-as-you-go key begins `sk-api-` and
-does not consume Token Plan quota. Put the subscription key only in the environment
-variable declared by the registry, or store it through the console/provider-key API;
-the configured prefix check rejects the wrong credential type. Restart the query
-service after changing a provider secret.
+Where a vendor sells both a subscription and pay-as-you-go API access, the two
+credentials are usually different products and are not interchangeable. A provider
+entry can declare `api_key_prefix` so the wrong key type is rejected before a
+query runs, rather than silently billing the wrong account. Put a key only in the
+environment variable the registry declares, or store it through the console's
+provider-key API. Restart the query service after changing a provider secret.
 
 ## The Corpus Ledger console (`:8052`)
 
@@ -215,7 +232,7 @@ Open **http://127.0.0.1:8052**. Tabs:
   source chunk* — math, tables and fenced code included. Its **Query comparison tree**
   fans the current question across live-config presets and generation backends or the
   built-in rerank baselines, with evidence-only and generated-answer modes.
-- **Documents** — search, `#tag` filter, **retag** (domain / course / tags —
+- **Documents** — search, `#tag` filter, **retag** (domain / group label / tags —
   metadata-only, no re-embed), and **delete** from the index.
 - **Vault** — browse the mounted vault tree read-only.
 - **Ingest** — a three-step flow: **1 · Add documents** (upload to the inbox; **every
@@ -275,3 +292,49 @@ it may call before it calls it. The query service has its own `GET /schema`: pai
 two maps rather than assuming a copied capability list. **Ask/search/compare/inspect
 evidence or change warm retrieval defaults** → `:8051`; **manage the corpus,
 persistent install settings, or provider secrets** → `:8052`.
+
+The complete endpoint listing for both services is the
+[API reference](api.md); the patterns for driving them efficiently from an LLM
+agent are in [Agent integration](agents.md).
+
+## When the query API will not come back
+
+`GET /health` on `:8051` reports three states, not two:
+
+| `state` | Meaning | What to do |
+|---|---|---|
+| `ready` | Serving. | — |
+| `loading` | Indexes and models still loading. | Wait. |
+| `failed` | The pipeline could not be built from the current config. | Act; waiting cannot fix it. |
+
+A `failed` service keeps answering: every retrieval endpoint returns 503 carrying
+the same reason, instead of refusing the connection and leaving the caller to
+guess. The console's restart button surfaces the startup log automatically, and
+`GET /api/service/log` on `:8052` returns it on demand.
+
+The usual cause is the setting changed most recently — a cross-encoder id that
+cannot be downloaded, an embedding model with a typo, an index path that moved.
+Before switching cross-encoder, `POST /api/rerank/check` (the **Check** button on
+each model row in Settings → Reranker) reports whether the id resolves and
+whether the weights are already cached, and where. Those are exactly the two
+conditions that decide whether the restart after the switch will succeed, and it
+downloads nothing to find out.
+
+!!! warning "A stale Hugging Face login looks exactly like a missing model"
+    If a token is present but expired or revoked — in `HF_TOKEN`, or in the
+    stored login file under your cache directory — the hub answers **401** and
+    `huggingface_hub` surfaces that as *repository not found*. Every public
+    cross-encoder then appears not to exist, and the download at the next
+    `:8051` start fails the same way with the same misleading message.
+
+    The preflight retries anonymously and, when that succeeds, says explicitly
+    which credential the hub rejected and where it came from. Fix or remove it.
+
+!!! note "Where 'cached' is looked up"
+    There is no single model cache. sentence-transformers honours
+    `SENTENCE_TRANSFORMERS_HOME` **over** `HF_HOME`, while `HF_HUB_CACHE` can be
+    set machine-wide to override `HF_HOME` for `huggingface_hub` itself — so
+    those can legitimately be three different directories. The preflight checks
+    all of them and reports the snapshot path it found, and it requires an actual
+    weights file: a metadata-only directory is a failed download, not a cached
+    model.

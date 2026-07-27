@@ -21,12 +21,13 @@ Endpoints (agent-facing; GET /schema returns this list machine-readably):
     POST /search       -> retrieval ONLY (chunks + labels + text; no LLM needed)
     POST /query        -> full RAG (retrieve + grounded, cited generation)
     POST /compare      -> bounded query tree across retrieval/provider branches
+    GET  /compare/options -> ready-to-post branch sets for /compare
     POST /config       -> live-update retrieval defaults
 
 Query (cmd.exe — escaped quotes; PowerShell needs Invoke-RestMethod instead):
     curl.exe -s -X POST http://127.0.0.1:8051/query ^
          -H "Content-Type: application/json" ^
-         -d "{\"q\": \"Where in my coursework did I use conjugate priors?\"}"
+         -d "{\"q\": \"What does the retention policy say about backups?\"}"
 
 Per-query knobs (all optional, never restart anything):
     {"q": "...", "top_k": 10}            # override rerank_top_k for this call
@@ -36,6 +37,8 @@ Per-query knobs (all optional, never restart anything):
     {"q": "...", "hype": true}           # HyPE question-matching lane on/off
     {"q": "...", "omnisearch": true}     # add the live-vault lane (Obsidian open)
     {"q": "...", "rerank": "lexical"}    # per-call reranking method
+    {"q": "...", "rerank_instruction": "prefer worked procedures"}
+                                         # ranking CRITERION for this call
     {"q": "...", "provider": "name"}      # configured generation backend
     {"q": "...", "model": "model-id"}     # optional model on that backend
     {"q": "...", "retrieve_only": true}  # skip generation, return the chunks
@@ -59,6 +62,7 @@ import hashlib
 import json
 import os
 import time
+import traceback
 from collections import Counter, deque
 from contextlib import asynccontextmanager
 from typing import Any, Literal
@@ -72,6 +76,9 @@ from src.llm.llm_client import LLMClient
 from src.pipeline import RAGPipeline
 from src.retrieval.reranker import RERANK_MODES, RerankerExecutionError
 from src.utils.config_loader import load_config, persist_config_values
+from src.utils.logger import get_logger
+
+log = get_logger(__name__)
 
 # Holds the warm pipeline; built once in the lifespan handler below.
 _STATE: dict = {}
@@ -102,17 +109,40 @@ def _record_history(endpoint: str, body, retrieval: dict | None,
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Build the heavy pipeline a single time at server startup.
-    cfg = load_config()
-    _STATE["rag"] = RAGPipeline.from_config(cfg)
-    _STATE["cfg"] = cfg
-    _STATE["cfg_path"] = cfg.project_root / "config.yaml"
-    _STATE["generators"] = {}
-    _STATE["ready"] = True
+    #
+    # A build failure is REPORTED, not fatal. Letting it propagate kills the
+    # process, and under a supervisor (the container entrypoint, or the
+    # console's restart button) that becomes a crash loop where /health does
+    # not answer at all — so the console spins with no diagnosis while the one
+    # thing the operator needs, the actual exception, only exists in a log
+    # nobody is looking at. The most common trigger is a setting the operator
+    # just changed: a cross-encoder that cannot be downloaded, an embedding
+    # model id with a typo, an index path that moved.
+    #
+    # The error is still an error: it is logged with its traceback, /health
+    # reports not-ready WITH the message, and every retrieval endpoint answers
+    # 503 carrying the same text. Nothing degrades silently and nothing falls
+    # back to a different pipeline.
+    _STATE["boot_error"] = None
+    _STATE["ready"] = False
+    _STATE["started_at"] = time.time()
+    try:
+        cfg = load_config()
+        _STATE["rag"] = RAGPipeline.from_config(cfg)
+        _STATE["cfg"] = cfg
+        _STATE["cfg_path"] = cfg.project_root / "config.yaml"
+        _STATE["generators"] = {}
+        _STATE["ready"] = True
+    except Exception as e:                       # noqa: BLE001 — reported below
+        log.exception("query API failed to build its pipeline")
+        _STATE["boot_error"] = f"{type(e).__name__}: {e}"
+        _STATE["boot_traceback"] = traceback.format_exc()
     yield
     _STATE.clear()
 
 
-app = FastAPI(title="Personal RAG API", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="Advanced Obsidian RAG — Query API", version="0.4.0",
+              lifespan=lifespan)
 
 # The management web UI (manage_api.py, default :8052) calls this API from the
 # browser; same-machine, different port = CORS. Localhost-only origins.
@@ -158,6 +188,14 @@ class QueryIn(BaseModel):
     # (configured external /v1/rerank service) | lexical (model-free) | none
     # (fused order as-is).
     rerank: str | None = None
+    # Ranking CRITERION for this call, in plain language: "prefer worked
+    # procedures", "prefer primary sources over summaries". Applied only to the
+    # text the reranker scores against, after retrieval has already built the
+    # candidate pool — so it reweights results and can never remove any.
+    # Ignored by rerank=lexical|none (see the retrieval echo, which reports
+    # whether it was actually applied). Pass "" to disable a configured
+    # instruction for this call only.
+    rerank_instruction: str | None = Field(default=None, max_length=2000)
     # true = skip generation entirely; the response carries the reranked chunks
     # (with labels + text) and confidence "RETRIEVE_ONLY". No LLM involved, so
     # this works even when the generation proxy is down — the calling agent can
@@ -194,6 +232,14 @@ class SearchIn(BaseModel):
     # Rerank method for this call: cross_encoder | http | lexical | none.
     # Unset = the configured retrieval.rerank_mode (cross_encoder).
     rerank: str | None = None
+    # Ranking CRITERION for this call, in plain language: "prefer worked
+    # procedures", "prefer primary sources over summaries". Applied only to the
+    # text the reranker scores against, after retrieval has already built the
+    # candidate pool — so it reweights results and can never remove any.
+    # Ignored by rerank=lexical|none (see the retrieval echo, which reports
+    # whether it was actually applied). Pass "" to disable a configured
+    # instruction for this call only.
+    rerank_instruction: str | None = Field(default=None, max_length=2000)
     include_text: int = Field(default=1200, ge=0, le=6000)
     max_sources: int | None = Field(default=None, ge=1)
 
@@ -247,14 +293,26 @@ class CompareBranchIn(BaseModel):
     neighbor_context: bool | None = None
     hype: bool | None = None
     rerank: str | None = None
+    rerank_instruction: str | None = Field(default=None, max_length=2000)
     provider: str | None = None
     model: str | None = None
+
+
+# Branch caps live here so /schema and /compare/options can publish the REAL
+# numbers. They used to exist three times: a pydantic Field, an inline check,
+# and a sentence of English in the schema — which is exactly the shape of a
+# limit that drifts out of sync with what the endpoint actually enforces.
+_BRANCH_MIN = 2
+_BRANCH_MAX = 6
+# Generated branches each cost a full LLM call, so the query mode is tighter.
+_BRANCH_MAX_QUERY = 3
 
 
 class CompareIn(BaseModel):
     q: str = Field(min_length=1)
     mode: Literal["search", "query"] = "search"
-    branches: list[CompareBranchIn] = Field(min_length=2, max_length=6)
+    branches: list[CompareBranchIn] = Field(min_length=_BRANCH_MIN,
+                                            max_length=_BRANCH_MAX)
     include_text: int = Field(default=900, ge=0, le=6000)
     max_sources: int | None = Field(default=None, ge=1)
     max_tokens: int | None = Field(default=None, ge=64, le=8192)
@@ -275,7 +333,26 @@ class ConfigIn(BaseModel):
 
 
 def _rag() -> RAGPipeline:
-    return _STATE["rag"]
+    """The warm pipeline, or a 503 that says why there isn't one.
+
+    Without this the boot error surfaced as `KeyError: 'rag'` on every call —
+    technically an error, but one that names the dict key instead of the model
+    that failed to load.
+    """
+    rag = _STATE.get("rag")
+    if rag is None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "query API is not ready",
+                "reason": _STATE.get("boot_error")
+                          or "the pipeline is still loading (indexes + models)",
+                "hint": "GET /health reports readiness; the console's Settings "
+                        "tab and GET /api/service/log (:8052) show the startup "
+                        "log.",
+            },
+        )
+    return rag
 
 
 def _label_for(doc) -> str:
@@ -339,7 +416,7 @@ def _sources_out(
 _RETRIEVAL_FIELDS = (
     "preset", "auto_preset", "top_k", "dense_top_k", "sparse_top_k",
     "hyde", "omnisearch", "parent_context", "neighbor_context", "hype",
-    "rerank",
+    "rerank", "rerank_instruction",
 )
 
 
@@ -523,6 +600,8 @@ def _current_config() -> dict[str, Any]:
             "mode": rag.reranker.mode,
             "model": rag.reranker.model_name,
             "max_length": rag.reranker.max_length,
+            "instruction": rag.reranker.instruction,
+            "instruction_format": rag.reranker.instruction_format,
         },
         "generation": _generation_out(rag.generator),
         "omnisearch": {
@@ -536,7 +615,26 @@ def _current_config() -> dict[str, Any]:
 
 @app.get("/health")
 def health() -> dict:
-    return {"ready": _STATE.get("ready", False)}
+    """Readiness, and — when it is not ready — WHY.
+
+    `ready` keeps its original boolean meaning, so existing probes are
+    unaffected. `state` distinguishes the two not-ready cases that used to look
+    identical from outside: still loading (wait) versus failed to build (act).
+    """
+    ready = bool(_STATE.get("ready", False))
+    err = _STATE.get("boot_error")
+    out: dict = {
+        "ready": ready,
+        "state": "ready" if ready else ("failed" if err else "loading"),
+        "uptime_s": int(time.time() - _STATE["started_at"])
+                    if _STATE.get("started_at") else None,
+    }
+    if err:
+        out["error"] = err
+        out["hint"] = ("the pipeline could not be built with the current "
+                       "config — check the model ids and index paths that "
+                       "were changed most recently")
+    return out
 
 
 @app.get("/config")
@@ -712,7 +810,7 @@ def search(body: SearchIn) -> dict:
     """
     Retrieval ONLY — hybrid search + rerank, no generation. The response is
     the reranked chunks with human labels and (by default) their text, so an
-    agent with its own strong model can ground itself on the author's materials
+    agent with its own strong model can ground itself on the indexed corpus
     and reason over them directly. Zero dependency on the generation proxy.
     """
     rag = _rag()
@@ -823,11 +921,12 @@ def compare(body: CompareIn) -> dict:
     branch_ids = [branch.id for branch in body.branches]
     if len(set(branch_ids)) != len(branch_ids):
         raise HTTPException(status_code=400, detail="compare branch ids must be unique")
-    if body.mode == "query" and len(body.branches) > 3:
+    if body.mode == "query" and len(body.branches) > _BRANCH_MAX_QUERY:
         raise HTTPException(
             status_code=400,
-            detail="query comparisons are capped at 3 generated branches; "
-                   "use mode='search' for wider evidence fan-out")
+            detail=f"query comparisons are capped at {_BRANCH_MAX_QUERY} "
+                   f"generated branches; use mode='search' for wider evidence "
+                   f"fan-out")
 
     rag = _rag()
     t0 = time.time()
@@ -947,6 +1046,80 @@ def compare(body: CompareIn) -> dict:
     }
 
 
+@app.get("/compare/options")
+def compare_options() -> dict:
+    """Ready-to-post branch sets for POST /compare.
+
+    /compare is the most powerful endpoint here and was also the most awkward
+    to call: building a valid branch list meant reading `presets` out of
+    /schema, `rerank_modes` out of /schema, and the available backends out of
+    /providers, then joining the three by hand and re-deriving the branch caps
+    from prose. Every caller was reimplementing the console's sidebar.
+
+    This returns the joined result: for each comparison DIMENSION, a list of
+    branches that can be posted to /compare as-is. Unavailable options are
+    included but marked, so a caller can explain why a backend is missing
+    instead of silently dropping it.
+    """
+    rag = _rag()
+    cfg = _STATE.get("cfg")
+    caps = {"search": _BRANCH_MAX, "query": _BRANCH_MAX_QUERY,
+            "min": _BRANCH_MIN}
+
+    presets = [
+        {"id": name, "label": f"preset:{name}", "preset": name}
+        for name in sorted(rag.presets or {})
+    ]
+    # The config-only baseline is the branch people forget to include, and
+    # without it a comparison has nothing to be measured against.
+    presets.insert(0, {"id": "baseline", "label": "Config baseline",
+                       "auto_preset": False})
+
+    rerankers = [{"id": f"rerank_{m}", "label": f"rerank:{m}", "rerank": m}
+                 for m in RERANK_MODES]
+
+    providers = []
+    for spec in _provider_catalog():
+        providers.append({
+            "id": f"provider_{spec['name']}",
+            "label": spec.get("label") or spec["name"],
+            "provider": spec["name"],
+            "available": spec["available"],
+            "unavailable_reason": None if spec["available"] else (
+                f"{spec['api_key_env']} is not set or is the wrong credential "
+                f"type" if spec.get("api_key_env") else "not configured"),
+        })
+
+    return {
+        "branch_limits": caps,
+        "modes": {
+            "search": "evidence only; no generation backend needed",
+            "query": f"generated answers; capped at {_BRANCH_MAX_QUERY} branches",
+        },
+        "dimensions": {
+            "preset": {
+                "mode": "search",
+                "purpose": "same retrieval knobs, different named bundles",
+                "branches": presets,
+            },
+            "reranker": {
+                "mode": "search",
+                "purpose": "same candidate pool, different final ordering",
+                "branches": rerankers,
+            },
+            "provider": {
+                "mode": "query",
+                "purpose": "identical evidence, different generation backend — "
+                           "so differences are about the answer, not retrieval",
+                "branches": providers,
+            },
+        },
+        "usage": "pick one dimension, take 2+ of its branches, and POST them as "
+                 "`branches` to /compare with your question and that "
+                 "dimension's `mode`.",
+    }
+
+
 @app.get("/history")
 def history(limit: int = 20) -> dict:
     """
@@ -1047,12 +1220,21 @@ def schema() -> dict:
         "neighbor_context": "bool? (add adjacent-page PDF context)",
         "hype": "bool? (question-matching lane; needs build_hype.py)",
         "rerank": f"{'|'.join(rerank_choices)}? (per-call method)",
+        "rerank_instruction": "str? (<=2000 chars) ranking criterion in plain "
+                              "language, applied to the text the reranker "
+                              "scores against. Reweights the candidate pool; "
+                              "never filters it. Ignored by rerank=lexical|none. "
+                              "\"\" disables a configured instruction for one call",
     }
     return {
-        "service": "personal-rag",
+        "service": "advanced-obsidian-rag-query",
         "version": app.version,
         "endpoints": {
-            "GET /health": "readiness probe -> {ready: bool}",
+            "GET /health": "readiness probe -> {ready: bool, state: "
+                           "ready|loading|failed, error?}. `failed` means the "
+                           "pipeline could not be built from the current "
+                           "config; retrieval endpoints answer 503 with the "
+                           "same reason",
             "GET /schema": "this machine-readable capability map",
             "GET /config": "live retrieval defaults, presets, active reranker "
                            "and generation provenance",
@@ -1101,8 +1283,9 @@ def schema() -> dict:
                 "body": {
                     "q": "str",
                     "mode": "search|query (default search)",
-                    "branches": "2-6 branches; generated query mode is capped "
-                                "at 3",
+                    "branches": f"{_BRANCH_MIN}-{_BRANCH_MAX} branches; "
+                                f"generated query mode is capped at "
+                                f"{_BRANCH_MAX_QUERY}",
                     "branch": {
                         "id": "stable unique branch id",
                         "label": "str?",
@@ -1120,7 +1303,13 @@ def schema() -> dict:
                             "not compared",
                 "evidence_reuse": "branches differing only by provider/model "
                                   "reuse the exact same retrieved chunks",
+                "options": "GET /compare/options returns branch sets you can "
+                           "post as-is, per dimension",
             },
+            "GET /compare/options": "ready-to-post /compare branches per "
+                                    "dimension (preset / reranker / provider), "
+                                    "with the real branch caps and the reason "
+                                    "any backend is unavailable",
             "GET /history?limit=": "last /search, /query and /compare calls "
                                    "(newest first): caller knobs, effective "
                                    "retrieval echo, confidence and timing",
@@ -1139,12 +1328,15 @@ def schema() -> dict:
                        "origin_id preserves the indexed child and "
                        "lookup_available gates GET /chunks",
         },
+        "compare_branch_limits": {"min": _BRANCH_MIN, "max": _BRANCH_MAX,
+                                  "max_query_mode": _BRANCH_MAX_QUERY},
         "auto_preset": "the 'code' preset self-applies on code-intent queries "
                        "when present; send auto_preset=false for a config-only "
                        "baseline",
-        "scope_routing": "queries naming a domain ('my statistics homework') or "
-                         "content type ('in the tech books') get reserved "
-                         "retrieval lanes automatically — just name them in q",
+        "scope_routing": "queries naming a subject area ('in the security "
+                         "policies') or a content type ('in the reference "
+                         "books') get reserved retrieval lanes automatically — "
+                         "just name them in q",
         "example_cmd": (
             'curl.exe -s -X POST http://127.0.0.1:8051/search -H '
             '"Content-Type: application/json" -d '

@@ -21,22 +21,15 @@ cp .env.example .env      # add your generation key, or point at a local server
 ## Configure
 
 All tunables live in `config.yaml` (copy `config.example.yaml` if you're starting
-fresh). Set the vault path, then select a named generation provider:
+fresh). Set the path to your documents, then select a generation backend by name:
 
 ```yaml
 parser:
-  vault_path: "/path/to/your/obsidian/vault"   # where your notes live
-
-providers:
-  local_generation:
-    kind: openai
-    base_url: "http://127.0.0.1:3001/v1"
-    model: "your-model-id"
-    api_key_optional: true
+  vault_path: "/path/to/your/documents"   # the folder to index
 
 generation:
-  provider: local_generation
-  model: "your-model-id"
+  provider: ollama          # any name from the `providers:` registry
+  model: "llama3.1:8b"      # what that endpoint actually serves
 ```
 
 Secrets stay in `.env` (gitignored); everything else is in `config.yaml`, which the
@@ -44,23 +37,33 @@ system can also rewrite in place (comment-preserving) when you change defaults l
 After starting the query service, `GET /providers` shows the active registry entry and
 whether each configured key is present and type-compatible, without returning values.
 
-!!! note "MiniMax M3 Token Plan credentials"
-    The shipped `minimax` provider targets MiniMax M3 through its
-    Anthropic-compatible Token Plan endpoint. Use the plan subscription key beginning
-    `sk-cp-`; a pay-as-you-go `sk-api-` key is a separate credential and does not
-    consume Token Plan quota. Keep the key only in the registry's declared environment
-    variable. The provider-key endpoint rejects the wrong credential type.
+The shipped registry already covers a spread of hosted endpoints and the common
+local runtimes (Ollama, LM Studio, KoboldCPP), so in most cases selecting a
+backend is one word plus one environment variable. Add your own by copying any
+entry: `kind` is the **wire protocol** (`openai` or `anthropic`), not the vendor.
+
+!!! note "Model ids move"
+    The `model` in each shipped registry entry was that endpoint's sensible
+    default when the file was written — treat it as a starting point. Every
+    endpoint lists what it actually serves at `GET <base_url>/models`, and the
+    console copies an entry's model into `generation.model` when you activate it.
+
+!!! warning "Some subscriptions are not API access"
+    A consumer chat subscription usually grants no API quota. Where a vendor
+    offers both, the two credentials are different products and are not
+    interchangeable — a provider entry can declare `api_key_prefix` so the wrong
+    key type is rejected up front instead of billing separately by surprise.
 
 !!! tip "Fully local"
-    To run with no cloud dependency at all — local embeddings plus a local model server
-    for generation — follow `RUN_LOCAL.md`. Add a keyless named provider for the local
-    endpoint and select it with `generation.provider`.
+    To run with no cloud dependency at all — local embeddings plus a local model
+    server for generation — follow `RUN_LOCAL.md`. Point one of the local
+    provider entries at your server and select it with `generation.provider`.
 
 ## Build the indexes
 
 ```bash
 # 1. Parse markdown notes -> data/chunks.jsonl
-python -m src.ingestion.obsidian_parser "path/to/vault" -o data/chunks.jsonl
+python -m src.ingestion.obsidian_parser "path/to/your/documents" -o data/chunks.jsonl
 
 # 2. Build the dense (ChromaDB) + sparse (bm25s) indexes
 python main.py index
@@ -86,7 +89,7 @@ python main.py index --append data/code_chunks.jsonl
 ## Ask your first question
 
 ```bash
-python main.py query "How did I implement knowledge distillation in my capstone?"
+python main.py query "What does our incident response process require?"
 python main.py chat        # interactive REPL
 ```
 

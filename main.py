@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-main.py — CLI entry point for Personal RAG.
+main.py — CLI entry point for Advanced Obsidian RAG.
 
     python main.py index                      # build dense + sparse indexes from chunks.jsonl
     python main.py query "What is ARIMA?"      # one-shot question
@@ -317,7 +317,7 @@ def cmd_chat(args):
     from src.pipeline import RAGPipeline
 
     rag = RAGPipeline.from_config(cfg)
-    print("Personal RAG — interactive mode. Type 'exit' or Ctrl-C to quit.\n")
+    print("Advanced Obsidian RAG — interactive mode. Type 'exit' or Ctrl-C to quit.\n")
     try:
         while True:
             q = input("❓ ").strip()
@@ -358,7 +358,7 @@ def cmd_serve(args):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="the personal RAG over his Obsidian vault.")
+    p = argparse.ArgumentParser(description="Grounded, cited question-answering over your own documents.")
     p.add_argument("--config", default=None, help="Path to config.yaml")
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -392,10 +392,11 @@ def build_parser() -> argparse.ArgumentParser:
                           "wider re-ingest only ADDS pages (upsert).")
     pdf.add_argument("--no-ocr", action="store_true", help="Disable OCR")
     pdf.add_argument("--ocr-engine", default=None,
-                     choices=["auto", "tesseract", "vlm", "none"],
+                     choices=["auto", "tesseract", "paddle", "vlm", "none"],
                      help="OCR engine for scanned pages: auto (Tesseract-first "
-                          "probe, the default), tesseract, vlm (vision endpoint "
-                          "from pdf.vlm_ocr — e.g. Unlimited-OCR), or none")
+                          "probe, the default), tesseract, paddle (PaddleOCR "
+                          "sidecar from pdf.paddle_ocr), vlm (vision endpoint "
+                          "from pdf.vlm_ocr), or none")
     pdf.add_argument("--skip-list", default=None, metavar="JSONL",
                      help="Path to dedup_skiplist.json (overrides config pdf.skip_list_file)")
     pdf.add_argument("--vault", default=None, metavar="PATH",

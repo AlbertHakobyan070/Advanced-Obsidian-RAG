@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark light">
-<title>Corpus Ledger — Personal RAG</title>
+<title>Corpus Ledger — Advanced Obsidian RAG</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='3' y='3' width='5' height='18' rx='1' fill='%23E8A33D'/%3E%3Crect x='10' y='3' width='5' height='18' rx='1' fill='%238A6423'/%3E%3Crect x='17' y='6' width='4' height='15' rx='1' fill='%23A99F8F'/%3E%3C/svg%3E">
 <script>/* theme + fonts are applied BEFORE first paint to avoid a flash of the wrong look */
 document.documentElement.dataset.theme=localStorage.getItem("ledger-theme")||"dark";
@@ -434,6 +434,20 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
 #tab-query .q-context-grid .q-field:last-child{grid-column:1/-1}
 #tab-query .q-compare{margin:0 20px 20px;border:1px solid var(--line);border-radius:calc(var(--r) + 1px);
   background:var(--panel-2);padding:13px}
+/* Closed, this is one quiet row; open, it is the full experiment console. */
+#tab-query .qcmp-bar{display:flex;align-items:baseline;gap:8px;cursor:pointer;
+  list-style:none;user-select:none;margin:-13px;padding:13px;border-radius:calc(var(--r) + 1px)}
+#tab-query .qcmp-bar::-webkit-details-marker{display:none}
+#tab-query .qcmp-bar:hover{background:var(--panel)}
+#tab-query .qcmp-bar:focus-visible{outline:2px solid var(--amber);outline-offset:-2px}
+#tab-query .qcmp-caret{flex:none;color:var(--amber);font-size:10px;transition:transform .18s ease}
+#tab-query .q-compare[open] .qcmp-caret{transform:rotate(90deg)}
+#tab-query .qcmp-bar-text{min-width:0}
+#tab-query .qcmp-bar-text b{font-size:13px}
+#tab-query .qcmp-bar-text small{display:block;margin-top:3px;font-size:10.5px;color:var(--ink-faint)}
+#tab-query .q-compare[open] .qcmp-bar{margin-bottom:0;border-bottom:1px solid var(--line);
+  border-radius:calc(var(--r) + 1px) calc(var(--r) + 1px) 0 0}
+#tab-query .q-compare[open] .qcmp-head{margin-top:13px}
 #tab-query .qcmp-head{display:flex;align-items:flex-start;gap:10px;flex-wrap:wrap}
 #tab-query .qcmp-title{min-width:180px;flex:1 1 280px}
 #tab-query .qcmp-title h3{margin:0;font-size:13px}
@@ -511,7 +525,7 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
 <header>
   <div class="hrow">
     <div class="wordmark"><svg class="mark" viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><rect x="3" y="3" width="5" height="18" rx="1"/><rect x="10" y="3" width="5" height="18" rx="1" opacity=".55"/><rect x="17" y="6" width="4" height="15" rx="1" opacity=".3"/></svg>Corpus <em>Ledger</em></div>
-    <div class="sub">Personal RAG — management console · :8052</div>
+    <div class="sub">Advanced Obsidian RAG — management console · :8052</div>
     <div class="hctrl">
       <span class="st"><span class="dot" id="dot-manage"></span>manage</span>
       <span class="st"><span class="dot" id="dot-rag"></span>query api :8051</span>
@@ -531,6 +545,10 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
     <button data-tab="info">Info</button>
   </nav>
 </header>
+
+<!-- Filled in only when a :8051 restart fails. It carries the startup-log tail,
+     because "still not ready" is a symptom and the traceback is the cause. -->
+<div id="rag-restart-out" class="panel" style="display:none;margin-bottom:14px"></div>
 
 <!-- ============================= LEDGER ============================= -->
 <section id="tab-ledger" class="on">
@@ -655,7 +673,7 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
         <div><label class="f">Max pages / PDF</label><input id="p-maxpages" type="number" min="1" placeholder="all"></div>
         <div><label class="f">Pages (subset)</label><input id="p-pages" placeholder="e.g. 1-50,60,70-80" title="Ingest only these 1-based pages (inclusive ranges + singletons). Trims front-matter/index/back-matter. Takes precedence over Max pages."></div>
         <div><label class="f">OCR engine</label>
-          <select id="p-ocr"><option value="">auto (config)</option><option>tesseract</option><option>vlm</option><option>none</option></select></div>
+          <select id="p-ocr"><option value="">auto (config)</option><option>tesseract</option><option>paddle</option><option>vlm</option><option>none</option></select></div>
         <div><label class="f">Chunking</label>
           <select id="p-chunking" title="How OVERSIZED sections are split. heading = paragraph packing that respects the text's structure (the long-standing default). fixed = strict sliding window with even sizes — for OCR'd or wall-of-text PDFs whose paragraph structure is noise. document = element-aware: code blocks, tables and lists never get cut internally. none = no splitting at all (one chunk per section — embeddings truncate very long text). Small sections chunk identically under every mode.">
             <option value="">heading (default)</option><option>fixed</option><option>document</option><option>none</option></select></div>
@@ -859,11 +877,21 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
         </div>
       </div>
     </div>
-    <div class="q-compare">
+    <!-- Collapsed by default: this is an experiment console, not part of asking
+         a question, and open-by-default pushed the answer below the fold. The
+         catalog is fetched on FIRST OPEN rather than at boot, so a closed panel
+         also stops :8051 being probed (and erroring) before anyone wants it. -->
+    <details class="q-compare" id="q-compare-panel">
+      <summary class="qcmp-bar">
+        <span class="qcmp-caret" aria-hidden="true">▸</span>
+        <span class="qcmp-bar-text">
+          <b>Query comparison tree</b>
+          <small>Fan one question into 2–6 evidence branches, or up to 3 generated answers</small>
+        </span>
+      </summary>
       <div class="qcmp-head">
         <div class="qcmp-title">
-          <h3>Query comparison tree</h3>
-          <p>Fan one question into 2–6 evidence branches, or up to 3 generated answers. Membership and rank are compared by stable evidence ID; raw score scales are not mixed.</p>
+          <p>Membership and rank are compared by stable evidence ID; raw score scales are not mixed.</p>
         </div>
         <div class="qcmp-controls">
           <label class="q-tool"><span>Compare</span><select id="q-compare-dim"><option value="preset">Presets</option><option value="reranker">Rerankers</option><option value="provider">LM backends</option></select></label>
@@ -872,10 +900,10 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
           <button class="btn primary" id="q-compare-run">Run branches</button>
         </div>
       </div>
-      <div class="qcmp-catalog" id="q-catalog-msg" role="status">Loading live presets and providers from :8051…</div>
+      <div class="qcmp-catalog" id="q-catalog-msg" role="status">Opening this panel loads the live presets and providers from :8051.</div>
       <div class="qcmp-choices" id="q-compare-choices" aria-label="Comparison branches"></div>
       <div id="q-compare-out" aria-live="polite"></div>
-    </div>
+    </details>
     <div id="q-out" style="margin-top:14px"></div>
   </div>
 </section>
@@ -1241,7 +1269,7 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
         <text class="to" x="142" y="64">page has no text layer? → OCR</text>
         <text class="to" x="142" y="78">tesseract · CPU, fast</text>
         <text class="to" x="142" y="92">VLM DeepSeek-OCR :8100 · GPU</text>
-        <text class="to" x="142" y="106">auto | tesseract | vlm | none</text>
+        <text class="to" x="142" y="106">auto | tesseract | paddle | vlm | none</text>
 
         <rect class="major" x="30" y="340" width="234" height="136" rx="8"/>
         <text class="tb" x="147" y="360">Inbox auto-pipeline</text>
@@ -1661,7 +1689,7 @@ async function loadInbox(){
       const ocr=k==="pdf"?`
         <select class="fc-ocr" data-name="${esc(f.name)}" title="OCR engine for THIS file's scanned pages">
           <option value="">OCR: auto</option>
-          ${["tesseract","vlm","none"].map(c=>`<option${cfg.ocr===c?" selected":""}>${c}</option>`).join("")}</select>
+          ${["tesseract","paddle","vlm","none"].map(c=>`<option${cfg.ocr===c?" selected":""}>${c}</option>`).join("")}</select>
         <input class="fc-pages" data-name="${esc(f.name)}" placeholder="pages: 1-50,60" value="${esc(cfg.pages)}" style="width:120px" title="1-based page subset for THIS file — use 👁 to find the numbers">`:"";
       const cfgRow=state.cfgOpen[f.name]?`
         <tr class="fcfg"><td colspan="4">
@@ -2562,6 +2590,30 @@ $("#q-ask").onclick=()=>runQuery(false);
 $("#q-search").onclick=()=>runQuery(true);
 $("#q-compare-run").onclick=runComparison;
 $("#q-catalog-retry").onclick=loadQueryCatalogs;
+
+/* Open/closed state of the comparison tree. Remembered, because someone who is
+   actively comparing runs opens it once and wants it to stay open; everyone
+   else never sees it. The catalog is fetched on first open only.
+
+   The load is deliberately NOT triggered from here at page load: boot resolves
+   state.ragApi from /api/settings first, and firing the catalog before that
+   would query whatever the default happened to be. Boot calls
+   maybeLoadCompareCatalog() once it knows the real address. */
+function maybeLoadCompareCatalog(){
+  const panel=$("#q-compare-panel");
+  if(!panel||!panel.open||state.catalogsLoaded)return;
+  state.catalogsLoaded=true;
+  loadQueryCatalogs();
+}
+(function(){
+  const panel=$("#q-compare-panel");if(!panel)return;
+  const KEY="ledger-compare-open";
+  if(localStorage.getItem(KEY)==="1")panel.open=true;
+  panel.addEventListener("toggle",()=>{
+    localStorage.setItem(KEY,panel.open?"1":"0");
+    if(state.booted)maybeLoadCompareCatalog();
+  });
+})();
 $("#q-compare-dim").onchange=renderCompareChoices;
 $("#q-compare-mode").onchange=renderCompareChoices;
 /* Submit from the composer. Ctrl/Cmd+Enter is the convention for a multi-line
@@ -2859,8 +2911,14 @@ function renderRerankers(s){
     ${list.map(r=>`<div class="vault-row rr-row" data-model="${esc(r.id)}">
       <div style="flex:1;min-width:0"><span class="nm">${esc(r.id)}</span><span class="rr-state"></span>
       <div class="pth">${esc(r.label||"")}</div></div>
+      <button class="btn rr-check" data-id="${esc(r.id)}" title="Is this model reachable and already downloaded? Checks metadata + the local cache — no weights are pulled.">Check</button>
       <button class="btn rr-use" data-id="${esc(r.id)}" data-len="${esc(String(r.max_length||512))}" title="Put this model in the fields below (review, then Save)">Use</button></div>`).join("")}
-    <label class="f" style="margin-top:16px">These four knobs <span class="hint" style="margin:0;display:inline;text-transform:none;letter-spacing:0">— every button above writes here, so you can see exactly what it changed before saving</span></label>
+    <label class="f" style="margin-top:16px">Ranking criterion <span class="hint" style="margin:0;display:inline;text-transform:none;letter-spacing:0">— optional; tells the reranker what "best" means for your material</span></label>
+    <p class="hint" style="margin:2px 0 0">Retrieval already found the on-topic pool against your real question. This only changes the text the <b>reranker</b> scores against, so it <b>reorders</b> results and can never remove any. Good criteria name a <i>kind</i> of passage: <span class="mono">prefer worked procedures and runnable examples over definitions</span> · <span class="mono">prefer primary sources over summaries of them</span>. ${
+      mode==="lexical"||mode==="none"
+        ? `<span class="pill failed">ignored while rerank mode is ${esc(mode)}</span> — that mode scores query-term coverage, so instruction words would dilute your real query terms. Switch to <b>cross_encoder</b> or <b>http</b> to use it.`
+        : `Per query you can override it with <span class="mono">{"rerank_instruction": "…"}</span> on /search and /query.`}</p>
+    <label class="f" style="margin-top:16px">These knobs <span class="hint" style="margin:0;display:inline;text-transform:none;letter-spacing:0">— every button above writes here, so you can see exactly what it changed before saving</span></label>
     <div id="rr-fields" class="grid g2" style="margin-top:8px"></div>`;
 }
 
@@ -2869,7 +2927,8 @@ function renderRerankers(s){
    than duplicated, so there is exactly one input per setting and Save keeps
    working unchanged. */
 const RERANK_FIELD_KEYS=["retrieval.rerank_mode","retrieval.cross_encoder_model",
-  "retrieval.cross_encoder_max_length","retrieval.cross_encoder_device"];
+  "retrieval.cross_encoder_max_length","retrieval.cross_encoder_device",
+  "retrieval.rerank_instruction","retrieval.rerank_instruction_format"];
 const PROVIDER_FIELD_KEYS=["generation.provider","generation.model","generation.base_url"];
 
 function fieldEl(key){return document.getElementById("cfg-"+key.replace(/\./g,"-"))}
@@ -2940,6 +2999,29 @@ function wireSettingsInteractions(s){
       setField("retrieval.rerank_mode","cross_encoder");
     toast("Filled in below — press Save changes to apply",0);
   });
+  /* Preflight. A restart is the expensive way to discover that a model id is
+     wrong or that the weights are not here yet — this answers both in a second
+     and says so on the row itself. */
+  $$(".rr-check").forEach(b=>b.onclick=async()=>{
+    const row=b.closest(".rr-row"),st=row&&row.querySelector(".rr-state");
+    const label=b.textContent;b.disabled=true;b.textContent="checking…";
+    if(st)st.innerHTML=' <span class="pill" style="margin-left:6px">checking…</span>';
+    try{
+      const r=await api("/api/rerank/check",{method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({model:b.dataset.id})});
+      const cls=r.usable?(r.cached?"pill done":"pill"):"pill failed";
+      const txt=r.usable
+        ?(r.cached?"downloaded — ready to use":"reachable — downloads on next restart")
+        :"unusable here";
+      if(st)st.innerHTML=` <span class="${cls}" style="margin-left:6px">${esc(txt)}</span>`;
+      toast((r.warnings&&r.warnings.length?r.warnings.join(" · "):`${r.model}: ${txt}`),
+            r.usable?0:1);
+    }catch(e){
+      if(st)st.innerHTML=` <span class="pill failed" style="margin-left:6px">check failed</span>`;
+      toast(e.message,1);
+    }finally{b.disabled=false;b.textContent=label}
+  });
   $$(".rr-profile").forEach(b=>b.onclick=()=>{
     const p=(s.rerank_profiles||[]).find(x=>x.id===b.dataset.id);if(!p)return;
     const missing=Object.entries(p.settings).filter(([k,v])=>!setField(k,v));
@@ -2977,12 +3059,17 @@ function wireSettingsInteractions(s){
   markSelections();
 }
 
-/* OCR panel. Tesseract is a BINARY that is either installed or not; the VLM
-   lane is a vision model served over HTTP somewhere else, which is up or down
-   and needs warming. Conflating the two is why "enable OCR" was unclear. */
+/* OCR panel. The three lanes fail in three different ways, and showing them as
+   one row is why "enable OCR" used to be unclear:
+     * Tesseract is a BINARY — installed or not;
+     * the VLM lane is a vision model served over HTTP somewhere else — up or
+       down, and needs warming;
+     * PaddleOCR is a SIDECAR CONTAINER — "not configured" and "configured but
+       stopped" are different states, and stopping it to reclaim RAM between
+       ingests is a normal thing to do, not a fault. */
 function renderOcr(st){
   const box=$("#set-ocr");if(!box)return;
-  const t=st.tesseract||{},v=st.vlm||{};
+  const t=st.tesseract||{},v=st.vlm||{},p=st.paddle||{};
   const eff=st.effective;
   const effPill=eff==="none"
     ?`<span class="pill failed">no OCR — scanned pages stay empty</span>`
@@ -2994,6 +3081,10 @@ function renderOcr(st){
     ?`<span class="pill">not configured</span>`
     :(v.reachable?`<span class="pill done">endpoint up</span>`
                  :`<span class="pill failed">endpoint down</span>`);
+  const padPill=!p.configured
+    ?`<span class="pill">not configured</span>`
+    :(p.reachable?`<span class="pill done">container up</span>`
+                 :`<span class="pill failed">container stopped</span>`);
   box.innerHTML=`<h3 style="margin:0 0 6px">OCR <span class="hint" style="margin:0;display:inline;font-weight:400">— reads pages that carry no extractable text</span></h3>
     <p class="hint" style="margin:0 0 10px">${effPill} &nbsp; Configured: <code>pdf.ocr_engine = ${esc(st.engine)}</code>. <b>auto</b> uses Tesseract when it is present. Change the engine in the fields above; OCR settings are read per job, so no restart is needed.</p>
     <div class="vault-row">
@@ -3007,6 +3098,13 @@ function renderOcr(st){
         ${v.error&&!v.reachable?`<div class="hint" style="margin:2px 0 0;font-size:11px;color:var(--ink-faint)">${esc(String(v.error).slice(0,180))}</div>`:""}</div>
       <button class="btn" id="ocr-probe" title="Re-check whether the vision endpoint answers">Probe</button>
       <button class="btn" id="ocr-warm" title="Send one tiny page so the model loads now instead of on the first real ingest page">Warm up</button>
+    </div>
+    <div class="vault-row">
+      <div style="flex:1;min-width:0"><span class="nm">PaddleOCR (sidecar)</span> ${padPill}
+        <div class="pth">${esc(p.base_url||"—")}${p.lang?" · lang "+esc(p.lang):""}${(p.langs||[]).length?" · available: "+esc(p.langs.join(", ")):""}</div>
+        <div class="hint" style="margin:4px 0 0;font-size:11px">Much stronger than Tesseract on skewed, multi-column and non-Latin scans; seconds per page on CPU. Runs in its own container so you can stop it between ingests:
+          <code>docker compose --profile ocr up -d paddleocr</code> · <code>docker compose stop paddleocr</code></div>
+        ${p.error&&!p.reachable?`<div class="hint" style="margin:2px 0 0;font-size:11px;color:var(--ink-faint)">${esc(String(p.error).slice(0,180))}</div>`:""}</div>
     </div>`;
   $("#ocr-probe").onclick=()=>loadOcr();
   $("#ocr-warm").onclick=async e=>{
@@ -3020,6 +3118,43 @@ async function loadOcr(){
   const box=$("#set-ocr");if(!box)return;
   try{renderOcr(await api("/api/ocr/status"))}
   catch(e){box.innerHTML=`<span style="color:var(--red)">${esc(e.message)}</span>`}
+}
+
+/* Model-hub credentials. Separate from generation backends because they are a
+   different kind of thing: this is the credential used to DOWNLOAD embedding
+   and reranker models, not to generate text.
+
+   It is here at all because a wrong one is silently destructive — the hub
+   answers 401, huggingface_hub reports that as "repository not found", and
+   every public model then looks like it does not exist. Being able to CLEAR it
+   from here matters as much as being able to set it. */
+function renderHubCreds(hub){
+  if(!hub||!hub.credentials)return "";
+  const rows=hub.credentials.map(c=>`
+    <div class="vault-row" style="align-items:flex-start">
+      <div style="flex:1;min-width:0">
+        <span class="nm">${esc(c.env)}</span>
+        ${c.present?`<span class="pill done" style="margin-left:6px">set</span>`
+                   :`<span class="pill" style="margin-left:6px">not set</span>`}
+        <div class="hint" style="margin:3px 0 0">${esc(c.why)}</div>
+        <div class="row" style="margin-top:6px;flex-wrap:nowrap;gap:6px">
+          <input type="password" id="key-${esc(c.env)}" spellcheck="false" autocomplete="off"
+                 placeholder="${c.present?"replace "+esc(c.env):"paste "+esc(c.env)}"
+                 style="flex:1;min-width:120px"
+                 title="Written to .env (gitignored). Leave blank and press Save key to CLEAR it.">
+          <button class="btn pv-key-save" data-env="${esc(c.env)}" title="Write into .env and apply to this console now">Save key</button>
+        </div>
+      </div>
+    </div>`).join("");
+  const stored=hub.stored_token_path?`<p class="hint" style="margin:6px 0 0">
+      <span class="pill failed">stored login found</span>
+      A token file at <code>${esc(hub.stored_token_path)}</code> is used even when no
+      environment variable is set, and it wins for any tool that reads it. If public
+      models report <i>not found</i>, that file is the first thing to suspect — delete it
+      or run <code>huggingface-cli logout</code>.</p>`:"";
+  return `<label class="f" style="margin-top:16px">Model hub <span class="hint" style="margin:0;display:inline;text-transform:none;letter-spacing:0">— for downloading embedding / reranker models, not for generation</span></label>
+    <p class="hint" style="margin:2px 0 8px">Leave these unset unless you use gated or private models. Press <b>Check</b> on a reranker above to see whether the hub is actually reachable with the current credential.</p>
+    ${rows}${stored}`;
 }
 
 /* Provider registry status. Shows WHICH env var each backend needs and whether
@@ -3066,6 +3201,7 @@ function renderProviders(s){
     <p class="hint" style="margin:0 0 8px"><b>Use</b> points generation at a backend and carries its model + endpoint along — a provider plus the previous provider's model id is the one combination that fails at call time. Keys go to <code>.env</code> (gitignored), never into config.yaml, and are never shown again; this console applies one immediately, :8051 needs a restart.
     The eval judge is separate: <code>eval.judge.provider</code> in config.yaml${s.judge_provider?` (currently <b>${esc(String(s.judge_provider))}</b>)`:" (unset — the judge reuses the generation backend)"}.</p>
     ${rows}
+    ${renderHubCreds(s.hub)}
     <label class="f" style="margin-top:16px">Generation fields <span class="hint" style="margin:0;display:inline;text-transform:none;letter-spacing:0">— what the buttons above write</span></label>
     <div id="pv-fields" class="grid g2" style="margin-top:8px"></div>`;
 }
@@ -3174,29 +3310,77 @@ $("#q-history-clear").onclick=()=>{localStorage.removeItem("ledger-qhistory");qh
 qhRender();
 
 /* ---------- restart :8051 (manual lane; Settings has the auto toggle) ---------- */
+/* The old version polled /health for 5 minutes and, on timeout, printed a
+   Windows path to a file that does not exist. Two things changed so that a
+   restart that fails says WHY:
+     * /health now reports {state: ready|loading|failed, error} — a pipeline
+       that cannot build is "failed", not "still loading", and there is no
+       reason to keep waiting for it;
+     * GET /api/service/log tails the startup log through the console, which
+       is the only way to see it inside a container. */
+async function ragLogTail(n){
+  try{
+    const r=await api(`/api/service/log?lines=${n}`);
+    return (r.lines||[]).join("\n")||"(log is empty)";
+  }catch(e){return "(could not read the startup log: "+e.message+")"}
+}
+function showRagFailure(title,detail,logText){
+  const box=$("#rag-restart-out");if(!box)return;
+  box.style.display="block";
+  box.innerHTML=`<div class="pill failed">${esc(title)}</div>
+    ${detail?`<p class="hint" style="margin:8px 0 0">${esc(detail)}</p>`:""}
+    <pre class="log">${esc(logText||"")}</pre>
+    <p class="hint" style="margin:8px 0 0">The last setting you changed is the
+    usual cause — a model id that cannot be downloaded, or an index path that
+    no longer exists. Fix it in Settings and restart again.</p>`;
+}
 $("#rag-restart").onclick=async()=>{
   if(!confirm("Restart the query API (:8051)?\n\nIn-flight queries are dropped; the warm pipeline reloads models + indexes (~1–3 min until ready)."))return;
-  const b=$("#rag-restart");b.disabled=true;b.textContent="⟳ restarting…";
+  const b=$("#rag-restart");b.disabled=true;
+  const out=$("#rag-restart-out");if(out){out.style.display="none";out.innerHTML=""}
   const reset=()=>{b.disabled=false;b.textContent="⟳ restart :8051"};
+  const t0=Date.now();
+  const secs=()=>Math.round((Date.now()-t0)/1000);
+  b.textContent="⟳ restarting…";
   try{
     const r=await api("/api/service/restart",{method:"POST"});
     toast(`:${r.port} relaunched${r.new_pid?` (pid ${r.new_pid})`:""} — waiting for ready…`);
     $("#dot-rag").className="dot bad";
-    const t0=Date.now();
+    /* A first model download can legitimately take a while, so the deadline is
+       generous — but a `failed` state ends the wait immediately, because more
+       waiting cannot change it. */
+    const DEADLINE=600000;
     const poll=setInterval(async()=>{
-      try{const h=await fetch(state.ragApi+"/health").then(x=>x.json());
-        if(h.ready){clearInterval(poll);reset();
-          $("#dot-rag").className="dot ok";toast("query API ready ✓");return}}catch(e){}
-      if(Date.now()-t0>300000){clearInterval(poll);reset();
-        toast("still not ready after 5 min — check logs\\serve_api_8051.err.log",1)}
-    },5000);
-  }catch(e){toast(e.message,1);reset()}
+      b.textContent=`⟳ loading… ${secs()}s`;
+      let h=null;
+      try{h=await fetch(state.ragApi+"/health").then(x=>x.json())}catch(e){}
+      if(h&&h.ready){clearInterval(poll);reset();
+        $("#dot-rag").className="dot ok";toast(`query API ready ✓ (${secs()}s)`);return}
+      if(h&&h.state==="failed"){clearInterval(poll);reset();
+        showRagFailure(":8051 started but could not build its pipeline",
+                       h.error||"",await ragLogTail(60));
+        toast("query API failed to start — see the report under the header",1);return}
+      if(Date.now()-t0>DEADLINE){clearInterval(poll);reset();
+        showRagFailure(`:8051 never reported ready (${secs()}s)`,
+                       "The process is not answering /health at all, which "+
+                       "usually means it is crashing on startup and being "+
+                       "relaunched in a loop.",await ragLogTail(80));
+        toast("query API did not come back — see the report under the header",1)}
+    },3000);
+  }catch(e){
+    showRagFailure("could not restart :8051",e.message,await ragLogTail(40));
+    toast(e.message,1);reset();
+  }
 };
 
 /* ---------- boot ---------- */
 (async()=>{
   try{const s=await api("/api/settings");state.ragApi=s.rag_api;state.jsonls=s.jsonl_files;state.vaultPath=s.vault_path}catch(e){}
-  loadQueryCatalogs();
+  /* The comparison catalog is only fetched when its panel is actually open —
+     booting straight into two :8051 calls made a stopped query API look like a
+     broken console on every page load. */
+  state.booted=true;
+  maybeLoadCompareCatalog();
   loadOverview();loadFacets();loadInbox();loadConverted();
   state.timers.tab=setInterval(loadOverview,10000);
 })();

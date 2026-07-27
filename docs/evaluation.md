@@ -2,7 +2,7 @@
 
 Quality is measured with the labelled suite in `eval/golden_queries.yaml`. Read that
 file for the current cases and coverage; do not rely on a copied query count. Entries
-can label expected domains, courses, source files, scope routing, keywords, and gold
+can label expected domains, groups, source files, scope routing, keywords, and gold
 answers independently, so missing labels drop out of the corresponding metric instead
 of becoming false zeroes.
 
@@ -16,7 +16,7 @@ python main.py eval --judge          # add the advisory LLM-judge fields
 
 | Tier | Measures |
 |---|---|
-| Retrieval | hit-rate@k, MRR, labelled-source recall@k, scope precision/recall, and course routing |
+| Retrieval | hit-rate@k, MRR, labelled-source recall@k, scope precision/recall, and group routing |
 | Answer | keyword recall, citation validity, deterministic groundedness floor, optional citation-auditor support, and answered rate |
 | Calibration | whether stated confidence tracks keyword recall, groundedness, and optional judge correctness |
 

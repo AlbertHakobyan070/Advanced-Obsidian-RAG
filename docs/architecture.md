@@ -31,11 +31,13 @@ flowchart TD
 
 The index is built from JSONL chunk files, one per source family. Each loader
 normalises its inputs into the same chunk schema (text + metadata: `source_file`,
-`domain`, `course`, `file_type`, `has_code`, `wikilinks`, …):
+`domain`, `file_type`, `has_code`, `wikilinks`, and a configurable grouping
+label — `taxonomy.label`, which defaults to `course` but is just as happily
+`project`, `client`, or `topic`):
 
 | Loader | Handles |
 |---|---|
-| `obsidian_parser` | Markdown notes; heading-aware sectioning; course/domain tagging; wikilink capture. |
+| `obsidian_parser` | Markdown notes; heading-aware sectioning; group/domain tagging; wikilink capture. |
 | `pdf_loader` | Lecture PDFs and textbooks; OCR-capable for scanned pages. |
 | `ipynb_loader` | Jupyter and R notebooks (`.ipynb`, `.R`, `.Rmd`, `.py`). |
 | `code_loader` | Other source languages (`.js/.ts/.sql/.go/.java/.c/.cpp/.rs/.sh/…`) into a dedicated code lane. |
@@ -72,8 +74,8 @@ Queries that name a domain or content type are routed toward where they point:
 
 - `retrieval.domain_signals` maps aliases (e.g. "BI", "DataViz", "pytorch") to `domain`
   metadata values.
-- `retrieval.content_signals` maps phrases ("homework", "lecture files", "tech books",
-  "cheat sheet") to path substrings or file types.
+- `retrieval.content_signals` maps phrases ("the handbooks", "meeting notes",
+  "the reference books", "cheat sheet") to path substrings or file types.
 
 A detected scope adds **filtered dense + sparse lanes** to the fusion. Routing is
 **soft**: in-scope chunks are guaranteed seats in the candidate pool, but the reranker
