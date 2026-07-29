@@ -36,6 +36,15 @@ dependencies never enter the query environment and can be shut down when idle.
 Run `GET /api/import/ocr_scan` (the 🔎 button) first — it reports which pages
 actually lack extractable text, so you only OCR those.
 
+The `paddle` lane itself has two engines, selected with
+`pdf.paddle_ocr.pipeline`: `ocr` (the default — PP-OCRv6 detect-and-recognise,
+plain text, seconds per page) and `vl` (PaddleOCR-VL, a document VLM that
+returns markdown with LaTeX formulas and real tables, at roughly 30x the cost
+for no gain on ordinary prose). Reach for `vl` on a chapter where the equations
+and tables *are* the content; leave it alone for scanned prose. It needs the
+GPU image, and a sidecar that cannot serve it says so rather than quietly
+returning the other engine's output.
+
 **Chunking strategies** (`--chunking`, also selectable per run in the console): `heading` —
 paragraph packing that follows the text's structure (default); `fixed` — strict sliding
 window, for OCR'd / wall-of-text sources; `document` — element-aware packing that never

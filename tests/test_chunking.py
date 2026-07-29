@@ -1,6 +1,6 @@
 """Chunking-strategy regression tests (session 11).
 
-Run:  python -m pytest tests/ -q          (project venv)
+Run:  python -m pytest tests/ -q          (project venv, not the the local agent one)
 
 Guards the two strategies (heading | fixed) and the session-11 fix for the
 silent-text-loss bug: a single "sentence" longer than max_chunk used to be

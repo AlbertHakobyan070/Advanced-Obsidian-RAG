@@ -57,6 +57,20 @@ services:
       # CUDA_VISIBLE_DEVICES exposed. Set to "cpu" to fall back without
       # rebuilding.
       PADDLE_OCR_DEVICE: "${PADDLE_OCR_DEVICE:-gpu:0}"
+      # WHICH ENGINE. "ocr" = PP-OCRv6 detect+recognise; "vl" = PaddleOCR-VL,
+      # a 0.9B document VLM that returns markdown with LaTeX and tables.
+      #
+      # "ocr" is the default on measured evidence, not taste. Benchmarked on
+      # this box over 7 dense textbook pages against the PDFs' own text layer:
+      # PP-OCRv6 ran 3.1s/page at 0.964 word recall, PaddleOCR-VL-1.6-0.9B ran
+      # ~91s/page at 0.933 — 30x the cost for prose it
+      # transcribes no better. VL earns its keep only where STRUCTURE is the
+      # point (formulas as LaTeX, real tables), so it is a per-request opt-in
+      # rather than the standing engine.
+      #
+      # A caller can also pass "pipeline" per /ocr request, so switching this
+      # is only about the default. Note VL peaks at ~7.9GB of VRAM.
+      PADDLE_OCR_PIPELINE: "${PADDLE_OCR_PIPELINE:-ocr}"
     ports:
       - "127.0.0.1:8103:8103"
     volumes:

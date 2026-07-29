@@ -466,11 +466,41 @@ pdf:
   # environment and you can stop it to reclaim RAM between ingests.
   # Turn it on with pdf.ocr_engine: paddle. Delete this block to disable the
   # lane entirely (the console then reports it as "not configured").
+  # WHICH PADDLE ENGINE. The sidecar serves two, and they are different
+  # products sharing a package name:
+  #
+  #   ocr  PP-OCRv6 detect-then-recognise. Plain text, one line per detected
+  #        line. This is what "PaddleOCR" has always meant here.
+  #   vl   PaddleOCR-VL-1.6-0.9B. Layout detection plus a document VLM that
+  #        emits MARKDOWN: reflowed paragraphs, `#` headings, `$...$` LaTeX for
+  #        formulas, real tables, and running headers/footers dropped.
+  #
+  # Benchmarked over 7 dense textbook pages scored against each PDF's own text
+  # layer, on a Pascal-generation 8GB card. See ocr-sidecar/README.md for the
+  # full table. The short version:
+  #
+  #   PP-OCRv6   ~3s/page    0.964 mean word recall
+  #   VL         ~91s/page   0.933 mean word recall, ~7.9GB VRAM
+  #
+  # So `ocr` stays the default: ~30x cheaper AND slightly more accurate on
+  # prose. Choose `vl` per-ingest when the STRUCTURE is the point — a chapter
+  # that is mostly equations or tables, where VL reconstructs a table as real
+  # HTML while PP-OCRv6 returns its digits with every relationship gone. On a
+  # 400-page book that choice is ~20 minutes versus ~10 hours; do the
+  # arithmetic before setting it globally. A faster card changes the ratio,
+  # not the shape of the trade.
+  #
+  # `vl` also needs the paddlex[ocr] extras, which only the GPU image installs.
+  # A sidecar that cannot serve it answers 501 rather than quietly returning
+  # PP-OCRv6 output under the other engine's name.
+  #
+  # null = send nothing and let the sidecar's PADDLE_OCR_PIPELINE decide.
   paddle_ocr:
     base_url: "http://127.0.0.1:8103"
     lang: "en"                              # server-side PaddleOCR language code
+    pipeline: null                          # null | ocr | vl  (see above)
     dpi: 200                                # 300 for dense small print (slower)
-    timeout: 120
+    timeout: 120                            # RAISE to ~300 for pipeline: vl
     max_pages_per_pdf: null                 # safety cap for huge scanned books
     max_edge_px: 2000                       # cap the rendered page's long edge
   only_book_folders: false                  # true = only ingest PDFs under Books/ dirs

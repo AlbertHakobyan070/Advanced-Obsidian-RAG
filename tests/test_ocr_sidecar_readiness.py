@@ -139,3 +139,175 @@ def test_unconfigured_sidecar_is_not_probed_at_all(ocr_status):
     assert paddle["configured"] is False
     assert paddle["reachable"] is False
     assert paddle["engine_importable"] is None
+
+
+# --- which ENGINE, and on what hardware -------------------------------------
+#
+# The sidecar reported `device` and `paddleocr_version` from the day the GPU
+# lane landed, and nothing read them, so "is the fast sidecar the one actually
+# running?" still meant reading `docker ps`. These pin the wiring, because the
+# symptom of losing it is not an error — it is a CPU sidecar quietly doing a
+# GPU sidecar's job at a fraction of the speed, which looks like a slow ingest.
+
+
+def test_console_reports_device_version_and_engine(ocr_status):
+    paddle = ocr_status(FakeResponse(200, {
+        "ok": True, "engine": "paddleocr", "engine_importable": True,
+        "engine_import_error": None, "loaded": ["ocr:en"], "langs": ["en"],
+        "device": "gpu:0", "paddleocr_version": "3.7.0",
+        "pipeline": "ocr",
+        "pipelines": {
+            "ocr": {"available": True, "reason": None,
+                    "models": ["PP-OCRv6_medium_det", "PP-OCRv6_medium_rec"]},
+            "vl": {"available": True, "reason": None,
+                   "models": ["PP-DocLayoutV3", "PaddleOCR-VL-1.6-0.9B"]},
+        }}))
+
+    assert paddle["device"] == "gpu:0"
+    assert paddle["paddleocr_version"] == "3.7.0"
+    assert paddle["pipeline"] == "ocr"
+    # The MODEL name is the part that cannot be inferred from anything else:
+    # `PaddleOCR()` resolves to whatever the installed paddlex pins as current,
+    # so the same code is PP-OCRv4 on one image and PP-OCRv6 on another with no
+    # other visible difference.
+    assert "PP-OCRv6_medium_rec" in paddle["pipelines"]["ocr"]["models"]
+    assert paddle["pipelines"]["vl"]["available"] is True
+
+
+def test_cpu_sidecar_reports_vl_as_unavailable_with_a_reason(ocr_status):
+    """The CPU image pins PaddleOCR 2.x, which has no PaddleOCRVL at all.
+
+    "Unavailable" is useless without the why: one cause is fixed by a rebuild
+    and the other by using the GPU image, and the console cannot tell an
+    operator which unless the sidecar says.
+    """
+    paddle = ocr_status(FakeResponse(200, {
+        "ok": True, "engine": "paddleocr", "engine_importable": True,
+        "engine_import_error": None, "loaded": [], "langs": ["en"],
+        "device": "auto", "paddleocr_version": "2.9.1", "pipeline": "ocr",
+        "pipelines": {
+            "ocr": {"available": True, "reason": None, "models": []},
+            "vl": {"available": False,
+                   "reason": "PaddleOCR 2.9.1 does not ship PaddleOCRVL "
+                             "(needs 3.x)",
+                   "models": []},
+        }}))
+
+    assert paddle["device"] == "auto"
+    assert paddle["pipelines"]["vl"]["available"] is False
+    assert "3.x" in paddle["pipelines"]["vl"]["reason"]
+
+
+def test_sidecar_predating_the_engine_fields_is_unknown_not_broken(ocr_status):
+    """Same rule as engine_importable: absent means unknown.
+
+    A sidecar built before the engine switch reports none of these. Defaulting
+    them to a string would invent a fact; defaulting `pipelines` to a populated
+    dict would claim VL is available on an image that has never heard of it.
+    """
+    paddle = ocr_status(FakeResponse(200, {
+        "ok": True, "engine": "paddleocr", "engine_importable": True,
+        "loaded": [], "langs": ["en"]}))
+
+    assert paddle["device"] is None
+    assert paddle["paddleocr_version"] is None
+    assert paddle["pipeline"] is None
+    assert paddle["pipelines"] == {}
+
+
+# --- the ingest client's half of the same contract ---------------------------
+
+
+def _client(cfg_data, tmp_path):
+    from src.ingestion.ocr_paddle import PaddleOCRClient
+    return PaddleOCRClient.from_config(Config(cfg_data, tmp_path))
+
+
+def test_client_omits_pipeline_when_config_does_not_set_one(monkeypatch, tmp_path):
+    """Sending nothing is what keeps this working against an OLD sidecar.
+
+    A client that always sent `pipeline` would 400 against every sidecar built
+    before the field existed, turning an optional feature into a hard
+    requirement on the container version.
+    """
+    client = _client({"pdf": {"paddle_ocr": {"base_url": SIDECAR}}}, tmp_path)
+    assert client.pipeline is None
+
+    sent = {}
+
+    class R:
+        status_code = 200
+
+        @staticmethod
+        def raise_for_status():
+            pass
+
+        @staticmethod
+        def json():
+            return {"text": "hello", "lines": 1}
+
+    import requests
+    monkeypatch.setattr(requests, "post",
+                        lambda url, json=None, **kw: (sent.update(json or {}), R)[1])
+
+    assert client.ocr_image(b"\x89PNG") == "hello"
+    assert "pipeline" not in sent
+    assert "image_b64" in sent and sent["lang"] == "en"
+
+
+def test_client_forwards_the_configured_pipeline(monkeypatch, tmp_path):
+    client = _client({"pdf": {"paddle_ocr": {"base_url": SIDECAR,
+                                             "pipeline": "vl"}}}, tmp_path)
+    assert client.pipeline == "vl"
+
+    sent = {}
+
+    class R:
+        status_code = 200
+
+        @staticmethod
+        def raise_for_status():
+            pass
+
+        @staticmethod
+        def json():
+            return {"text": "# Heading\n\n$x^2$", "lines": 2, "pipeline": "vl"}
+
+    import requests
+    monkeypatch.setattr(requests, "post",
+                        lambda url, json=None, **kw: (sent.update(json or {}), R)[1])
+
+    assert client.ocr_image(b"\x89PNG") == "# Heading\n\n$x^2$"
+    assert sent["pipeline"] == "vl"
+
+
+def test_client_raises_when_the_sidecar_cannot_serve_the_engine(monkeypatch,
+                                                                tmp_path):
+    """A 501 must NOT come back as a page of PP-OCRv6 text.
+
+    The whole point of asking for `vl` is the markdown, so silently accepting
+    the other engine's output would relabel the result as something it is not —
+    and the caller would only find out by noticing there is no LaTeX in a
+    corpus they believe has it.
+    """
+    client = _client({"pdf": {"paddle_ocr": {"base_url": SIDECAR,
+                                             "pipeline": "vl"}}}, tmp_path)
+
+    import requests
+
+    class R:
+        status_code = 501
+
+        @staticmethod
+        def raise_for_status():
+            raise requests.HTTPError("501 Server Error: Not Implemented")
+
+        @staticmethod
+        def json():
+            return {"error": 'pipeline "vl" unavailable: paddlex[ocr] extras '
+                             'are not installed'}
+
+    monkeypatch.setattr(requests, "post", lambda *a, **kw: R)
+
+    with pytest.raises(requests.HTTPError):
+        client.ocr_image(b"\x89PNG")

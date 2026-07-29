@@ -48,13 +48,25 @@ RUN pip3 install --no-cache-dir \
       "uvicorn==0.41.0" \
       "pillow==11.3.0"
 
+# The paddlex[ocr] extras, which the BASE install deliberately does not pull:
+# paddleocr depends on paddlex[ocr-CORE], enough for PP-OCRv6 and nothing more.
+# The PaddleOCR-VL pipeline needs the full set (tokenizers, sentencepiece,
+# scipy, latex2mathml, ...) and without them raises DependencyError at pipeline
+# CONSTRUCTION -- i.e. on the first real page, minutes into an ingest, not at
+# startup. ~120MB for the option of a 0.9B document VLM in the same image.
+#
+# Pinned to the version the line above resolves to, so a rebuild cannot quietly
+# drag paddlex forward underneath a paddleocr that is still pinned to 3.7.0.
+RUN pip3 install --no-cache-dir "paddlex[ocr]==3.7.2"
+
 COPY server.py /srv/server.py
 
 # Weights land here on first use; compose mounts a named volume so the download
 # happens once rather than on every container recreate.
 ENV PADDLE_OCR_HOME=/paddle_cache \
     HOME=/paddle_cache \
-    PADDLE_OCR_DEVICE=gpu:0
+    PADDLE_OCR_DEVICE=gpu:0 \
+    PADDLE_OCR_PIPELINE=ocr
 
 EXPOSE 8103
 CMD ["python", "-m", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8103"]

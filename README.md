@@ -321,8 +321,16 @@ instead of system RAM, and its lifecycle is independent of the query stack:
 cd ocr-sidecar && docker compose -f docker-compose.gpu.yml up -d --build
 ```
 
+That sidecar serves **two** engines, chosen per request: `ocr` (PP-OCRv6
+detect-and-recognise — plain text, seconds per page, the default) and `vl`
+(PaddleOCR-VL, a 0.9B document model that returns markdown with LaTeX formulas
+and real tables). The default is measured, not assumed: `vl` costs ~30x the
+time and 7x the VRAM and transcribes ordinary prose slightly *worse*, so it is
+worth choosing only where a page's structure is the information.
+
 See [`docs/deployment-docker.md`](docs/deployment-docker.md) for the full
-walkthrough.
+walkthrough and [`ocr-sidecar/README.md`](ocr-sidecar/README.md) for the
+benchmark behind that choice.
 
 ## Repository layout
 

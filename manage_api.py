@@ -2523,7 +2523,12 @@ def ocr_status() -> dict:
     # reports readiness separately rather than folding it into "reachable".
     paddle: dict = {"configured": False, "reachable": False, "base_url": None,
                     "lang": None, "langs": [], "engine_importable": None,
-                    "engine_error": None, "error": None}
+                    "engine_error": None, "error": None,
+                    # CPU sidecar or GPU one, which engine it defaults to, and
+                    # the models behind it. All None on a sidecar predating
+                    # those fields — unknown, not broken.
+                    "device": None, "paddleocr_version": None,
+                    "pipeline": None, "pipelines": {}}
     if disk_cfg.get("pdf.paddle_ocr") or {}:
         try:
             from src.ingestion.ocr_paddle import PaddleOCRClient
@@ -2547,6 +2552,17 @@ def ocr_status() -> dict:
                 imp = body.get("engine_importable")
                 paddle["engine_importable"] = (None if imp is None else bool(imp))
                 paddle["engine_error"] = body.get("engine_import_error")
+                # The sidecar has reported these since the GPU lane landed, but
+                # nothing read them, so "is the fast sidecar actually running?"
+                # still meant reading `docker ps`. They are the difference
+                # between a 3s page and a 5s one (device), between PP-OCRv4 and
+                # PP-OCRv6 (version), and between plain text and markdown with
+                # LaTeX (pipeline) — none of which is visible in a transcript
+                # until you already suspect it.
+                paddle["device"] = body.get("device")
+                paddle["paddleocr_version"] = body.get("paddleocr_version")
+                paddle["pipeline"] = body.get("pipeline")
+                paddle["pipelines"] = body.get("pipelines") or {}
             elif not r.ok:
                 paddle["engine_error"] = f"HTTP {r.status_code}"
         except Exception as e:

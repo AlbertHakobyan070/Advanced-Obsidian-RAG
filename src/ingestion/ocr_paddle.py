@@ -67,7 +67,8 @@ class PaddleOCRClient(VLMOCR):
     def __init__(self, base_url: str = "http://127.0.0.1:8103",
                  lang: str = "en", dpi: int = 200, timeout: float = 120.0,
                  max_pages_per_pdf: int | None = None,
-                 max_edge_px: int | None = 2000):
+                 max_edge_px: int | None = 2000,
+                 pipeline: str | None = None):
         super().__init__(
             base_url=base_url,
             model=f"paddleocr:{lang}",
@@ -79,6 +80,16 @@ class PaddleOCRClient(VLMOCR):
             max_edge_px=max_edge_px,
         )
         self.lang = lang
+        # Which sidecar engine: "ocr" (PP-OCRv6, plain text) or "vl"
+        # (PaddleOCR-VL, markdown with LaTeX and tables). None sends nothing
+        # and lets the sidecar apply its own default, which keeps this client
+        # working against a sidecar that predates the option.
+        #
+        # Measured on this corpus before exposing it: VL costs ~30x the time
+        # per page for no gain in word recall, so it is worth choosing only
+        # where page STRUCTURE is the point. Do not set it globally without
+        # doing that arithmetic against the book you are about to ingest.
+        self.pipeline = (pipeline or None)
 
     @classmethod
     def from_config(cls, cfg: Config) -> "PaddleOCRClient":
@@ -93,6 +104,7 @@ class PaddleOCRClient(VLMOCR):
             timeout=float(pick("timeout", 120)),
             max_pages_per_pdf=pick("max_pages_per_pdf", None),
             max_edge_px=pick("max_edge_px", 2000),
+            pipeline=pick("pipeline", None),
         )
 
     # ---- endpoint ----
@@ -124,8 +136,15 @@ class PaddleOCRClient(VLMOCR):
             "image_b64": base64.b64encode(png_bytes).decode("ascii"),
             "lang": self.lang,
         }
+        if self.pipeline:
+            payload["pipeline"] = self.pipeline
         r = requests.post(f"{self.base_url}/ocr", json=payload,
                           timeout=self.timeout)
+        # A sidecar that cannot serve the requested engine answers 501. Let it
+        # raise like any other HTTP error rather than special-casing it: the
+        # inherited driver already counts the page as failed, and silently
+        # accepting PP-OCRv6 output for a "vl" request would relabel the result
+        # as something it is not.
         r.raise_for_status()
         data = r.json()
         if not isinstance(data, dict):

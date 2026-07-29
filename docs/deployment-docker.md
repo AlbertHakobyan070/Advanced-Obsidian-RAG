@@ -148,6 +148,49 @@ without kernels for your card still imports and still reports the right device
 count, so that pin was chosen by running a real GPU op, not by reading a
 support matrix.
 
+### Two engines: `ocr` and `vl`
+
+"PaddleOCR" names two different products, and the GPU sidecar serves both.
+Choose per request with `"pipeline"`, or set the container default with
+`PADDLE_OCR_PIPELINE`:
+
+| | `ocr` (default) | `vl` |
+|---|---|---|
+| models | `PP-OCRv6_medium_det` + `_rec` | `PP-DocLayoutV3` + `PaddleOCR-VL-1.6-0.9B` |
+| how | detect boxes, recognise each | layout detection, then a document VLM reads each block |
+| output | plain text, one line per detected line | **markdown**: reflowed paragraphs, `#` headings, `$…$` LaTeX, HTML tables |
+
+`ocr` is the default on measured evidence. Benchmarked over dense textbook
+pages scored against each PDF's own text layer, `vl` costs roughly **30x the
+time and 7x the VRAM while transcribing prose slightly worse**. On a 400-page
+scanned book that is the difference between minutes and most of a day.
+
+`vl` earns its cost only where the page's *structure* is the information. It
+reconstructs a table as real HTML with its row and column headers, where `ocr`
+returns the same digits with every relationship gone; and it emits
+`$$p(x)=a_{0}+\cdots+a_{n}x^{n}$$` where `ocr` returns the fragments the
+equation was printed as. That is a per-book judgement, which is why it is a
+per-request field and not a new default:
+
+```yaml
+pdf:
+  paddle_ocr:
+    pipeline: vl        # null (sidecar default) | ocr | vl
+    timeout: 600        # vl is ~90s/page — the 120s default will time out
+```
+
+Two things to know before pointing an ingest at it. `vl` needs the
+`paddlex[ocr]` extras, which only the GPU image installs — a sidecar that
+cannot serve the requested engine answers **501** rather than silently
+returning the other engine's output under the wrong name. And engines are
+cached for the life of the container, so one `vl` request pins its ~7.9 GB of
+VRAM until you restart the sidecar.
+
+`GET /health` reports `pipelines`, including the **model names** behind each.
+That matters more than it looks: `PaddleOCR()` resolves to whatever the
+installed PaddleX pins as current, so the same call yields a different model on
+a different image, with no visible symptom until you compare transcripts.
+
 The third lane, a document **vision model**, is reached over HTTP and
 deliberately lives in no image here: on container CPU it is minutes per page.
 Run one on the host and the container reaches it at `host.docker.internal`.

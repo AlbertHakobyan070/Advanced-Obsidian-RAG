@@ -1,6 +1,6 @@
 """Eval-suite v2 metric tests (session 16).
 
-Run:  python -m pytest tests/ -q          (project venv)
+Run:  python -m pytest tests/ -q          (project venv, not the the local agent one)
 
 eval/metrics.py is deliberately pure — no index, no LLM, no filesystem — so
 the scoring layer can be pinned down here in milliseconds. The behaviour these
