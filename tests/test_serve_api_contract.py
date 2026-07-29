@@ -565,3 +565,35 @@ def test_rerank_instruction_is_accepted_by_every_shape_that_reranks():
     for model in (S.SearchIn, S.QueryIn, S.CompareBranchIn):
         assert "rerank_instruction" in model.model_fields, model.__name__
     assert "rerank_instruction" in S._RETRIEVAL_FIELDS
+
+
+def test_every_retrieval_endpoint_forwards_the_whole_knob_set(monkeypatch):
+    """Accepting a knob and FORWARDING it are different things.
+
+    /search and /query?retrieve_only=true each hand-enumerated their kwargs, so
+    `rerank_instruction` was validated, documented in /schema and echoed — and
+    then dropped on the floor before it ever reached the pipeline. The retrieval
+    echo correctly reported `applied: false`, which made a live bug look like a
+    working feature returning an honest no-op. Asserting the field list is why
+    _retrieval_kwargs exists; asserting the CALL is what catches a bypass.
+    """
+    import serve_api as S
+
+    seen: list[dict] = []
+
+    def record(q, **kwargs):
+        seen.append(kwargs)
+        return [], {"rerank_mode": "cross_encoder"}
+
+    monkeypatch.setitem(S._STATE, "rag", SimpleNamespace(search=record))
+
+    S.search(S.SearchIn(q="question", rerank_instruction="prefer procedures"))
+    S.query(S.QueryIn(q="question", retrieve_only=True,
+                      rerank_instruction="prefer procedures"))
+
+    assert len(seen) == 2
+    for kwargs in seen:
+        assert set(kwargs) == set(S._RETRIEVAL_FIELDS), (
+            f"call site dropped {set(S._RETRIEVAL_FIELDS) - set(kwargs)} / "
+            f"invented {set(kwargs) - set(S._RETRIEVAL_FIELDS)}")
+        assert kwargs["rerank_instruction"] == "prefer procedures"

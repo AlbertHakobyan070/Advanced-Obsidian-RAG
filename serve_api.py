@@ -683,15 +683,7 @@ def query(body: QueryIn) -> QueryOut:
     # ---- retrieval-only fast path: no LLM, works with the proxy down ----
     if body.retrieve_only:
         try:
-            docs, info = rag.search(
-                body.q, preset=body.preset, top_k=body.top_k,
-                dense_top_k=body.dense_top_k, sparse_top_k=body.sparse_top_k,
-                hyde=body.hyde, omnisearch=body.omnisearch,
-                parent_context=body.parent_context,
-                neighbor_context=body.neighbor_context,
-                hype=body.hype, rerank=body.rerank,
-                auto_preset=body.auto_preset,
-            )
+            docs, info = rag.search(body.q, **_retrieval_kwargs(body))
         except (KeyError, ValueError) as e:
             return QueryOut(answer=f"Bad request: {e.args[0]}",
                             confidence="ERROR", citations=[], sources=[])
@@ -816,15 +808,7 @@ def search(body: SearchIn) -> dict:
     rag = _rag()
     t0 = time.time()
     try:
-        docs, info = rag.search(
-            body.q, preset=body.preset, top_k=body.top_k,
-            dense_top_k=body.dense_top_k, sparse_top_k=body.sparse_top_k,
-            hyde=body.hyde, omnisearch=body.omnisearch,
-            parent_context=body.parent_context,
-            neighbor_context=body.neighbor_context,
-            hype=body.hype, rerank=body.rerank,
-            auto_preset=body.auto_preset,
-        )
+        docs, info = rag.search(body.q, **_retrieval_kwargs(body))
     except (KeyError, ValueError) as e:
         return {"error": e.args[0], "results": [], "retrieval": {}}
     except RerankerExecutionError as e:
