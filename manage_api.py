@@ -2515,8 +2515,15 @@ def ocr_status() -> dict:
     # genuinely different states here: the config can name a sidecar that is
     # simply stopped, which is the normal way to give its RAM back between
     # ingests. The panel says which one it is instead of "OCR is broken".
+    #
+    # There is a THIRD state, and it is the one that used to be invisible: a
+    # container that is up and answering while its engine cannot import at all
+    # (a missing system library, a base image that moved under the wheels). The
+    # sidecar now answers 503 with `engine_importable: false` for that, so this
+    # reports readiness separately rather than folding it into "reachable".
     paddle: dict = {"configured": False, "reachable": False, "base_url": None,
-                    "lang": None, "langs": [], "error": None}
+                    "lang": None, "langs": [], "engine_importable": None,
+                    "engine_error": None, "error": None}
     if disk_cfg.get("pdf.paddle_ocr") or {}:
         try:
             from src.ingestion.ocr_paddle import PaddleOCRClient
@@ -2525,9 +2532,23 @@ def ocr_status() -> dict:
                            "lang": client.lang})
             import requests
             r = requests.get(f"{client.base_url}/health", timeout=5)
-            paddle["reachable"] = r.status_code < 500
-            if r.ok and isinstance(r.json(), dict):
-                paddle["langs"] = r.json().get("langs") or []
+            # An answer of ANY status means the container is up. Deriving this
+            # from the status code would file the 503 above under "container
+            # stopped" — the exact conflation this panel exists to avoid.
+            paddle["reachable"] = True
+            try:
+                body = r.json()
+            except Exception:
+                body = None
+            if isinstance(body, dict):
+                paddle["langs"] = body.get("langs") or []
+                # Absent on a sidecar older than this field: unknown, not
+                # broken. Only a literal false means "up but cannot OCR".
+                imp = body.get("engine_importable")
+                paddle["engine_importable"] = (None if imp is None else bool(imp))
+                paddle["engine_error"] = body.get("engine_import_error")
+            elif not r.ok:
+                paddle["engine_error"] = f"HTTP {r.status_code}"
         except Exception as e:
             paddle["error"] = f"{type(e).__name__}: {e}"
 

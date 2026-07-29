@@ -1,0 +1,91 @@
+# Noetrix OCR sidecar, GPU — its OWN compose project.
+#
+# Deliberately not a service inside rag-docker-bundle/docker-compose.yml:
+#
+#   * lifecycle. `docker compose up` in the bundle must never start this. OCR
+#     is an ingest-day tool; the query stack is not. A separate project means
+#     `docker compose -f docker-compose.gpu.yml up -d` / `down` moves only this,
+#     and stopping the RAG stack does not take the OCR engine with it.
+#   * memory. On a 16GB box the deciding factor is that the recognition models
+#     live in VRAM here rather than in system RAM, so the sidecar stops
+#     competing with the query pipeline for the thing that is actually scarce.
+#   * portability. The Mac bundle has no NVIDIA GPU. Keeping this out of that
+#     compose file means the bundle stays buildable on a machine with no card.
+#
+# It binds the SAME port as the CPU sidecar (127.0.0.1:8103), so
+# `pdf.paddle_ocr.base_url` in config.yaml needs no change and the two are
+# simply mutually exclusive — run whichever suits the machine.
+#
+#   docker compose -f docker-compose.gpu.yml up -d --build
+#   docker compose -f docker-compose.gpu.yml logs -f
+#   docker compose -f docker-compose.gpu.yml down
+#
+# Pick the card with OCR_GPU_INDEX (host index; default 1, which on this box is
+# the one NOT driving the display). On a single-GPU machine set OCR_GPU_INDEX=0.
+#
+#   OCR_GPU_INDEX=0 docker compose -f docker-compose.gpu.yml up -d
+#
+# Requires an NVIDIA runtime (Docker Desktop + WSL2 GPU, or nvidia-container-
+# toolkit on Linux). Verify with:
+#   docker run --rm --gpus all nvidia/cuda:11.8.0-base-ubuntu22.04 nvidia-smi
+name: noetrix-ocr-gpu
+
+services:
+  paddleocr:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    image: noetrix-ocr-gpu:latest
+    container_name: noetrix-ocr-gpu
+    environment:
+      PADDLE_OCR_LANG: "${PADDLE_OCR_LANG:-en}"
+      # WHICH physical card. This, not the `device_ids` reservation below, is
+      # what actually selects it on Docker Desktop.
+      #
+      # Measured, because the obvious reading is wrong: with device_ids ["1"]
+      # and nothing else, `nvidia-smi` INSIDE the container still listed BOTH
+      # cards with their host UUIDs, Paddle took gpu:0 = host card 0, and the
+      # 596 MiB of weights landed on the card driving the display — the exact
+      # opposite of the intent. Docker Desktop/WSL2 does not honour per-device
+      # reservations; it exposes every GPU.
+      #
+      # CUDA_VISIBLE_DEVICES is read by the CUDA driver in-process, so it works
+      # regardless. The card named here becomes device 0 inside, which is why
+      # PADDLE_OCR_DEVICE below stays gpu:0.
+      CUDA_VISIBLE_DEVICES: "${OCR_GPU_INDEX:-1}"
+      # Device INSIDE the container, i.e. an index into whatever
+      # CUDA_VISIBLE_DEVICES exposed. Set to "cpu" to fall back without
+      # rebuilding.
+      PADDLE_OCR_DEVICE: "${PADDLE_OCR_DEVICE:-gpu:0}"
+    ports:
+      - "127.0.0.1:8103:8103"
+    volumes:
+      # Recognition weights, downloaded once (~200MB). Named so a container
+      # recreate does not re-download them.
+      - paddle-cache:/paddle_cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              # Asks for one GPU. Deliberately `count` rather than device_ids:
+              # a native Linux nvidia-container-toolkit honours device_ids, but
+              # Docker Desktop ignores it and exposes everything, so writing an
+              # index here would only document a selection that is not
+              # happening. CUDA_VISIBLE_DEVICES above does the real selecting,
+              # and it works on both.
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      # /health returns 503 when the engine cannot import, so a bare -f is
+      # enough to mark a broken container unhealthy rather than "up".
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8103/health"]
+      interval: 30s
+      timeout: 5s
+      # Generous: the first start downloads weights and warms the GPU context.
+      start_period: 180s
+      retries: 5
+
+volumes:
+  paddle-cache:

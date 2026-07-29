@@ -312,6 +312,15 @@ docker compose --profile rerank up -d rerank              # external reranker on
 docker compose stop paddleocr                             # give the RAM back
 ```
 
+On a machine with an NVIDIA GPU, [`ocr-sidecar/`](ocr-sidecar/) holds the same
+OCR sidecar built against CUDA and PaddleOCR 3.x, as its **own** compose
+project — same port, same contract, but the recognition models live in VRAM
+instead of system RAM, and its lifecycle is independent of the query stack:
+
+```bash
+cd ocr-sidecar && docker compose -f docker-compose.gpu.yml up -d --build
+```
+
 See [`docs/deployment-docker.md`](docs/deployment-docker.md) for the full
 walkthrough.
 
@@ -319,6 +328,7 @@ walkthrough.
 
 ```
 config.yaml / config.example.yaml   # every tunable: providers, top-k, presets, paths, routing
+ocr-sidecar/                        # the OCR sidecar's source: one server.py, CPU + GPU images
 .env.example                        # secrets template (real .env is gitignored)
 main.py                             # CLI: index | ingest-* | query | chat | eval | serve
 serve_api.py                        # warm query API (:8051)

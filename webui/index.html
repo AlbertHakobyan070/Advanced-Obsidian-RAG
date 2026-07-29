@@ -3081,10 +3081,16 @@ function renderOcr(st){
     ?`<span class="pill">not configured</span>`
     :(v.reachable?`<span class="pill done">endpoint up</span>`
                  :`<span class="pill failed">endpoint down</span>`);
+  /* Three states, not two: a container that is UP but whose OCR engine cannot
+     import is neither "up" nor "stopped", and calling it up is the lie this
+     panel is supposed to make impossible. engine_importable is null on a
+     sidecar older than that field — unknown, so say nothing. */
   const padPill=!p.configured
     ?`<span class="pill">not configured</span>`
-    :(p.reachable?`<span class="pill done">container up</span>`
-                 :`<span class="pill failed">container stopped</span>`);
+    :(!p.reachable?`<span class="pill failed">container stopped</span>`
+      :(p.engine_importable===false
+        ?`<span class="pill failed">up, but the OCR engine will not load</span>`
+        :`<span class="pill done">container up</span>`));
   box.innerHTML=`<h3 style="margin:0 0 6px">OCR <span class="hint" style="margin:0;display:inline;font-weight:400">— reads pages that carry no extractable text</span></h3>
     <p class="hint" style="margin:0 0 10px">${effPill} &nbsp; Configured: <code>pdf.ocr_engine = ${esc(st.engine)}</code>. <b>auto</b> uses Tesseract when it is present. Change the engine in the fields above; OCR settings are read per job, so no restart is needed.</p>
     <div class="vault-row">
@@ -3104,6 +3110,7 @@ function renderOcr(st){
         <div class="pth">${esc(p.base_url||"—")}${p.lang?" · lang "+esc(p.lang):""}${(p.langs||[]).length?" · available: "+esc(p.langs.join(", ")):""}</div>
         <div class="hint" style="margin:4px 0 0;font-size:11px">Much stronger than Tesseract on skewed, multi-column and non-Latin scans; seconds per page on CPU. Runs in its own container so you can stop it between ingests:
           <code>docker compose --profile ocr up -d paddleocr</code> · <code>docker compose stop paddleocr</code></div>
+        ${p.engine_importable===false?`<div class="hint" style="margin:4px 0 0;font-size:11px;color:var(--red)">The sidecar answers, but <code>import paddle</code> fails inside it, so every scanned page would come back empty. Rebuild the image (<code>docker compose --profile ocr up -d --build paddleocr</code>) and check its logs.${p.engine_error?`<div style="color:var(--ink-faint);margin-top:2px">${esc(String(p.engine_error).slice(0,180))}</div>`:""}</div>`:""}
         ${p.error&&!p.reachable?`<div class="hint" style="margin:2px 0 0;font-size:11px;color:var(--ink-faint)">${esc(String(p.error).slice(0,180))}</div>`:""}</div>
     </div>`;
   $("#ocr-probe").onclick=()=>loadOcr();

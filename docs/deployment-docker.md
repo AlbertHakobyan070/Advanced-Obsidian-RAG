@@ -21,6 +21,7 @@ Dockerfile                # CPU-only PyTorch, both APIs in one container
 config.docker.yaml        # container config (Linux paths); copied to config.yaml in the image
 docker-entrypoint.sh      # supervises serve_api (:8051) alongside manage_api (:8052)
 paddleocr/                # the OCR sidecar image + its tiny HTTP service
+                          # (a shipping copy of the repo's ocr-sidecar/)
 .env.example              # settings + provider-key template
 app/                      # the application source
 data/                     # JSONL chunk files (the source of truth)
@@ -114,7 +115,38 @@ It is a separate image because its dependency tree is larger than the rest of
 the stack put together and it is only needed while ingesting. Recognition
 weights download once into the `paddle-cache` volume. The console's
 **Settings → OCR** panel distinguishes *not configured* from *container
-stopped*, so a deliberately-stopped sidecar never looks like a fault.
+stopped*, so a deliberately-stopped sidecar never looks like a fault — and
+`/health` returns **503** when the engine cannot import, so a container that is
+up but unusable is reported unhealthy rather than accepting pages and failing
+every one.
+
+### On a machine with an NVIDIA GPU
+
+`ocr-sidecar/` holds a GPU build of the same sidecar, as its **own compose
+project**:
+
+```bash
+cd ocr-sidecar
+docker compose -f docker-compose.gpu.yml up -d --build
+docker compose -f docker-compose.gpu.yml down
+```
+
+It binds the same `127.0.0.1:8103` and answers the same contract, so
+`pdf.paddle_ocr.base_url` is unchanged and the two are simply mutually
+exclusive. Two things make it worth the separate project rather than another
+profile:
+
+- the recognition models sit in **VRAM**, so on a memory-tight host OCR stops
+  competing with the query pipeline for system RAM;
+- its lifecycle is independent — bringing the RAG stack down does not take the
+  OCR engine with it, and the Mac bundle stays buildable on a host with no card.
+
+`GET /health` reports `device` and `paddleocr_version`, so a GPU build that
+quietly fell back to CPU is visible rather than merely slow. See
+`ocr-sidecar/README.md`, in particular why the CUDA pin is 11.8 — a wheel
+without kernels for your card still imports and still reports the right device
+count, so that pin was chosen by running a real GPU op, not by reading a
+support matrix.
 
 The third lane, a document **vision model**, is reached over HTTP and
 deliberately lives in no image here: on container CPU it is minutes per page.

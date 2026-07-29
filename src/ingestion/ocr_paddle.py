@@ -52,7 +52,10 @@ class PaddleOCRClient(VLMOCR):
     The sidecar contract is deliberately tiny (see `paddleocr/server.py` in the
     Docker bundle):
 
-        GET  /health -> {"ok": true, "engine": "paddleocr", "langs": [...]}
+        GET  /health -> {"ok": true, "engine": "paddleocr", "langs": [...],
+                         "engine_importable": true}
+                     -> 503 (same body, engine_importable false) when the
+                        sidecar is up but `import paddle` fails inside it
         POST /ocr    {"image_b64": "<png>", "lang": "en"}
                      -> {"text": "...", "lines": 12, "ms": 1830}
 
@@ -95,7 +98,13 @@ class PaddleOCRClient(VLMOCR):
     # ---- endpoint ----
 
     def probe(self) -> bool:
-        """Cheap reachability check. Never raises."""
+        """Cheap "would OCR actually work" check. Never raises.
+
+        Stays a status-code test on purpose, but that test now means more than
+        it used to: the sidecar answers 503 when its engine cannot import, so
+        an up-but-unusable container reads as False here instead of passing as
+        reachable and failing on every page.
+        """
         import requests
         try:
             r = requests.get(f"{self.base_url}/health", timeout=5)

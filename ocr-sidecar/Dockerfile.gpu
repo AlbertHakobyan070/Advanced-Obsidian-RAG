@@ -1,0 +1,60 @@
+# PaddleOCR sidecar, GPU build. Same contract and same server.py as the CPU
+# image next to it -- only the wheels and the device differ.
+#
+# Why a separate image rather than a flag on the CPU one: the GPU wheel set is
+# ~5x the size and useless without an NVIDIA runtime, so a Mac or any GPU-less
+# host would pay for it and get nothing. The CPU image stays the portable
+# default; this one is opt-in on a machine that has a card.
+#
+# CUDA 11.8, deliberately, and this is the load-bearing choice on this box.
+# The target is a GTX 1070 Ti: Pascal, compute capability 6.1. Modern PyTorch
+# wheels dropped Pascal, which is why the VLM OCR lane here runs through
+# llama.cpp (it compiles its own sm_61 kernels). PaddlePaddle is the exception:
+# its cu118 build still ships sm_61. Measured on this machine before this file
+# was written -- paddlepaddle-gpu 3.3.1 reported capability (6, 1) and ran a
+# real 512x512 matmul on the card. Do not "modernise" this to cu126/cu129
+# without re-running that check; import and device_count both succeed on a
+# wheel with no matching arch, and only a real kernel launch tells you.
+FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1
+
+# libgomp1 is paddlepaddle's OpenMP runtime -- without it `import paddle` fails
+# with a bare "libgomp.so.1: cannot open shared object file". libgl1 and
+# libglib2.0-0 are OpenCV's, needed even in its headless build. ccache silences
+# a warning paddle prints on every start.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      python3 python3-pip python3-dev \
+      libgl1 libglib2.0-0 libgomp1 ccache curl \
+ && rm -rf /var/lib/apt/lists/* \
+ && ln -sf /usr/bin/python3 /usr/local/bin/python
+
+WORKDIR /srv
+
+# paddlepaddle-gpu comes from PaddlePaddle's own index, not PyPI: PyPI carries
+# only the CPU build under this name.
+RUN pip3 install --no-cache-dir "paddlepaddle-gpu==3.3.1" \
+      -i https://www.paddlepaddle.org.cn/packages/stable/cu118/
+
+# PaddleOCR 3.x, the current line. Its API differs from the 2.x the CPU image
+# pins (use_textline_orientation instead of use_angle_cls, predict() returning
+# rec_texts instead of nested [box, (text, score)] tuples) -- server.py detects
+# the installed major and speaks both, so the two images share one file.
+RUN pip3 install --no-cache-dir \
+      "paddleocr==3.7.0" \
+      "fastapi==0.133.1" \
+      "uvicorn==0.41.0" \
+      "pillow==11.3.0"
+
+COPY server.py /srv/server.py
+
+# Weights land here on first use; compose mounts a named volume so the download
+# happens once rather than on every container recreate.
+ENV PADDLE_OCR_HOME=/paddle_cache \
+    HOME=/paddle_cache \
+    PADDLE_OCR_DEVICE=gpu:0
+
+EXPOSE 8103
+CMD ["python", "-m", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8103"]
