@@ -23,11 +23,20 @@ Tiers:
 from __future__ import annotations
 
 import re
+import sys
 import unicodedata
+from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-# Citation markers the generator emits: [1], [2], ...
-_CITATION_RE = re.compile(r"\[(\d+)\]")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src.utils.citations import CITATION_RE, ONLY_CITATIONS_RE
+
+# Citation markers the generator emits. IMPORTED, not re-declared: this file
+# and src/generation/generator.py used to carry the same pattern twice, and
+# when models started emitting fullwidth 【1】 brackets a fix to one copy would
+# have left this one scoring correctly-cited answers as uncited.
+_CITATION_RE = CITATION_RE
 
 # Sentence-ish split: after .!? or on a newline. Bullets and numbered lists in
 # the generated answers are newline-separated, so both matter.
@@ -35,7 +44,7 @@ _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 
 # A fragment that is nothing but citation markers belongs to the sentence
 # BEFORE it ("...gradient clipping. [1][2]") — merged back during splitting.
-_ONLY_CITATIONS_RE = re.compile(r"^(?:\s*\[\d+\]\s*)+[.,;]?$")
+_ONLY_CITATIONS_RE = ONLY_CITATIONS_RE
 
 _WORD_RE = re.compile(r"[a-z0-9]+(?:[-_'][a-z0-9]+)*")
 

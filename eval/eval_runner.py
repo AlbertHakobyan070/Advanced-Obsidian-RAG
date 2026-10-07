@@ -13,6 +13,14 @@ cannot tell you:
      This is the regression harness. It runs the whole suite in minutes with
      the generation endpoint down.
 
+     CAVEAT — "no LLM" holds only with HyDE off. rag.search() applies
+     retrieval.use_hyde, so with it on each prose question also makes one
+     HyDE call: results vary run to run (temperature 0.3), and when the
+     endpoint is down HyDE silently falls back to the raw query — so the same
+     command measures a different pipeline depending on whether the LLM is
+     reachable. There is no CLI flag for it: set use_hyde: false in
+     config.yaml for a repeatable tier-1 run.
+
   2. ANSWER (needs generation)
        keyword_recall    expected terms present            (proxy, kept)
        citation_validity [n] markers that resolve to a retrieved doc

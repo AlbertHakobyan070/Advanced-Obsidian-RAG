@@ -272,3 +272,21 @@ def test_management_key_writer_rejects_wrong_declared_key_type(
     assert response.status_code == 400
     assert b"wrong key type" in response.body
     assert b"sk-cp-" in response.body
+
+
+def test_a_routing_proxy_reports_the_model_that_answered():
+    # FreeLLMAPI's "auto" answers with the model it routed to; that, not "auto", is
+    # what a caller (the eval drafter's provenance) should record.
+    from types import SimpleNamespace as NS
+    from src.llm.llm_client import LLMClient
+    reported = []
+
+    def create(**kw):
+        return NS(choices=[NS(message=NS(content="ok"))], usage=None, model=reported[0])
+    llm = LLMClient.__new__(LLMClient)
+    llm.model, llm.provider = "auto", "openai"
+    llm._client = NS(chat=NS(completions=NS(create=create)))
+    reported[:] = ["openai/gpt-oss-120b"]
+    assert llm._complete_openai_compatible("s", "u", 0.0, 5).model == "openai/gpt-oss-120b"
+    reported[:] = [None]                                   # a provider that says nothing
+    assert llm._complete_openai_compatible("s", "u", 0.0, 5).model == "auto"

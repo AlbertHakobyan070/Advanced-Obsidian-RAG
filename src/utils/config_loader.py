@@ -4,9 +4,19 @@ config_loader.py — Load config.yaml + .env into a single accessor.
 Usage:
     from src.utils.config_loader import load_config
     cfg = load_config()
-    cfg.get("generation.provider")          # -> "anthropic"
+    cfg.get("generation.provider")          # -> e.g. "freellmapi", a providers: entry
     cfg.get("retrieval.dense_top_k", 20)     # -> 20
     cfg.secret("ANTHROPIC_API_KEY")          # -> from environment
+
+Besides reading, three things here are load-bearing for the rest of the repo:
+  expand_env()            ${VAR} / ${VAR:-default} inside string values,
+                          applied to the whole tree at load time.
+  persist_config_values() writes scalar values back into config.yaml IN
+                          PLACE, keeping every comment. serve_api's
+                          POST /config (persist) and app.py save through it;
+                          the console (manage_api) has its own writer.
+  load_config()           as a side effect, applies the `taxonomy:` block to
+                          the ingestion parser's process-global maps.
 """
 from __future__ import annotations
 
@@ -50,6 +60,8 @@ class Config:
         return os.environ.get(env_key, default)
 
     def require_secret(self, env_key: str) -> str:
+        """Like secret(), but a missing OR empty value raises instead of
+        returning None — for keys a component cannot start without."""
         val = self.secret(env_key)
         if not val:
             raise RuntimeError(
@@ -59,6 +71,8 @@ class Config:
         return val
 
     def as_dict(self) -> dict[str, Any]:
+        """The parsed tree itself, not a copy: mutating it changes what every
+        get() on this Config returns."""
         return self._data
 
 
@@ -71,6 +85,11 @@ def persist_config_values(cfg_path: str | Path, changes: dict[str, Any]) -> list
     must appear exactly once at the start of a line (inline preset maps like
     `code: {rerank_top_k: 10}` don't count) — ambiguous or missing keys raise
     instead of guessing. None values are skipped. Returns the keys rewritten.
+
+    Limits, both the caller's job to respect: a value is written as its str(),
+    unquoted, so it must already be a YAML-safe scalar; and the match for the
+    CURRENT value stops at the first '#', so a key whose existing value
+    contains '#' cannot be rewritten intact.
     """
     path = Path(cfg_path)
     text = path.read_text(encoding="utf-8")
@@ -139,6 +158,12 @@ def load_config(config_path: str | Path | None = None) -> Config:
       1. explicit `config_path` argument
       2. ./config.yaml (current working dir)
       3. <project_root>/config.yaml  (two levels up from this file)
+
+    .env is loaded without override: a variable already set in the process
+    environment wins over the file's value.
+
+    Side effect: configures the ingestion taxonomy (see the comment at the
+    end), so every process that loads config gets the same folder maps.
     """
     if config_path is not None:
         cfg_file = Path(config_path)

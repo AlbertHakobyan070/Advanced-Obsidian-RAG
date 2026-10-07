@@ -14,15 +14,17 @@ They share one pipeline and one config.
 ```bash
 python main.py index                       # build indexes from data/*.jsonl
 python main.py index --append <file>.jsonl # add a source family (auto-rebuilds sparse)
-python main.py ingest-pdfs [--pages "1-50,60"] [--chunking heading|fixed|document|none] [--include-files "a.pdf,b.pdf"]
-python main.py ingest-notebooks [--include-path "<scope>"] [--include-files "a.py,b.ipynb"] [--force-domain ml] [--force-tags "a,b"]
-python main.py ingest-code --include-path "<subtree>" [--include-files "x.sql"] [--force-domain swe] [--force-tags "a,b"]
-python main.py ingest-md --include-path "<scope>" --output data/<name>.jsonl [--force-domain nlp] [--force-tags "a,b"]  # scoped md parse (guarded)
-python main.py fetch-web --urls "https://…" [--backend auto|requests|crawl4ai|scrapling] [--format md|pdf]
+python main.py stamp [--collection NAME] [--force]  # verify which embedder built a collection (re-embeds a sample), then record it; :8051 refuses a mismatch
+python main.py ingest-pdfs [--pages "1-50,60"] [--chunking heading|fixed|document|none] [--include-files "a.pdf,b.pdf"] [--output data/<name>_chunks.jsonl]
+python main.py ingest-notebooks [--include-path "<scope>"] [--include-files "a.py,b.ipynb"] [--output data/<name>_chunks.jsonl] [--force-domain ml] [--force-tags "a,b"]
+python main.py ingest-code --include-path "<subtree>" --output data/<name>_chunks.jsonl [--include-files "x.sql"] [--force-domain swe] [--force-tags "a,b"]  # a scoped run needs its own output
+python main.py ingest-md --include-path "<scope>" --output data/<name>_chunks.jsonl [--force-domain nlp] [--force-tags "a,b"]  # scoped md parse (guarded)
+python main.py fetch-web --urls "https://…" [--backend auto|requests|crawl4ai|scrapling|crawlee] [--format md|pdf]
 python main.py convert-files --files "report.docx" [--ocr-pages "1-4,9"]       # markitdown → .md
 python main.py query "<question>" [--preset code|concept|synthesis] [--top-k N] [--max-tokens N]
 python main.py chat                        # interactive REPL
 python main.py eval [--retrieval-only]     # score the golden suite
+python main.py bench run --configs ladder  # score labelled questions per pipeline configuration (also: report | split | validate | sample)
 ```
 
 **OCR engines** (`--ocr-engine`, also per job in the console): `auto` — probe for
@@ -179,6 +181,13 @@ converting to markdown — the right lane for math- or code-heavy sources, and t
 output ingests through the PDF lane with real page numbers. It needs Playwright's
 Chromium once: `python -m playwright install chromium`.
 
+For the markdown path, `--backend auto` tries crawl4ai, then scrapling, then plain
+`requests`, using whatever is installed. `crawlee` is opt-in: `auto` never picks it.
+It renders the page with Crawlee's `PlaywrightCrawler` in the same Chromium, then the
+HTML goes through the same markitdown conversion as every other backend. Asking for
+it without the package installed, or when the crawl fails, is an error, never a quiet
+switch to another backend.
+
 ## Presets and per-query knobs
 
 Named override bundles in `config.yaml`, selectable per query with no restart — the warm
@@ -199,11 +208,17 @@ retrieval:
 | `top_k` / `rerank_top_k` | How many reranked chunks reach the generator. |
 | `dense_top_k` / `sparse_top_k` | Candidate-pool width per lane before fusion. |
 | `use_hyde` / `hype` | Toggle query expansion. |
-| `rerank_instruction` | The **ranking criterion** in plain language: "prefer worked procedures over definitions". Applied only to the text the reranker scores against, so it reorders the candidate pool and can never remove from it. Ignored by `lexical` / `none`; the retrieval echo reports whether it was actually applied. Config default: `retrieval.rerank_instruction`. |
-| `rerank` | Rerank method for this call: `cross_encoder` (in-process semantic scoring), `http` (configured external `/v1/rerank` service), `lexical` (model-free query-term coverage), or `none` (raw fused order). Config default: `retrieval.rerank_mode`. |
+| `rerank_instruction` | The **ranking criterion** in plain language: "prefer worked procedures over definitions". Applied only to the text the reranker scores against, so it reorders the candidate pool and can never remove from it. Ignored by `lexical` / `none` / `laya`; the retrieval echo reports whether it was actually applied. Config default: `retrieval.rerank_instruction`. |
+| `rerank` | Rerank method for this call: `cross_encoder` (in-process semantic scoring), `http` (configured external `/v1/rerank` service), `lexical` (model-free query-term coverage), `none` (raw fused order), or `laya` (**experimental**: a fine-tuned scorer, refused unless `retrieval.laya.enabled` and never swapped for another method). Config default: `retrieval.rerank_mode`. |
+| `lane_weights` / `lanes` / `metadata_boost` | Fusion controls. `lane_weights` rescales each lane's RRF term; `lanes` restricts the call to a subset of the lanes (one outside the list does not run); `metadata_boost` forces the course/domain/tag boost on or off. See [Lane weights](api.md#lane-weights). |
+| `gate` / `gate_threshold` / `gate_scorer` | The optional post-rerank relevance gate: chunks scoring below the threshold are dropped, and when none pass `/query` abstains with the fixed "nothing relevant" answer and no LLM call. Off by default. See [Relevance gate](api.md#relevance-gate). |
 | `parent_context` / `neighbor_context` | E2 small-to-big, post-rerank: swap note chunks for their full section / append a PDF hit's adjacent pages. Carried by the `synthesis` preset; per-call override beats preset beats config. |
 | `max_tokens` | Cap the answer length. |
 | `provider` / `model` | `/query` and query-mode `/compare` only: select a configured provider and optionally override its default model. Endpoints and secrets cannot be supplied per request. |
+
+A knob with a bad *value* (an unknown lane, a gate with no threshold, a refused rerank mode) is
+answered with HTTP 200 and an `error` field rather than a `400`; a wrong *type* is a `422`. See
+[When a knob is wrong](api.md#when-a-knob-is-wrong).
 
 !!! warning "`max_tokens` and citations"
     A very small `max_tokens` can truncate the citation footer and drop the answer's
@@ -347,3 +362,45 @@ downloads nothing to find out.
     all of them and reports the snapshot path it found, and it requires an actual
     weights file: a metadata-only directory is a failed download, not a cached
     model.
+
+## Updating the scraper pins
+
+The web-fetch lane (`fetch-web`, and the console's *Fetch & convert* panel) sits on a
+few scraper packages that `requirements.txt` pins exactly. They move together and a
+loose upgrade tends to break at call time rather than at install time, so a bump is a
+deliberate edit of the pins, never a `pip install -U`.
+
+| Pin | Why it is spelled that way |
+|---|---|
+| `scrapling[fetchers]` | The `[fetchers]` extra is required. Bare `scrapling` imports, but its `Fetcher` dies on the missing `curl_cffi` / `browserforge` the first time it is called. |
+| `crawl4ai` | The browser-rendering backend; it drives both `playwright` and `patchright`. |
+| `playwright`, `patchright` | `patchright` is the patched Playwright driver that crawl4ai and scrapling's stealth fetcher use. Keep the two on the same release and bump them together; on one release both want the same Chromium build. |
+| `markitdown[pdf,docx,pptx,xlsx]` | The HTML / any-file to markdown converter. Never `[all]`: that adds the Azure, audio-transcription and YouTube extras nothing here uses. |
+| `crawlee[playwright,beautifulsoup]` | The opt-in `crawlee` backend. It drives `PlaywrightCrawler`; `[beautifulsoup]` adds the HTML-only crawler, which the backend does not use yet. |
+
+After installing a new set, download **both** browsers, Playwright's first:
+
+```bash
+python -m playwright install chromium
+python -m patchright install chromium
+```
+
+On the desktop `rag.bat` points `PLAYWRIGHT_BROWSERS_PATH` at the `G:` cache.
+
+To check that a new set resolves together before touching the venv, compile the whole
+file for the runtime's Python, and again for Windows, the real runtime (a wheel that
+exists for Linux can be missing there). The output files are throwaways, so delete
+them rather than commit them; a failure names the conflicting pin:
+
+```bash
+uv pip compile requirements.txt --python-version 3.11 -o resolved-linux.txt
+uv pip compile requirements.txt --python-version 3.11 --python-platform windows -o resolved-windows.txt
+```
+
+The Docker image is updated separately, on the desktop: its Dockerfile lives in the
+packaged `rag-docker-bundle`, not in this repo (see
+[Docker deployment](deployment-docker.md)). It needs the same pins, and
+`python -m patchright install chromium` after its Playwright install. If the container
+runs as root, the opt-in `crawlee` backend also needs `CRAWLEE_DISABLE_BROWSER_SANDBOX=1`
+in its environment: Crawlee, unlike plain Playwright, leaves Chromium's sandbox on, and
+Chromium refuses to start as root with it.

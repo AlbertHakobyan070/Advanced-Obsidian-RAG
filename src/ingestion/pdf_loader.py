@@ -11,11 +11,13 @@ Design priorities (in order of how much they were emphasized):
   3. OCR                — scanned/image pages auto-detected; OCR used IF an engine
                           is available, otherwise the page is flagged & skipped
                           (never crashes for lack of Tesseract).
-  4. Disk awareness      — C: has ~15GB free, A: has ~680GB. ALL heavy I/O
-                          (HF cache, temp images, intermediate files) routed to A:.
-                          Images are NOT written to disk by default (we don't embed
-                          images, so writing them just burns space) — only their
-                          presence is noted in metadata.
+  4. Disk awareness      — heavy I/O (HF cache, temp files) is routed to
+                          pdf.scratch_dir (default <project>/data/scratch) by
+                          route_caches_to_disk, via os.environ.setdefault — so a
+                          launcher that already set HF_HOME/TEMP (rag.bat pins them
+                          to G:) wins. Images are NOT written to disk by default
+                          (we don't embed images, so writing them just burns space)
+                          — only their presence is noted in metadata.
 
 Chapter-aware chunking:
   - Uses the PDF's table of contents (toc_items) when present to tag each chunk
@@ -55,6 +57,7 @@ from src.ingestion.obsidian_parser import (
     DOMAIN_MAP,
     COURSE_MAP,
     clean_text,
+    iter_vault_files,
     split_section,
     build_context_header,
 )
@@ -266,6 +269,12 @@ def load_skip_set(skip_list_file: Optional[Path]) -> set[str]:
     return {str(x).replace("\\", "/").lower() for x in items}
 
 
+# Directories never walked into when discovering PDFs. `_ingested` holds the
+# archive copies of already-processed inbox files (see archive_processed), so
+# entering it would rediscover material that is already indexed.
+_PDF_SKIP_DIRS = {".obsidian", ".trash", ".git", "_ingested"}
+
+
 # ─────────────────────────────────────────────────────────────────────
 # The loader
 # ─────────────────────────────────────────────────────────────────────
@@ -307,8 +316,10 @@ class PDFLoader:
         self.min_chunk = min_chunk
         self.max_chunk = max_chunk
         self.overlap = overlap
-        # Chunking strategy for oversized page-sections ('heading' | 'fixed');
-        # validated at use in split_section, overridable via --chunking.
+        # Chunking strategy for oversized page-sections ('heading' | 'fixed' |
+        # 'document' | 'none'); validated at use in split_section. from_config
+        # replaces this default with pdf.chunking -> parser.chunking, and
+        # --chunking overrides both.
         self.chunking = "heading"
         self.scanned_char_threshold = scanned_char_threshold
         self.ocr_enabled = ocr_enabled
@@ -484,9 +495,20 @@ class PDFLoader:
     # ---- discovery ----
 
     def _is_book_path(self, f: Path) -> bool:
-        """True if any path part contains a book/reading/textbook token.
-        Catches 'Books' as well as 'NA Books', 'ML Books', 'DS Books 2025 Spring'."""
-        for part in f.parts:
+        """True if any path part BELOW THE VAULT ROOT contains a
+        book/reading/textbook token. Catches 'Books' as well as 'NA Books',
+        'ML Books', 'DS Books 2025 Spring'.
+
+        Vault-relative on purpose: the absolute path also carries the
+        directories above the root, so a vault stored under a folder whose
+        name happened to tokenise to "books" would classify every PDF in the
+        corpus as a book — and --skip-books would then ingest nothing.
+        """
+        try:
+            parts = f.relative_to(self.vault_path).parts
+        except ValueError:          # not under the root: judge the whole path
+            parts = f.parts
+        for part in parts:
             toks = re.split(r"[\s_\-]+", part.lower())
             if any(t in self.BOOK_FOLDER_NAMES for t in toks):
                 return True
@@ -503,13 +525,13 @@ class PDFLoader:
         """
         pdfs = []
         total_seen = 0
-        for f in self.vault_path.rglob("*.pdf"):
-            # _ingested = archive folders for already-processed inbox files
-            # (see archive_processed) — never rediscover those.
-            if any(part in {".obsidian", ".trash", ".git", "_ingested"} for part in f.parts):
-                continue
+        # _ingested = archive folders for already-processed inbox files
+        # (see archive_processed) — never rediscover those. Pruned during the
+        # walk rather than filtered afterwards.
+        for f in iter_vault_files(self.vault_path, {".pdf"}, _PDF_SKIP_DIRS):
+            rel = f.relative_to(self.vault_path)
             total_seen += 1
-            rel_posix = f.relative_to(self.vault_path).as_posix().lower()
+            rel_posix = rel.as_posix().lower()
             if self.include_path and self.include_path not in rel_posix:
                 self.stats["pdfs_skipped_include"] += 1
                 continue
@@ -557,8 +579,11 @@ class PDFLoader:
     def _detect_course(self, filepath: Path) -> dict:
         """
         Resolve course/domain from the file path, reusing the vault parser's maps.
-        Strategy: walk path parts; the part that isn't a book-folder name and
-        matches FOLDER_COURSE_MAP wins. Books live in <Course>/Books/<file>.
+        Walks the VAULT-RELATIVE parts root->leaf: the first FOLDER_COURSE_MAP
+        hit wins (a "Books" folder is simply not in the map), else the first
+        course code (CS|DS|ENGS|BSDS|ECON ###). No keyword fallback, unlike
+        obsidian_parser.detect_course_from_path — recalibrate_courses.py
+        re-derives labels later with that full ladder.
         """
         parts = list(filepath.relative_to(self.vault_path).parts)
         # Try each path part against the folder map (case-insensitive)
@@ -1015,7 +1040,14 @@ class PDFLoader:
     # ---- vault-wide ingest ----
 
     def ingest_vault(self, verbose: bool = True) -> Path:
-        """Walk the vault, extract every PDF, stream results to the output JSONL."""
+        """Walk the vault, extract every PDF, stream results to the output JSONL.
+
+        The output is opened with "w": whatever file output_file names is
+        REPLACED, not appended to. A scoped run (include_path / include_files)
+        that leaves output_file at its default therefore truncates the
+        canonical data/pdf_chunks.jsonl down to that scope. The console's
+        _build_argv refuses that for every ingest lane; a direct CLI run has
+        no such guard. Give every scoped run its own output file."""
         pdfs = self.discover_pdfs()
         if verbose:
             log.info("Found %d PDF(s). OCR engine: %s", len(pdfs), self.ocr_engine or "NONE")
@@ -1036,6 +1068,10 @@ class PDFLoader:
                     self.stats["pdfs_failed"] += 1
                     continue
                 pdf_written = 0
+                # An inline copy of apply_forced_meta WITHOUT its tag
+                # normalisation (_normalise_tag): comma-free tags hold here only
+                # because main.py's --force-tags has already split on ",".
+                # Setting loader.force_tags directly bypasses that.
                 if self.force_domain or self.force_tags:
                     for ch in chunks:
                         m = ch.metadata if hasattr(ch, "metadata") else {}

@@ -277,12 +277,21 @@ class _CodeAwareHyDE:
     def expand(question, enabled=None):
         return question
 
+    @staticmethod
+    def expand_with_info(question, enabled=None):
+        return question, "off"
+
 
 class _EmptyRetriever:
     dense_top_k = 20
     sparse_top_k = 20
     omnisearch = None
     hype_enabled = False
+    # Mirrors HybridRetriever: the retrieval echo reports the effective
+    # per-lane fusion weights, so a stub without this is an incomplete stub.
+    lane_weights: dict = {}
+    # Likewise the effective metadata boost (the per-call override's default).
+    metadata_boost = True
 
     def retrieve(self, *args, **kwargs):
         return []

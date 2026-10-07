@@ -23,13 +23,18 @@ from typing import Any
 from src.llm.llm_client import LLMClient
 from src.prompts.loader import load_prompt
 from src.retrieval.retriever import RetrievedDoc
+from src.utils.citations import CITATION_RE, CONFIDENCE_RE
 from src.utils.config_loader import Config
 from src.utils.logger import get_logger
+from src.utils.timing import StageTrace
 
 log = get_logger(__name__)
 
-_CONFIDENCE_RE = re.compile(r"CONFIDENCE:\s*(HIGH|MEDIUM|LOW)", re.IGNORECASE)
-_CITATION_RE = re.compile(r"\[(\d+)\]")
+# Both patterns are shared with eval/metrics.py, which scores stored answers
+# with the same rules. See src/utils/citations.py for what models actually
+# emit and why the parsers tolerate it.
+_CONFIDENCE_RE = CONFIDENCE_RE
+_CITATION_RE = CITATION_RE
 _THINK_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
 
 
@@ -44,6 +49,8 @@ def _strip_reasoning(text: str) -> str:
 
 @dataclass
 class Citation:
+    """One [n] marker the answer used, resolved to the source it points at.
+    `supported` stays None unless the verification pass ran and judged it."""
     number: int
     source_label: str
     chunk_id: str
@@ -53,6 +60,10 @@ class Citation:
 
 @dataclass
 class Answer:
+    """What generate() returns: the answer text with the CONFIDENCE line
+    removed, that line's level (HIGH | MEDIUM | LOW, or UNKNOWN when the
+    model omitted or mangled it), the citations it used and the sources it
+    was given."""
     text: str
     confidence: str
     citations: list[Citation]
@@ -62,6 +73,9 @@ class Answer:
     # Effective retrieval settings for this query (preset, top_k, hyde...),
     # filled in by RAGPipeline.query so callers can see what actually ran.
     retrieval: dict[str, Any] | None = field(default=None)
+    # Wall-clock ms of this answer's own stages — generate (the LLM call),
+    # parse, and verify when it ran. Retrieval's stages are in retrieval["timings"].
+    timings: dict[str, Any] | None = field(default=None)
 
 
 class Generator:
@@ -139,27 +153,38 @@ class Generator:
         self, query: str, docs: list[RetrievedDoc],
         max_tokens: int | None = None,
     ) -> Answer:
+        """Answer `query` from `docs` only, numbered [1..n] in the order given.
+
+        No docs -> a fixed LOW-confidence "nothing relevant" answer, and the
+        LLM is never called. Otherwise: one completion, <think> blocks
+        stripped, the CONFIDENCE line parsed out of the text, citations
+        resolved against `docs`, then the optional verification pass. A
+        failing generation call raises; only verification is fail-soft."""
         if not docs:
             return Answer(
                 text="Your notes don't contain anything relevant to this question.",
                 confidence="LOW",
                 citations=[],
                 sources=[],
+                timings={},
             )
 
+        tr = StageTrace()
         context = self._format_context(docs)
-        resp = self.llm.complete(
-            system=self._gen_prompt["system"],
-            user=self._gen_prompt["user"].format(query=query, context=context),
-            # None = the client's configured default (generation.max_tokens).
-            max_tokens=max_tokens,
-        )
-        raw = resp.text
-        raw = _strip_reasoning(raw)
+        with tr.span("generate"):
+            resp = self.llm.complete(
+                system=self._gen_prompt["system"],
+                user=self._gen_prompt["user"].format(query=query, context=context),
+                # None = the client's configured default (generation.max_tokens).
+                max_tokens=max_tokens,
+            )
+        with tr.span("parse"):
+            raw = resp.text
+            raw = _strip_reasoning(raw)
 
-        confidence = self._extract_confidence(raw)
-        clean_text = _CONFIDENCE_RE.sub("", raw).strip()
-        citations = self._extract_citations(clean_text, docs)
+            confidence = self._extract_confidence(raw)
+            clean_text = _CONFIDENCE_RE.sub("", raw).strip()
+            citations = self._extract_citations(clean_text, docs)
 
         answer = Answer(
             text=clean_text,
@@ -170,7 +195,9 @@ class Generator:
         )
 
         if self.verify_citations and citations:
-            answer.verification = self._verify(clean_text, docs, citations)
+            with tr.span("verify"):
+                answer.verification = self._verify(clean_text, docs, citations)
+        answer.timings = tr.timings()
 
         log.info(
             "generated answer: %d chars, confidence=%s, %d citations",
@@ -190,6 +217,9 @@ class Generator:
         used = sorted({int(n) for n in _CITATION_RE.findall(text)})
         citations = []
         for n in used:
+            # An out-of-range marker (a [9] against 7 sources) is dropped
+            # here without a trace; eval/metrics.citation_validity is what
+            # counts those as dangling.
             if 1 <= n <= len(docs):
                 d = docs[n - 1]
                 citations.append(

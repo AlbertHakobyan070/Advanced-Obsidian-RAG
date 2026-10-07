@@ -74,7 +74,7 @@ do this — follow the same pattern for any new one.
 |---|---|
 | `rebuild_bm25.py` | Rebuild only the sparse index after metadata changes / deletions. |
 | `recalibrate_courses.py` | Re-tag the grouping label in place without re-embedding. |
-| `delete_doc.py` | Preview-then-confirm removal of documents from the index. |
+| `delete_doc.py` | Preview only: lists what a removal would touch and prints the console's `POST /api/documents/delete` call, which removes it from both indexes. |
 | `dedup_jsonl.py` | Drop duplicate `doc_id`s from a chunk file. |
 | `build_hype.py` | Build hypothetical-prompt embeddings (HyPE) for a scoped set. |
 

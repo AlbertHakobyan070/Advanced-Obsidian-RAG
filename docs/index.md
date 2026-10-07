@@ -37,7 +37,7 @@ It is a full retrieval pipeline rather than a thin wrapper:
 - **A dedicated code lane** so scripts and notebooks surface for code questions
   instead of being buried under prose.
 - **Swappable reranking** — cross-encoder, external HTTP reranker, model-free
-  lexical, or none.
+  lexical, or none, plus an experimental fine-tuned scorer (Laya) behind a flag.
 - **Citation-audited generation** — answers cite their sources and can self-verify.
 - **A management console and an agent-facing API**, plus a reproducible
   evaluation suite.
@@ -68,7 +68,7 @@ It is a full retrieval pipeline rather than a thin wrapper:
 
 -   :material-chart-line: **[Evaluation](evaluation.md)**
 
-    The golden suite, the metrics, and an honest read of what they mean.
+    The per-configuration bench, the golden suite, the metrics, and an honest read of what they mean.
 
 -   :material-wrench: **[Operations](operations.md)**
 

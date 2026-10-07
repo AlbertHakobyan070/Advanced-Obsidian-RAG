@@ -57,6 +57,10 @@ log = get_logger(__name__)
 
 @dataclass
 class LLMResponse:
+    """One completion. `provider` is the wire protocol (openai | anthropic |
+    local), not the registry name. `usage` uses Anthropic's key names —
+    input_tokens / output_tokens — for BOTH protocols: the OpenAI branch
+    renames prompt_tokens / completion_tokens, so callers never branch."""
     text: str
     model: str
     provider: str
@@ -104,6 +108,9 @@ class LLMClient:
 
         Resolution order: a `providers:` registry entry whose name matches
         `<role>.provider` wins; otherwise the reserved legacy names apply.
+        An unset `<role>.provider` means "anthropic", which then needs
+        ANTHROPIC_API_KEY — so a caller that wants "fall back to the
+        generation client" must check for the unset key itself.
         """
         provider = cfg.get(f"{role}.provider", "anthropic")
         temperature = cfg.get(f"{role}.temperature", 0.1)
@@ -378,4 +385,6 @@ class LLMClient:
                 "input_tokens": resp.usage.prompt_tokens,
                 "output_tokens": resp.usage.completion_tokens,
             }
-        return LLMResponse(text=text, model=self.model, provider=self.provider, usage=usage)
+        # A routing proxy (FreeLLMAPI's "auto") reports the model that actually answered.
+        return LLMResponse(text=text, model=getattr(resp, "model", None) or self.model,
+                           provider=self.provider, usage=usage)

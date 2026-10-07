@@ -54,10 +54,14 @@ def test_ingest_pdfs_ocr_invalid():
 
 @pytestmark_console
 def test_ingest_pdfs_pages_validated():
-    argv = _build_argv("ingest_pdfs", {"pages": "1-50,60,70-80"})
+    # A page subset is a scoped run, so it names its own output — otherwise the
+    # scoped-run guard would refuse it first and the 1-based check below would
+    # pass for the wrong reason.
+    own = "data/pages_chunks.jsonl"
+    argv = _build_argv("ingest_pdfs", {"pages": "1-50,60,70-80", "output": own})
     assert "--pages" in argv
     with pytest.raises(ValueError):
-        _build_argv("ingest_pdfs", {"pages": "0-5"})       # 1-based
+        _build_argv("ingest_pdfs", {"pages": "0-5", "output": own})   # 1-based
 
 
 @pytestmark_console
@@ -143,12 +147,15 @@ def test_chunking_document_none_accepted():
 
 @pytestmark_console
 def test_include_files_pass_through_and_guards():
-    argv = _build_argv("ingest_pdfs", {"include_files": ["a.pdf", "b.pdf"]})
+    # File-scoped, so each run names its own output (see the scoped-run guard
+    # tests at the end of this module).
+    own = "data/files_chunks.jsonl"
+    argv = _build_argv("ingest_pdfs", {"include_files": ["a.pdf", "b.pdf"], "output": own})
     assert "--include-files" in argv and "a.pdf,b.pdf" in argv
-    argv = _build_argv("ingest_code", {"include_files": "x.sql"})
+    argv = _build_argv("ingest_code", {"include_files": "x.sql", "output": own})
     assert "--include-files" in argv and "x.sql" in argv
     with pytest.raises(ValueError):
-        _build_argv("ingest_pdfs", {"include_files": ["../evil.pdf"]})
+        _build_argv("ingest_pdfs", {"include_files": ["../evil.pdf"], "output": own})
     # empty list = no filter at all, not an error
     assert "--include-files" not in _build_argv("ingest_pdfs", {"include_files": []})
 
@@ -164,6 +171,31 @@ def test_ingest_md_guards():
                                   "output": "data/chunks.jsonl"})
     with pytest.raises(ValueError):        # include filter is mandatory
         _build_argv("ingest_md", {"output": "data/x.jsonl"})
+
+
+@pytestmark_console
+def test_ingest_canvas_argv():
+    # A scoped run gets its OWN output file. This test used to pair
+    # include_path with the canonical canvas_chunks.jsonl, which the loader
+    # would truncate to just that scope — see
+    # test_a_scoped_canvas_run_may_not_clobber_the_canonical_file below.
+    argv = _build_argv("ingest_canvas", {
+        "output": "data/canvas_bayesian_chunks.jsonl",
+        "include_path": "Bayesian",
+        "force_domain": "stats",
+        "force_tags": ["canvas", "bayesian"],
+    })
+    assert argv[:3] == [argv[0], "main.py", "ingest-canvas"]
+    # _vault_data_path anchors "data/x.jsonl" to the active vault's data dir,
+    # so only the basename is stable here (see test_safe_rel_guards).
+    assert "--output" in argv and any(a.endswith("canvas_bayesian_chunks.jsonl") for a in argv)
+    assert "--include-path" in argv and "Bayesian" in argv
+    assert "--force-domain" in argv and "stats" in argv
+    assert "--force-tags" in argv and "canvas,bayesian" in argv
+    # no params at all -> just the bare subcommand
+    assert _build_argv("ingest_canvas", {}) == [argv[0], "main.py", "ingest-canvas"]
+    with pytest.raises(ValueError):
+        _build_argv("ingest_canvass", {})
 
 
 @pytestmark_console
@@ -228,3 +260,223 @@ def test_write_sparse_meta_sidecar(tmp_path):
     assert meta.name == "bm25_index.pkl.meta.json"
     data = json.loads(meta.read_text(encoding="utf-8"))
     assert data["count"] == 173606 and data["built_at"]
+
+
+# ---- ingest_canvas: the graph lane's job contract ----
+
+@pytestmark_console
+def test_canvas_graph_hyperparameters_reach_the_cli():
+    argv = _build_argv("ingest_canvas", {
+        "include_path": "ArmHist EXAM", "output": "data/canvas_armhist_chunks.jsonl",
+        "max_chunk_size": 1500, "chunking": "document", "context_depth": 1})
+    assert argv[argv.index("--max-chunk-size") + 1] == "1500"
+    assert argv[argv.index("--chunking") + 1] == "document"
+    assert argv[argv.index("--context-depth") + 1] == "1"
+    assert argv[argv.index("--include-path") + 1] == "ArmHist EXAM"
+
+
+@pytestmark_console
+def test_canvas_defaults_pass_no_chunking_flags_at_all():
+    """Every canvas chunk in the index was produced with splitting off and
+    depth 0; an omitted knob must stay omitted, not be materialised."""
+    argv = _build_argv("ingest_canvas", {})
+    for flag in ("--max-chunk-size", "--chunking", "--context-depth", "--output"):
+        assert flag not in argv
+
+
+@pytestmark_console
+def test_context_depth_zero_is_passed_explicitly_not_dropped():
+    """0 is a real value here — `if prm.get(...)` would silently discard it
+    and let a configured depth of 1 leak into a run that asked for 0."""
+    argv = _build_argv("ingest_canvas", {"context_depth": 0})
+    assert argv[argv.index("--context-depth") + 1] == "0"
+
+
+@pytestmark_console
+def test_a_scoped_canvas_run_may_not_clobber_the_canonical_file():
+    """The loader truncates its output file. A folder-scoped run pointed at
+    canvas_chunks.jsonl would shrink it to that folder: the dense index keeps
+    every chunk (append upserts) while build_sparse_union re-derives the
+    sparse half from the JSONLs and loses the rest — silent drift from a job
+    that reported success."""
+    with pytest.raises(ValueError) as exc_info:
+        _build_argv("ingest_canvas", {"include_path": "10 - CANVASes"})
+    assert "canvas_chunks.jsonl" in str(exc_info.value)
+
+    with pytest.raises(ValueError):
+        _build_argv("ingest_canvas", {"include_path": "10 - CANVASes",
+                                      "output": "data/canvas_chunks.jsonl"})
+
+    # Scoped WITH its own output file is the supported shape.
+    argv = _build_argv("ingest_canvas", {"include_path": "10 - CANVASes",
+                                         "output": "data/canvas_maps_chunks.jsonl"})
+    assert "--include-path" in argv and "--output" in argv
+
+
+@pytestmark_console
+def test_whole_vault_canvas_run_still_writes_the_canonical_file():
+    argv = _build_argv("ingest_canvas", {"output": "data/canvas_chunks.jsonl"})
+    assert argv[argv.index("--output") + 1].endswith("canvas_chunks.jsonl")
+
+
+@pytestmark_console
+def test_canvas_rejects_an_unknown_splitter_and_an_out_of_range_depth():
+    with pytest.raises(ValueError):
+        _build_argv("ingest_canvas", {"chunking": "sideways"})
+    with pytest.raises(ValueError):
+        _build_argv("ingest_canvas", {"context_depth": 3})
+
+
+# ---- pdf / notebook / code: the scoped-run guard canvas and md already carry ----
+
+_CANONICAL = {"ingest_pdfs": "pdf_chunks.jsonl",
+              "ingest_notebooks": "ipynb_chunks.jsonl",
+              "ingest_code": "code_chunks.jsonl"}
+
+# Every param that narrows WHICH files or pages a lane reads. Options that only
+# change how chunks are made (chunking, OCR engine, force_domain) are not here.
+_NARROWING = [
+    ("ingest_pdfs", "include_path", "Wackerly"),
+    ("ingest_pdfs", "exclude_path", "Current Courses"),
+    ("ingest_pdfs", "include_files", ["a.pdf"]),
+    ("ingest_pdfs", "only_books", True),
+    ("ingest_pdfs", "skip_books", True),
+    ("ingest_pdfs", "max_pages", 5),
+    ("ingest_pdfs", "pages", "1-50,60"),
+    ("ingest_notebooks", "include_path", "Capstone"),
+    ("ingest_notebooks", "include_files", ["a.ipynb"]),
+    ("ingest_notebooks", "exts", ".ipynb"),
+    ("ingest_code", "include_path", "Capstone"),
+    ("ingest_code", "exclude_path", "node"),
+    ("ingest_code", "include_files", ["x.sql"]),
+    ("ingest_code", "exts", ".sql"),
+]
+
+
+@pytest.fixture
+def default_lane_files(monkeypatch, tmp_path):
+    """Pin each lane's output_file to its shipped default. The guard reads the
+    canonical name from config, so without this these tests would depend on
+    whatever output_file the machine's own config.yaml sets."""
+    import manage_api
+    from src.utils.config_loader import Config
+    monkeypatch.setattr(manage_api, "CFG", Config({
+        "pdf": {"output_file": "data/pdf_chunks.jsonl"},
+        "notebooks": {"output_file": "data/ipynb_chunks.jsonl"},
+        "code": {"output_file": "data/code_chunks.jsonl"},
+    }, tmp_path))
+
+
+@pytestmark_console
+@pytest.mark.parametrize("kind,key,value", _NARROWING)
+def test_a_scoped_lane_run_may_not_clobber_the_canonical_file(
+        default_lane_files, kind, key, value):
+    """The loaders open their output with "w". A run narrowed to one folder,
+    file or page range, pointed at the lane's canonical JSONL, would shrink it
+    to that scope: the dense index keeps every chunk (append upserts) while the
+    sparse half is re-derived from the JSONLs and loses the rest — silent drift
+    from a job that reported success. Same guard as canvas and md."""
+    canonical = _CANONICAL[kind]
+    scoped = {key: value}
+    with pytest.raises(ValueError) as exc_info:       # blank output = the canonical default
+        _build_argv(kind, scoped)
+    assert canonical in str(exc_info.value)
+
+    with pytest.raises(ValueError):                   # naming it is no way round
+        _build_argv(kind, {**scoped, "output": f"data/{canonical}"})
+    with pytest.raises(ValueError):                   # NTFS is case-insensitive: same file
+        _build_argv(kind, {**scoped, "output": f"data/{canonical.upper()}"})
+
+    # Scoped WITH its own output file is the supported shape.
+    argv = _build_argv(kind, {**scoped, "output": "data/scoped_chunks.jsonl"})
+    assert argv[argv.index("--output") + 1].endswith("scoped_chunks.jsonl")
+
+
+@pytestmark_console
+@pytest.mark.parametrize("kind", sorted(_CANONICAL))
+def test_a_whole_lane_run_still_writes_the_canonical_file(default_lane_files, kind):
+    """The guard is for NARROWED runs only: an unscoped run owns its lane's
+    file, and a blank output still means the loader's own default."""
+    canonical = _CANONICAL[kind]
+    argv = _build_argv(kind, {"output": f"data/{canonical}"})
+    assert argv[argv.index("--output") + 1].endswith(canonical)
+    assert "--output" not in _build_argv(kind, {})
+    assert "--output" not in _build_argv(kind, {"force_domain": "ml"})
+
+
+@pytestmark_console
+def test_the_canonical_file_is_the_one_config_names(monkeypatch, tmp_path):
+    """A lane whose config.yaml points output_file elsewhere has a different
+    canonical file; guarding the built-in name would protect the wrong one."""
+    import manage_api
+    from src.utils.config_loader import Config
+    monkeypatch.setattr(manage_api, "CFG", Config(
+        {"pdf": {"output_file": "data/books_chunks.jsonl"}}, tmp_path))
+    with pytest.raises(ValueError):
+        _build_argv("ingest_pdfs", {"include_path": "X",
+                                    "output": "data/books_chunks.jsonl"})
+    argv = _build_argv("ingest_pdfs", {"include_path": "X",
+                                       "output": "data/pdf_chunks.jsonl"})
+    assert argv[argv.index("--output") + 1].endswith("pdf_chunks.jsonl")
+    # A lane config says nothing about falls back to the loader's built-in name.
+    with pytest.raises(ValueError):
+        _build_argv("ingest_notebooks", {"include_path": "X",
+                                         "output": "data/ipynb_chunks.jsonl"})
+
+
+# ---- no run may take ANOTHER lane's chunk file as its output ----------------
+# The guard above keeps a SCOPED run off its own lane's file. Pointing ANY run, even
+# a whole-lane one, at a different lane's file (or at chunks.jsonl) is the same
+# clobber: the loader opens it with "w", so that lane's rows drop out of the sparse
+# index while they stay in the dense one.
+
+_LANE_FILE = {"pdf": "pdf_chunks.jsonl", "notebooks": "ipynb_chunks.jsonl",
+              "code": "code_chunks.jsonl", "canvas": "canvas_chunks.jsonl",
+              "markdown": "chunks.jsonl"}
+_LANE_OF = {"ingest_pdfs": "pdf", "ingest_notebooks": "notebooks", "ingest_code": "code",
+            "ingest_canvas": "canvas", "ingest_md": "markdown"}
+# Otherwise-valid params for each kind; ingest_md refuses to run without a scope.
+_RUN = {"ingest_pdfs": {}, "ingest_notebooks": {}, "ingest_code": {}, "ingest_canvas": {},
+        "ingest_md": {"include_path": "Inbox"}}
+# Every kind against every lane's file but its own. ingest_md is always scoped, so
+# for it chunks.jsonl is refused too.
+_FOREIGN = [(kind, file) for kind in _RUN for lane, file in _LANE_FILE.items()
+            if lane != _LANE_OF[kind] or kind == "ingest_md"]
+
+
+@pytestmark_console
+@pytest.mark.parametrize("kind,file", _FOREIGN)
+def test_a_run_may_not_write_another_lanes_chunk_file(default_lane_files, kind, file):
+    with pytest.raises(ValueError):
+        _build_argv(kind, {**_RUN[kind], "output": f"data/{file}"})
+    with pytest.raises(ValueError):                   # NTFS is case-insensitive: same file
+        _build_argv(kind, {**_RUN[kind], "output": f"data/{file.upper()}"})
+
+
+@pytestmark_console
+def test_the_refusal_names_the_file_and_the_lane_that_owns_it(default_lane_files):
+    with pytest.raises(ValueError) as exc_info:
+        _build_argv("ingest_notebooks", {"output": "data/pdf_chunks.jsonl"})
+    message = str(exc_info.value)
+    assert "pdf_chunks.jsonl" in message and "pdf" in message and "notebooks" in message
+
+
+@pytestmark_console
+@pytest.mark.parametrize("kind", sorted(_RUN))
+def test_a_file_of_its_own_is_still_accepted(default_lane_files, kind):
+    argv = _build_argv(kind, {**_RUN[kind], "output": "data/fresh_chunks.jsonl"})
+    assert argv[argv.index("--output") + 1].endswith("fresh_chunks.jsonl")
+
+
+@pytestmark_console
+def test_the_protected_names_are_the_ones_config_gives_each_lane(monkeypatch, tmp_path):
+    """A lane whose config.yaml points output_file elsewhere has a different
+    canonical file; protecting the built-in name would guard the wrong one."""
+    import manage_api
+    from src.utils.config_loader import Config
+    monkeypatch.setattr(manage_api, "CFG", Config(
+        {"code": {"output_file": "data/src_code_chunks.jsonl"}}, tmp_path))
+    with pytest.raises(ValueError):                   # code's file is the configured one now
+        _build_argv("ingest_notebooks", {"output": "data/src_code_chunks.jsonl"})
+    argv = _build_argv("ingest_notebooks", {"output": "data/code_chunks.jsonl"})   # nobody's now
+    assert argv[argv.index("--output") + 1].endswith("code_chunks.jsonl")

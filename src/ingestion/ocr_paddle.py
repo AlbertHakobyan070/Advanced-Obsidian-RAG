@@ -49,8 +49,8 @@ log = get_logger(__name__)
 class PaddleOCRClient(VLMOCR):
     """PaddleOCR sidecar client.
 
-    The sidecar contract is deliberately tiny (see `paddleocr/server.py` in the
-    Docker bundle):
+    The sidecar contract is deliberately tiny (see `ocr-sidecar/server.py` in
+    this repo, and `paddleocr/server.py` in the Docker bundle):
 
         GET  /health -> {"ok": true, "engine": "paddleocr", "langs": [...],
                          "engine_importable": true}

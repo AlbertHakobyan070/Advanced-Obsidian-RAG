@@ -1,11 +1,16 @@
 """
 dedup_jsonl.py — Remove duplicate doc_id lines from a chunks JSONL file, in place.
 
-ChromaDB's upsert rejects a batch containing two records with the same id, so a
-chunk file must have unique doc_ids before `index --append`. This keeps the first
-occurrence of each doc_id and drops the rest.
+ChromaDB's upsert rejects a batch containing two records with the same id.
+`index --append` now dedupes by doc_id itself (Embedder.append_indexes keeps
+the first occurrence), so this is only needed to clean the FILE. It keeps the
+first occurrence of each doc_id and drops the rest.
 
     python dedup_jsonl.py data/lecture_chunks.jsonl
+
+Reads the whole file into memory and rewrites it in place with write_text —
+not atomic, so a crash mid-write leaves a truncated file. Copy a large or
+irreplaceable JSONL (the chunk files are primary data) before running it.
 """
 import json
 import sys

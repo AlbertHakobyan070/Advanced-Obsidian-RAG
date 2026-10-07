@@ -1,0 +1,32 @@
+# Named configurations for `main.py bench run --configs <name>[,<name>…]`.
+# Each is a set of RAGPipeline.search() overrides merged over the eval
+# defaults (top_k 10, omnisearch/hype/parent/neighbor off). The ladder,
+# leave-one-out and factorial sets are generated in eval/bench/configs.py
+# and need no entry here.
+configs:
+  default-k10:          # the shipped pipeline as-is, scored at depth 10
+    top_k: 10
+  wide-pools:           # does a bigger candidate pool help the reranker?
+    top_k: 10
+    dense_top_k: 60
+    sparse_top_k: 60
+  gate-rerank-score:    # relevance gate on the reranker's own score: the cheap baseline a learned gate must beat
+    top_k: 10
+    rerank: cross_encoder
+    gate: true
+    # 0.0 is a STARTING point (logit 0 ~ p 0.5 for the ms-marco MiniLM
+    # cross-encoder), not a tuned value: the dev-split sweep picks the real
+    # threshold, and the test split is reported once.
+    gate_threshold: 0.0
+  gate-laya:            # EXPERIMENTAL relevance gate on Laya's P(relevant): needs retrieval.laya.enabled + a checkpoint
+    top_k: 10
+    rerank: cross_encoder
+    gate: true
+    gate_scorer: laya
+    # 0.5 is a STARTING point on Laya's P(relevant) scale, not a tuned value: the
+    # dev-split sweep picks the real threshold (and the notebook's calibration
+    # report says whether that P can be trusted at all); test is reported once.
+    gate_threshold: 0.5
+  laya-rerank:          # EXPERIMENTAL fine-tuned Laya reranker: needs retrieval.laya.enabled + a checkpoint
+    top_k: 10
+    rerank: laya

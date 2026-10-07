@@ -22,6 +22,9 @@ _PROMPT_DIR = Path(__file__).resolve().parent
 
 @lru_cache(maxsize=None)
 def load_prompt(name: str) -> dict:
+    """Parsed src/prompts/<name>.yaml. Cached for the life of the process, so
+    an edited template takes effect only after a restart — and the returned
+    dict is shared between callers, so treat it as read-only."""
     path = _PROMPT_DIR / f"{name}.yaml"
     if not path.exists():
         raise FileNotFoundError(f"Prompt template not found: {path}")

@@ -53,13 +53,48 @@ paths:
 
 
 embedding:
-  # provider: openai | local
-  #   openai -> text-embedding-3-small via API
+  # provider: local | openai | <a name in embedding.providers below>
   #   local  -> sentence-transformers model running on this machine (no API cost)
+  #   openai -> legacy: OpenAI's own API (OPENAI_API_KEY, embedding.model,
+  #             embedding.dimensions). New hosted setups: a providers: entry.
+  # A collection's vectors only make sense with the embedder that built them, and
+  # :8051 refuses to start on a mismatch. Switch models with the console's
+  # Settings > Indexes panel (re-embed into a new collection, then Activate).
   provider: local
   local_model: "BAAI/bge-small-en-v1.5"
+  # local only. auto = whatever torch picks (CUDA if it sees one, else CPU),
+  # exactly what happened before this key existed | cpu | cuda | cuda:N | mps
+  device: auto
+  # Text prepended before embedding, for the local and legacy openai providers
+  # (a providers: entry carries its own): query_prefix on every search query,
+  # doc_prefix on every chunk. multilingual-e5 needs "query: " / "passage: ";
+  # bge-*-en-v1.5 does not. "" = off. One line, no '#' or '\' (the console's
+  # config writer cannot round-trip them). doc_prefix is baked into the stored
+  # vectors, so both are recorded with each collection and checked at startup.
+  query_prefix: ""
+  doc_prefix: ""
   batch_size: 100
-  dimensions: 384
+  dimensions: 384                 # legacy `openai` provider only (sent as `dimensions`)
+  # Named OpenAI-compatible embedding endpoints: anything serving /v1/embeddings
+  # (Ollama, llama.cpp --embedding, a gateway, OpenAI itself). Point provider:
+  # at one by name. SECRETS NEVER LIVE HERE: api_key_env is the NAME of an
+  # environment variable. `dimensions` is sent only when set here. Never name an
+  # entry local or openai (those always take the built-in paths).
+  #   ollama_nomic:
+  #     kind: openai                       # the wire protocol, not the vendor
+  #     base_url: "http://localhost:11434/v1"
+  #     model: "nomic-embed-text"
+  #     api_key_env: null                  # keyless local server
+  #     query_prefix: "search_query: "
+  #     doc_prefix: "search_document: "
+  providers: {}
+  # `main.py stamp` and the end of every re-embed re-embed this many stored
+  # chunks and require each to match its stored vector at >= min_cosine. The
+  # same model on the same text scores ~1.0; another model or prefix lands far
+  # below 0.99, so a pass proves which embedder built the collection.
+  verify:
+    sample_size: 32
+    min_cosine: 0.99
 
 # ---------------------------------------------------------------------------
 # Generation backends. `kind` is the WIRE PROTOCOL (openai | anthropic), not
@@ -200,7 +235,8 @@ retrieval:
   sparse_top_k: 20
   rrf_k: 60
   rerank_top_k: 7
-  rerank_mode: cross_encoder                # cross_encoder | http | lexical | none
+  rerank_mode: cross_encoder                # cross_encoder | http | lexical | none | laya
+                                            # (laya = EXPERIMENTAL, see laya: below)
   # Any HF cross-encoder id. Bigger rerankers score better on public benchmarks
   # but cost far more per query — measure before switching:
   #   cross-encoder/ms-marco-MiniLM-L-6-v2   22M params   fast   (default)
@@ -232,9 +268,102 @@ retrieval:
   # instruct = the labelled <Instruct>/<Query> form. Only for a reranker
   #            documented to expect it.
   rerank_instruction_format: prefix
+  # ------------------------------------------------------------------
+  # rerank_mode: laya — EXPERIMENTAL. Orders the pool by P(relevant) from a
+  # Laya model (a ~420M-parameter decision model) fine-tuned on this vault.
+  # Off by default: it has never been scored on the eval sets and must pass
+  # the spec §11 graduation rule first. The console's Settings > Experimental
+  # features panel is the switch; it writes `enabled`. While that is false,
+  # `rerank: laya` (per call) and `rerank_mode: laya` are REFUSED with a
+  # readable error — never answered by another reranker — and nothing is
+  # imported or loaded at startup. Turning it on needs a :8051 restart.
+  #   * The laya package is optional and deliberately NOT in requirements.txt:
+  #       pip install laya==0.3.28
+  #   * The checkpoint comes from the Kaggle fine-tune in docs/laya-finetune.md:
+  #     unzip it into model_dir (rl_agent_config.json, model.safetensors,
+  #     tokenizer/, encoder/). Relative = from the project root.
+  #   * Pick it per call ({"rerank": "laya"}) or as the default (rerank_mode
+  #     above). It ignores rerank_instruction: the query goes into the model's
+  #     own question, the wording it was trained on.
+  # The model loads on the first rerank (~2 GB of RAM); expect its CPU cost to
+  # be a large cross-encoder's, not MiniLM's (unmeasured). device is explicit
+  # on purpose, never auto. On a CUDA card below compute capability 8 laya's
+  # forced fp16 is switched off (on Pascal it runs at ~1/64 the fp32 rate).
+  # ------------------------------------------------------------------
+  laya:
+    enabled: false
+    model_dir: models/laya-noetrix
+    device: cpu                     # cpu | cuda | cuda:0 (GPU notes: docs/laya-finetune.md)
+    batch_size: 16                  # passages per forward pass; lower it if RAM is tight
+  # ------------------------------------------------------------------
+  # Per-lane RRF fusion weights. The fused score of a doc is
+  #     sum over lanes of  weight(lane) / (rrf_k + rank_in_that_lane)
+  # Every lane defaults to 1.0, which is plain unweighted RRF — leaving this
+  # block as-is changes nothing at all.
+  #
+  # There are EIGHT lanes, not two. dense/sparse are the always-on core;
+  # dense_code/sparse_code open on code-intent queries (boost_code);
+  # dense_scope/sparse_scope open when the query names a domain or content
+  # type; omnisearch is the live-vault lane; hype is the question-matching
+  # lane. Weighting them individually is a much finer instrument than
+  # "more keyword, less vector".
+  #
+  # A weight of 0 does NOT disable a lane: its candidates still reach the
+  # reranker, they just stop contributing to the fused ORDER. To remove a
+  # lane, turn the lane off.
+  #
+  # Per-call override: {"lane_weights": {"sparse": 1.5}} on /search and
+  # /query. Per-preset override: a lane_weights map inside retrieval.presets.*.
+  # Both MERGE lane by lane over this one, so setting one lane leaves the
+  # other seven where they were. An unknown lane name is an error, not a
+  # silent no-op.
+  #
+  # Tune these with the eval suite (`main.py eval --retrieval-only`, the 100-Q
+  # golden set) rather than by feel — that loop already exists.
+  lane_weights:
+    dense: 1.0
+    sparse: 1.0
+    dense_code: 1.0
+    sparse_code: 1.0
+    dense_scope: 1.0
+    sparse_scope: 1.0
+    omnisearch: 1.0
+    hype: 1.0
+
   use_hyde: true
+  # HyDE cache: the hypothetical answer for a question is generated once and
+  # reused, so repeated searches retrieve with identical text (the eval needs
+  # that) and skip an LLM round-trip. Keyed by question + prompt + model +
+  # temperature; delete the file to start fresh. Read when :8051 starts.
+  hyde_cache:
+    enabled: true
+    path: data/cache/hyde.sqlite
   # If a query mentions a course/domain, bias retrieval toward it
   metadata_boost: true
+
+  # Relevance gate: a cutoff applied AFTER the rerank and BEFORE the parent/
+  # neighbor expansion below. Reranking orders the pool but never says "none of
+  # these answers the question"; the gate does. Chunks scoring under
+  # `threshold` are dropped, and if NOTHING passes /query abstains: the fixed
+  # LOW "nothing relevant" answer, no citations, and NO LLM call (the retrieval
+  # echo's gate.abstained says so). Off by default. Per-call override:
+  # {"gate": true, "gate_threshold": 0.0} on /search, /query and /compare (a
+  # threshold alone turns the gate on for that call), plus "gate_scorer" to pick
+  # the scorer per call (a different scorer needs its own gate_threshold).
+  #   scorer: rerank_score  the ACTIVE reranker's own score, so the threshold is
+  #                         in that reranker's units (the MiniLM cross-encoder
+  #                         emits logits) and only means something for that ONE
+  #                         reranker. Needs a scoring rerank_mode, not `none`.
+  #                         The cheap baseline every learned gate must beat.
+  #           laya          P(relevant) in [0, 1]; needs the experimental Laya
+  #                         package (retrieval.laya.enabled + a checkpoint).
+  # The threshold is chosen on the eval DEV split (eval/configs.yaml has the
+  # gate-rerank-score starting point) and reported once on test. enabled: true
+  # with threshold: null is a STARTUP error, as is an unknown scorer.
+  relevance_gate:
+    enabled: false
+    scorer: rerank_score                    # rerank_score | laya
+    threshold: null
 
   # Small-to-big context expansion (post-rerank), both OFF by default; the
   # `synthesis` preset turns them on. parent_context swaps a markdown chunk for
@@ -383,10 +512,43 @@ retrieval:
 # Golden-query eval suite (eval/eval_runner.py — `python main.py eval`).
 # Tier 1 (retrieval) and the groundedness floor need nothing but the index;
 # the judge tier reuses the `generation` client above.
+# ---------------------------------------------------------------------------
+# Graph RAG mode — POST /graph/expand + POST /answer.
+#
+# A SEPARATE query mode, not a knob on /query. It seeds from a search
+# restricted to file_type below, then walks the hand-drawn edges Obsidian
+# canvases carry, and hands the traversal back to a HUMAN to decide what to do
+# with it: merge into a previous result, answer from the graph alone, or take
+# the raw nodes with no LLM at all.
+#
+# Depth lives HERE and not on /query on purpose: on the main path every
+# ordinary query would pay for graph expansion it never asked for. The
+# ingest-time twin of this knob is canvas.context_depth.
+#
+# Every cap is per-request overridable, and when one bites the response says
+# which (stats.truncated_at) rather than quietly returning less.
+# ---------------------------------------------------------------------------
+graph:
+  # EXPERIMENTAL — off by default. This mode works and is tested, but it has
+  # never been scored against the golden set, so it is not part of the default
+  # workflow yet. The console's Settings > Experimental features panel is the
+  # switch; it writes this key. While it is false, /graph/expand and the
+  # console's Graph RAG panel are both unavailable, /query and /search are
+  # unaffected, and the canvas lane keeps competing in ordinary retrieval.
+  # Turning it on needs a :8051 restart (the flag is read when the pipeline is
+  # built) and a console reload.
+  enabled: false
+  file_type: canvas       # which indexed lane holds the graph
+  max_depth: 2            # hops from the seed set
+  max_per_hop: 8          # neighbours followed per frontier node
+  max_total: 40           # nodes in one traversal, seeds included
+  seed_top_k: 5           # seeds taken from a query-seeded run
+
 eval:
   ngram_n: 2                    # content-word n-gram size for the deterministic
                                 # groundedness floor. 1 = lenient (bag of words),
                                 # 3 = strict (near-verbatim). 2 is the balance.
+  sets_dir: "eval/sets"         # labelled question sets the Eval tab reviews (local data; relative = from the project root)
   judge:
     # Leave empty to reuse the generation client (self-grading — the runner
     # warns). Name a `providers:` entry to judge with a different backend.
@@ -453,6 +615,9 @@ pdf:
     api_key_env: "OPENAI_API_KEY"           # sent if set; local servers ignore it
     prompt: "<image>document parsing."      # Unlimited-OCR's parsing prompt
     dpi: 200                                # 300 for dense math scans (slower)
+    max_edge_px: 1200                       # hard cap on rendered longest edge — large-format
+                                            # pages otherwise exceed the GPU encode budget at
+                                            # ANY fixed dpi (crash seen at ~1650px, ok ≤1196px)
     timeout: 300                            # generous — CPU-quant servers are slow
     max_tokens: 8192
     max_pages_per_pdf: null                 # safety cap for huge scanned books
@@ -517,6 +682,51 @@ notebooks:
   skip_scripts: ["armenian"]                     # per-cell: placeholder Armenian prose/output
   save_figures: false                            # true = decode image outputs to figures_dir
   figures_dir: data/notebook_figures
+
+# Obsidian .canvas ingestion: nodes + hand-drawn labelled edges, via
+# `ingest-canvas`. Only `text` nodes become chunks — `file`/`link`/`group`
+# nodes never get their own chunk. Each chunk carries its graph context
+# flattened in at ingest time (a "Connections" footer plus canvas_neighbors /
+# canvas_edge_labels / canvas_file_refs / canvas_degree metadata), so
+# src/retrieval/ needs zero canvas-aware code. See src/ingestion/canvas_loader.py.
+canvas:
+  # vault_path falls back to code -> notebooks -> pdf -> parser vault_path if unset
+  output_file: "data/canvas_chunks.jsonl"
+  # Lower than the project-wide 200: canvas nodes are inherently short, and
+  # their value is the graph context a short node still carries via its
+  # Connections block. Measured on the COMPOSED text (context header + node
+  # text + Connections footer), not the raw node text.
+  min_chunk_size: 50
+  # Split oversized node BODIES. null = OFF, which is how every canvas chunk
+  # currently in the index was produced. Measured over 1600 real chunks the
+  # node bodies run p50 399 / p90 1782 / max 9408 chars, so "canvas nodes are
+  # short" is true of the median and false of the tail.
+  # The context header and Connections footer ride along on EVERY part —
+  # splitting the footer would leave some parts with no graph context, which
+  # is the one thing this lane exists to provide. So a part can exceed this
+  # number by the footer's size.
+  # Part 1 keeps the node's doc_id and parts 2..n get `<node_id>#p<n>`, so
+  # turning this on UPSERTS what exists and only ADDS the tail.
+  max_chunk_size: null
+  chunking: heading                 # heading|fixed|document|none — the
+                                    # splitter used when max_chunk_size bites
+  chunk_overlap: 150
+  # How much of a NEIGHBOUR is inlined into each chunk AT INGEST TIME:
+  #   0 = target titles only (first line, truncated) — today's behaviour
+  #   1 = the immediate neighbours' text, truncated to context_chars
+  #   2 = 1, plus each neighbour's own neighbour titles (second hop)
+  # Above 0 this DUPLICATES text across chunks and inflates the index; the
+  # ingest run reports the measured share rather than assuming it. Depth at
+  # QUERY time is a different knob and lives in the graph: block below.
+  context_depth: 0
+  context_chars: 400                # per-neighbour truncation at depth >= 1
+  # skip_dirs: null = the built-in set mirroring ObsidianParser's defaults
+  # (.obsidian, .trash, .git, node_modules, .smart-connections,
+  # .obsidian-git, _Backups). Set a list to override.
+  skip_dirs: null
+  # skip_roots: null = no roots skipped by default (canvases carry no
+  # agent-project convention to scope out, unlike ingest-code). Set a list to add some.
+  skip_roots: null
 
 webui:
   # Management console (manage_api.py) — ingest/index/OCR/delete from a browser.

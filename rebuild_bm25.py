@@ -25,6 +25,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from src.utils.config_loader import load_config
+from src.utils.console import force_utf8_console
 from src.utils.logger import get_logger
 from src.embeddings.embedder import build_sparse_union
 
@@ -32,6 +33,7 @@ log = get_logger("rebuild_bm25")
 
 
 def main():
+    force_utf8_console()
     cfg = load_config(None)
     chunks_file = cfg.path("paths.chunks_file")
     bm25_index = cfg.path("paths.bm25_index")

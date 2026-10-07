@@ -2,12 +2,22 @@
 pipeline.py — The full Advanced-RAG query path, wired end to end.
 
     query
-      -> HyDE expansion (optional)
-      -> hybrid retrieve (dense + BM25 + RRF)
-      -> cross-encoder rerank -> top k
-      -> grounded generation with inline citations
-      -> optional citation verification
-    -> Answer
+      -> preset resolution   explicit preset, or 'code' auto-applied when the
+                             question trips a code-intent signal
+      -> scope detection     on the RAW question (domain / content hints)
+      -> HyDE expansion      optional; its text feeds every retrieval lane
+      -> hybrid retrieve     up to eight lanes, weighted RRF, metadata boost
+      -> rerank -> top k     cross_encoder | http | lexical | none | laya
+      -> relevance gate      optional; drops chunks below a threshold, and
+                             leaving none makes generation abstain
+      -> small-to-big        optional parent swap / adjacent PDF pages
+    search() stops here: retrieval only, no generation backend needed.
+      -> grounded generation with inline [n] citations + a CONFIDENCE line
+      -> optional citation verification (a second LLM pass)
+    -> Answer, whose .retrieval echoes every setting that actually ran
+
+Graph RAG (self.graph) is a separate mode that is merely wired here: neither
+search() nor query() calls it.
 
 Lazy construction: heavy objects (embedding model, cross-encoder, chroma client)
 are built once and reused. Build the pipeline once, call query() many times.
@@ -18,16 +28,22 @@ are built once and reused. Build the pipeline once, call query() many times.
 """
 from __future__ import annotations
 
+import time
+from contextlib import nullcontext
+
 from src.embeddings.embedder import Embedder
 from src.generation.generator import Answer, Generator
 from src.llm.llm_client import LLMClient
 from src.retrieval.context_expand import NeighborContext, ParentContext
+from src.retrieval.graph_expand import GraphExpander
 from src.retrieval.hyde import HyDE
+from src.retrieval.relevance_gate import RelevanceGate
 from src.retrieval.reranker import Reranker
-from src.retrieval.retriever import HybridRetriever
+from src.retrieval.retriever import LANES, HybridRetriever, _clean_lane_set
 from src.retrieval.scope import ScopeRouter
 from src.utils.config_loader import Config, load_config
 from src.utils.logger import configure_logging, get_logger
+from src.utils.timing import StageTrace
 
 log = get_logger(__name__)
 
@@ -44,6 +60,8 @@ class RAGPipeline:
         scope_router: ScopeRouter | None = None,
         parent_ctx: ParentContext | None = None,
         neighbor_ctx: NeighborContext | None = None,
+        graph: GraphExpander | None = None,
+        gate: RelevanceGate | None = None,
     ):
         self.retriever = retriever
         self.reranker = reranker
@@ -58,6 +76,14 @@ class RAGPipeline:
         # retrieval.parent_context / retrieval.neighbor_context).
         self.parent_ctx = parent_ctx
         self.neighbor_ctx = neighbor_ctx
+        # Post-rerank relevance gate (retrieval.relevance_gate). None = a gate
+        # that is off, so a per-call gate / gate_threshold still has something
+        # to switch on (rerank_score, the default scorer) instead of being
+        # silently ignored.
+        self.gate = gate if gate is not None else RelevanceGate()
+        # Graph RAG mode (POST /graph/expand). A SEPARATE path: nothing in
+        # search() or query() below touches it, and it touches nothing here.
+        self.graph = graph
 
     @classmethod
     def from_config(cls, cfg: Config | None = None) -> "RAGPipeline":
@@ -86,6 +112,9 @@ class RAGPipeline:
             scope_router=ScopeRouter.from_config(cfg),
             parent_ctx=ParentContext.from_config(cfg),
             neighbor_ctx=NeighborContext.from_config(cfg),
+            graph=GraphExpander.from_config(cfg, retriever, reranker),
+            # Built here so a bad gate block fails the build, not a request.
+            gate=RelevanceGate.from_config(cfg, reranker),
         )
 
     def _resolve_overrides(
@@ -114,6 +143,22 @@ class RAGPipeline:
             return dict(self.presets["code"]), "code (auto)"
         return {}, None
 
+    def _lazy_handles(self) -> tuple[bool, ...]:
+        """Which lazily-loaded handles are resident right now: the Chroma
+        collection, the BM25 payload, the cross-encoder and the Laya
+        checkpoint. /health reports ready before any of them loads, so the
+        first search pays for them — a spike the latency numbers must flag, not
+        average in. getattr, so a stand-in without these attributes reads as
+        never-loaded, never cold."""
+        return tuple(
+            getattr(obj, name, None) is not None
+            for obj, name in ((self.retriever, "_collection"),
+                              (self.retriever, "_bm25_payload"),
+                              (self.reranker, "_model"),
+                              (getattr(self.reranker, "laya_scorer", None),
+                               "_agent"))
+        )
+
     def search(
         self,
         question: str,
@@ -128,7 +173,13 @@ class RAGPipeline:
         hype: bool | None = None,
         rerank: str | None = None,
         rerank_instruction: str | None = None,
+        lane_weights: dict[str, float] | None = None,
         auto_preset: bool = True,
+        lanes: list[str] | None = None,
+        metadata_boost: bool | None = None,
+        gate: bool | None = None,
+        gate_threshold: float | None = None,
+        gate_scorer: str | None = None,
     ) -> tuple[list, dict]:
         """
         Retrieval only — everything query() does EXCEPT generation. Returns
@@ -146,13 +197,56 @@ class RAGPipeline:
           parent_context / neighbor_context
                       True/False forces the E2 small-to-big lanes on/off
                       (beats preset, which beats the config default)
+          dense_top_k / sparse_top_k
+                      per-lane candidate pool sizes (beat the preset's)
+          hype        True/False forces the hypothetical-question lane on/off
+          rerank      rerank mode for this call only (cross_encoder | http |
+                      lexical | none | laya)
+          rerank_instruction
+                      ranking criterion for this call; "" switches a
+                      configured one off
+          lane_weights
+                      {lane: weight}, merged lane by lane over the preset's
+                      map, which is itself merged over retrieval.lane_weights
           auto_preset False disables the implicit code preset, giving compare
                       calls an explicit config-only baseline
-        """
-        log.info("=== SEARCH: %s", question)
+          lanes       restrict the call to these lanes (names from LANES): one
+                      outside the list is not run at all. Restricts only — a
+                      conditional lane still needs its own trigger. Empty or
+                      unknown raises ValueError
+          metadata_boost
+                      True/False forces the course/domain/tag boost on or off
+                      (None follows retrieval.metadata_boost)
+          gate        True/False forces the relevance gate on or off (None
+                      follows retrieval.relevance_gate.enabled). It runs after
+                      the rerank and before the small-to-big expansion and
+                      drops what scores below the threshold; if nothing
+                      survives, query() abstains. The rerank_score scorer
+                      needs a scoring rerank mode: `none` raises ValueError
+          gate_threshold
+                      cutoff in the scorer's own units; beats the configured
+                      one, and on its own it turns the gate on for this call
+          gate_scorer rerank_score | laya for this call (None follows
+                      retrieval.relevance_gate.scorer); a scorer other than
+                      the configured one needs its own gate_threshold
 
-        overrides, preset_label = self._resolve_overrides(
-            question, preset, auto_preset=auto_preset)
+        The echo also reports where the time went: timings (ms per stage),
+        lanes_run (candidates each lane returned) and cold (this call loaded
+        the index or the cross-encoder, so its timings are not steady-state),
+        and what the gate did: gate ({"enabled": False} when it did not run).
+        """
+        # First thing, before HyDE: retrieve() rejects a bad lane set too, but by
+        # then the draft has already cost an LLM call. The cleaned value is not
+        # used; retrieve() cleans the same input again.
+        _clean_lane_set(lanes, "lanes")
+        log.info("=== SEARCH: %s", question)
+        trace = StageTrace()
+        t_all = time.perf_counter()
+        loaded_before = self._lazy_handles()
+
+        with trace.span("preset"):
+            overrides, preset_label = self._resolve_overrides(
+                question, preset, auto_preset=auto_preset)
         k = top_k or overrides.get("rerank_top_k") or self.rerank_top_k
         # Per-lane pool sizes: explicit per-call beats preset beats config default.
         dk = dense_top_k if dense_top_k is not None else overrides.get("dense_top_k")
@@ -160,11 +254,20 @@ class RAGPipeline:
         use_hyde = hyde if hyde is not None else overrides.get("use_hyde")
         use_omni = omnisearch if omnisearch is not None else overrides.get("omnisearch")
         use_hype = hype if hype is not None else overrides.get("hype")
+        # Lane weights compose rather than replace: the preset's map merges
+        # over the configured one, and the per-call map merges over that. So
+        # a preset can reweight sparse while a call reweights hype, and both
+        # apply — replacing wholesale would silently drop the preset's intent.
+        weights = dict(overrides.get("lane_weights") or {})
+        weights.update(lane_weights or {})
         # Domain/content hints are detected on the RAW question (HyDE prose
         # would dilute the keywords) and routed as extra fusion lanes.
-        scope = self.scope_router.detect(question)
+        with trace.span("scope"):
+            scope = self.scope_router.detect(question)
 
-        search_text = self.hyde.expand(question, enabled=use_hyde)
+        with trace.span("hyde"):
+            search_text, hyde_status = self.hyde.expand_with_info(
+                question, enabled=use_hyde)
         candidates = self.retriever.retrieve(
             search_text,
             dense_top_k=dk,
@@ -173,14 +276,29 @@ class RAGPipeline:
             scope=scope if scope else None,
             omnisearch=use_omni,
             hype=use_hype,
+            lane_weights=weights or None,
+            lanes=lanes,
+            metadata_boost=metadata_boost,
+            trace=trace,
         )
         rerank_mode = rerank if rerank is not None else overrides.get("rerank_mode")
         # "" is meaningful here: it turns a configured criterion OFF for this
         # call, which `or` would silently discard.
         instruction = (rerank_instruction if rerank_instruction is not None
                        else overrides.get("rerank_instruction"))
-        top = self.reranker.rerank(question, candidates, top_k=k,
-                                   mode=rerank_mode, instruction=instruction)
+        with trace.span("rerank"):
+            top = self.reranker.rerank(question, candidates, top_k=k,
+                                       mode=rerank_mode, instruction=instruction)
+
+        # Relevance gate (post-rerank, pre-expansion). It judges the ORIGINAL
+        # question — HyDE's text is a hypothetical answer, not what was asked.
+        # The span exists only for a call that gates, so a gate-off call's
+        # timings carry no stage that never ran.
+        gate_on = self.gate.is_on(gate, gate_threshold, gate_scorer)
+        with trace.span("gate") if gate_on else nullcontext():
+            top, gate_info = self.gate.apply(
+                question, top, enabled=gate, threshold=gate_threshold,
+                scorer=gate_scorer)
 
         # E2 small-to-big (post-rerank): per-call beats preset beats config.
         parent_on = parent_context
@@ -190,7 +308,8 @@ class RAGPipeline:
             parent_on = bool(self.parent_ctx and self.parent_ctx.enabled)
         swaps = siblings = 0
         if parent_on and self.parent_ctx:
-            top, swaps, siblings = self.parent_ctx.apply(top)
+            with trace.span("parent"):
+                top, swaps, siblings = self.parent_ctx.apply(top)
         neighbor_on = neighbor_context
         if neighbor_on is None:
             neighbor_on = overrides.get("neighbor_context")
@@ -198,8 +317,9 @@ class RAGPipeline:
             neighbor_on = bool(self.neighbor_ctx and self.neighbor_ctx.enabled)
         neighbors = 0
         if neighbor_on and self.neighbor_ctx:
-            top, neighbors = self.neighbor_ctx.apply(
-                top, self.retriever._get_collection())
+            with trace.span("neighbor"):
+                top, neighbors = self.neighbor_ctx.apply(
+                    top, self.retriever._get_collection())
 
         info = {
             "preset": preset_label,
@@ -208,6 +328,9 @@ class RAGPipeline:
             "dense_top_k": dk or self.retriever.dense_top_k,
             "sparse_top_k": sk or self.retriever.sparse_top_k,
             "hyde_used": search_text != question,
+            # off | bypass | hit | miss | nocache | error — whether the draft
+            # was replayed from the cache or written fresh (see HyDE).
+            "hyde_cache": hyde_status,
             "boost_code": overrides.get("boost_code", False),
             "scope": scope.labels if scope else [],
             "candidates": len(candidates),
@@ -223,10 +346,23 @@ class RAGPipeline:
             "neighbors_added": neighbors,
             "hype": bool(use_hype if use_hype is not None
                          else self.retriever.hype_enabled),
+            "lanes_requested": sorted(lanes) if lanes is not None else None,
+            "metadata_boost": bool(self.retriever.metadata_boost
+                                   if metadata_boost is None else metadata_boost),
+            # The weights actually used, every lane spelled out — an echo that
+            # showed only the overrides would leave the reader guessing what
+            # the other lanes were fused at.
+            "lane_weights": {
+                lane: (weights.get(lane)
+                       if weights.get(lane) is not None
+                       else self.retriever.lane_weights.get(lane, 1.0))
+                for lane in LANES
+            },
             "rerank_mode": (rerank_mode or self.reranker.mode),
             # Report the criterion that was APPLIED, not the one that was
-            # asked for: `lexical` and `none` ignore it by design, and an echo
-            # that claimed otherwise would make a no-op look like a setting.
+            # asked for: `lexical`, `none` and `laya` ignore it by design, and
+            # an echo that claimed otherwise would make a no-op look like a
+            # setting.
             "rerank_instruction": (
                 (instruction if instruction is not None
                  else self.reranker.instruction) or None
@@ -238,6 +374,8 @@ class RAGPipeline:
                     question, (rerank_mode or self.reranker.mode), instruction)
                 != question
             ),
+            # The cross-encoder's model and length. http and laya report
+            # neither: a Laya checkpoint reads its own max_len from its config.
             "reranker_model": (
                 self.reranker.model_name
                 if (rerank_mode or self.reranker.mode) == "cross_encoder"
@@ -248,7 +386,15 @@ class RAGPipeline:
                 if (rerank_mode or self.reranker.mode) == "cross_encoder"
                 else None
             ),
+            # What the relevance gate did; {"enabled": False} when it did not
+            # run. `abstained` is why a /query came back with the fixed
+            # "nothing relevant" answer and no LLM call.
+            "gate": gate_info,
         }
+        trace.ms["total"] = (time.perf_counter() - t_all) * 1000.0
+        info["timings"] = trace.timings()
+        info["lanes_run"] = dict(trace.lanes)
+        info["cold"] = self._lazy_handles() != loaded_before
         return top, info
 
     def query(
@@ -265,14 +411,23 @@ class RAGPipeline:
         hype: bool | None = None,
         rerank: str | None = None,
         rerank_instruction: str | None = None,
+        lane_weights: dict[str, float] | None = None,
         max_tokens: int | None = None,
         auto_preset: bool = True,
+        lanes: list[str] | None = None,
+        metadata_boost: bool | None = None,
+        gate: bool | None = None,
+        gate_threshold: float | None = None,
+        gate_scorer: str | None = None,
     ) -> Answer:
         """
         Run the full RAG path (search + grounded generation). All knobs are
         per-call overrides that leave the warm pipeline's defaults untouched;
         see search() for their meaning. max_tokens caps the ANSWER length
         (output tokens) for this call only — None keeps generation.max_tokens.
+        When the relevance gate leaves no docs the generator gets an empty list
+        and returns its fixed LOW "nothing relevant" answer without calling the
+        LLM; the echo's gate.abstained says why.
         """
         top, info = self.search(
             question, preset=preset, top_k=top_k,
@@ -280,7 +435,9 @@ class RAGPipeline:
             hyde=hyde, omnisearch=omnisearch,
             parent_context=parent_context, neighbor_context=neighbor_context,
             hype=hype, rerank=rerank, rerank_instruction=rerank_instruction,
-            auto_preset=auto_preset,
+            lane_weights=lane_weights, auto_preset=auto_preset,
+            lanes=lanes, metadata_boost=metadata_boost,
+            gate=gate, gate_threshold=gate_threshold, gate_scorer=gate_scorer,
         )
         answer = self.generator.generate(question, top, max_tokens=max_tokens)
         answer.retrieval = info

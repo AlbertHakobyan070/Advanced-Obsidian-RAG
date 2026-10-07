@@ -1,12 +1,29 @@
 """
-reranker.py — Cross-encoder reranking.
+reranker.py — Reorder the fused candidate pool, then cut it to top-k.
 
 Bi-encoder retrieval (dense vectors) is fast but approximate: query and doc are
 embedded separately. A cross-encoder reads (query, doc) TOGETHER and scores
 relevance directly — far more accurate, but too slow to run over the whole
 corpus. So we use it to reorder the top-N hybrid candidates down to top-k.
 
-    retrieve (20-40 candidates) -> rerank -> top 5 -> generation
+    retrieve (20-40 candidates) -> rerank -> top k -> generation
+
+Five modes (RERANK_MODES), selectable per call:
+  cross_encoder  a sentence-transformers CrossEncoder, in process
+  http           the same job behind an external /v1/rerank endpoint
+  lexical        model-free query-term coverage (no torch, milliseconds)
+  none           keep the fused RRF order and just truncate
+  laya           EXPERIMENTAL: P(relevant) from a Laya checkpoint fine-tuned on
+                 this vault (laya_reranker.py); refused unless
+                 retrieval.laya.enabled, and it ignores the instruction below
+
+An optional rerank INSTRUCTION states the ranking criterion ("prefer worked
+procedures over definitions"). It changes only what the reranker scores
+against, so it can reorder the pool but never shrink it.
+
+The model modes fail loudly: they raise RerankerExecutionError rather than
+falling back to fused order, so an answer is never built from a ranking
+nobody asked for while the logs still say "reranked".
 
 Usage:
     from src.retrieval.reranker import Reranker
@@ -18,6 +35,7 @@ from __future__ import annotations
 import re
 import time
 
+from src.retrieval.laya_reranker import LayaScorer
 from src.retrieval.retriever import RetrievedDoc
 from src.utils.config_loader import Config
 from src.utils.logger import get_logger
@@ -25,7 +43,7 @@ from src.utils.logger import get_logger
 log = get_logger(__name__)
 
 
-RERANK_MODES = ("cross_encoder", "http", "lexical", "none")
+RERANK_MODES = ("cross_encoder", "http", "lexical", "none", "laya")
 
 _TOKEN_RE = re.compile(r"[a-z0-9_]+")
 
@@ -163,7 +181,8 @@ class Reranker:
                  http_url: str | None = None, http_model: str | None = None,
                  http_timeout: int = 120,
                  instruction: str | None = None,
-                 instruction_format: str = "prefix"):
+                 instruction_format: str = "prefix",
+                 laya_scorer: LayaScorer | None = None):
         self.model_name = model_name
         self.top_k = top_k
         if mode not in RERANK_MODES:
@@ -214,6 +233,15 @@ class Reranker:
                 f"{sorted(INSTRUCTION_FORMATS)}, got {instruction_format!r}")
         self.instruction_format = instruction_format
         self._warned_lexical_instruction = False
+        self._warned_laya_instruction = False
+
+        # mode="laya" (EXPERIMENTAL): scores with a Laya checkpoint
+        # fine-tuned on this vault. None = the feature is switched off
+        # (retrieval.laya.enabled is false), and the mode is then REFUSED
+        # rather than answered by some other reranker. The scorer loads
+        # lazily, and the pipeline hands this same instance to the relevance
+        # gate's `laya` scorer, so the checkpoint is only ever loaded once.
+        self.laya_scorer = laya_scorer
 
     # Back-compat: some call sites check .enabled
     @property
@@ -223,8 +251,23 @@ class Reranker:
     @classmethod
     def from_config(cls, cfg: Config) -> "Reranker":
         mode = str(cfg.get("retrieval.rerank_mode", "cross_encoder")).lower()
-        if mode not in RERANK_MODES:            # historical configs used e.g. "off"
+        # Any unrecognised CONFIG value maps to "none": historical configs used
+        # e.g. "off" — but a typo such as "cross-encoder" lands here too, and
+        # it switches reranking off without an error. (A per-call mode is
+        # validated in rerank() and raises instead.)
+        if mode not in RERANK_MODES:
             mode = "none"
+        # Built only when the flag is on, and even then it imports and loads
+        # nothing until its first score(): a switched-off feature costs
+        # nothing.
+        laya_scorer = None
+        if bool(cfg.get("retrieval.laya.enabled", False)):
+            laya_scorer = LayaScorer(
+                model_dir=cfg.path("retrieval.laya.model_dir",
+                                   "models/laya-noetrix"),
+                device=cfg.get("retrieval.laya.device", "cpu"),
+                batch_size=cfg.get("retrieval.laya.batch_size", 16),
+            )
         return cls(
             model_name=cfg.get(
                 "retrieval.cross_encoder_model", "cross-encoder/ms-marco-MiniLM-L-6-v2"
@@ -239,6 +282,7 @@ class Reranker:
             instruction=cfg.get("retrieval.rerank_instruction"),
             instruction_format=str(
                 cfg.get("retrieval.rerank_instruction_format", "prefix")),
+            laya_scorer=laya_scorer,
         )
 
     # ---- instruction ---------------------------------------------------
@@ -262,6 +306,11 @@ class Reranker:
                           term set would dilute every real query term and
                           quietly make ranking worse. Warned once, not silent.
           none          — nothing is scored at all.
+          laya          — IGNORED, deliberately. The query goes into Laya's own
+                          question ("Does the passage answer: <query>?"), the
+                          exact wording its checkpoint was fine-tuned on; a
+                          prepended instruction would change the input it was
+                          trained on. Warned once, not silent.
         """
         text = (instruction if instruction is not None else self.instruction)
         text = (text or "").strip()
@@ -275,6 +324,15 @@ class Reranker:
                     "coverage, and mixing instruction words into the term set "
                     "would dilute the query's own terms. Use "
                     "rerank_mode=cross_encoder or http to apply it.", mode)
+            return query
+        if mode == "laya":
+            if not self._warned_laya_instruction:
+                self._warned_laya_instruction = True
+                log.warning(
+                    "rerank instruction ignored: mode='laya' puts the query "
+                    "into the model's own question, the wording its checkpoint "
+                    "was trained on, and an instruction would change that "
+                    "input. Use rerank_mode=cross_encoder or http to apply it.")
             return query
         return INSTRUCTION_FORMATS[self.instruction_format].format(
             instruction=text, query=query)
@@ -327,6 +385,46 @@ class Reranker:
                  len(docs), k, self.http_url)
         return reranked[:k]
 
+    # ---- laya lane (EXPERIMENTAL) --------------------------------------
+
+    def _rerank_laya(self, query: str, docs: list[RetrievedDoc],
+                     k: int) -> list[RetrievedDoc]:
+        """Score with the Laya checkpoint: rerank_score = P(true), in [0, 1].
+
+        Deliberately NOT fail-soft, and never a quiet switch to another
+        reranker: with the feature off, or the package or checkpoint missing,
+        this raises, because an answer built from a ranking nobody asked for
+        would still be logged as "reranked". P(true) is rounded to 4 places, so
+        ties are normal; sorted() is stable, so they keep the fused order.
+        """
+        if self.laya_scorer is None:
+            raise RerankerExecutionError(
+                "rerank mode 'laya' is EXPERIMENTAL and switched off "
+                "(retrieval.laya.enabled is false). Turn it on in the "
+                "management console under Settings > Experimental features, or "
+                "set retrieval.laya.enabled: true in config.yaml, then restart "
+                ":8051; it also needs the laya package and a checkpoint "
+                "(docs/laya-finetune.md). It never falls back to another "
+                "rerank mode: pick one explicitly")
+        try:
+            scores = self.laya_scorer.score(query, [d.text for d in docs])
+        except Exception as e:
+            raise RerankerExecutionError(
+                f"laya reranker ({self.laya_scorer.model_dir}) failed while "
+                f"loading or scoring {len(docs)} candidate(s): "
+                f"{type(e).__name__}: {e}"
+            ) from e
+        if len(scores) != len(docs):
+            # zip() would pin scores on the wrong docs and drop the rest.
+            raise RerankerExecutionError(
+                f"laya reranker returned {len(scores)} score(s) for "
+                f"{len(docs)} candidate(s)")
+        for doc, score in zip(docs, scores):
+            doc.rerank_score = float(score)
+        reranked = sorted(docs, key=lambda d: d.rerank_score, reverse=True)
+        log.info("laya-reranked %d candidates -> top %d", len(docs), k)
+        return reranked[:k]
+
     def _get_model(self):
         if self._model is None:
             from sentence_transformers import CrossEncoder
@@ -350,9 +448,9 @@ class Reranker:
         """Reorder + truncate the fused candidates.
 
         `mode` overrides the configured method for this call
-        (cross_encoder | http | lexical | none). `instruction` overrides the
-        configured ranking criterion; pass "" to switch it off for one call
-        while the config keeps it on.
+        (cross_encoder | http | lexical | none | laya). `instruction`
+        overrides the configured ranking criterion; pass "" to switch it off
+        for one call while the config keeps it on.
         """
         k = top_k or self.top_k
         m = (mode or self.mode).lower()
@@ -371,6 +469,9 @@ class Reranker:
 
         if m == "http":
             return self._rerank_http(scoring_query, docs, k)
+
+        if m == "laya":
+            return self._rerank_laya(scoring_query, docs, k)
 
         if m == "lexical":
             terms = _TOKEN_RE.findall(scoring_query.lower())

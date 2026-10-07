@@ -5,9 +5,10 @@ Two lanes, both writing .md files into the inbox's `_converted/` staging
 subfolder (they do NOT index anything — promote the outputs to the inbox and
 run the normal ingest lane):
 
-  fetch_urls()     pull web pages (requests | crawl4ai | scrapling backends,
-                   "auto" = best installed) and convert the HTML to markdown
-                   via markitdown.
+  fetch_urls()     pull web pages (requests | crawl4ai | scrapling | crawlee
+                   backends, "auto" = best installed of crawl4ai > scrapling >
+                   requests; crawlee is opt-in by name) and convert the HTML
+                   to markdown via markitdown.
   convert_files()  convert already-uploaded inbox files (pdf/docx/pptx/xlsx/
                    html/…) to markdown via markitdown; optional Tesseract OCR
                    for selected PDF pages when the text layer is missing.
@@ -28,7 +29,7 @@ from src.utils.logger import get_logger
 
 log = get_logger(__name__)
 
-FETCH_BACKENDS = ("auto", "requests", "crawl4ai", "scrapling")
+FETCH_BACKENDS = ("auto", "requests", "crawl4ai", "scrapling", "crawlee")
 
 _SAFE_NAME = re.compile(r"[^\w.\- ()\[\]]")
 
@@ -101,10 +102,51 @@ def _fetch_scrapling(url: str) -> tuple[bytes, str]:
     return page.html_content.encode("utf-8"), "text/html"
 
 
+def _fetch_crawlee(url: str) -> tuple[bytes, str]:
+    try:
+        import asyncio
+        from crawlee import Request
+        from crawlee.crawlers import PlaywrightCrawler
+        from crawlee.storage_clients import MemoryStorageClient
+    except ImportError as e:
+        raise RuntimeError(
+            "crawlee backend requested but not installed — "
+            "pip install \"crawlee[playwright,beautifulsoup]\" "
+            "(it drives Chromium: python -m playwright install chromium)") from e
+
+    async def _run():
+        got: dict = {}
+        # Memory storage: crawlee's default is a ./storage folder in the working
+        # directory, which for a CLI run is the repo root.
+        crawler = PlaywrightCrawler(max_requests_per_crawl=1,
+                                    storage_client=MemoryStorageClient())
+
+        @crawler.router.default_handler
+        async def _page(context):
+            got["html"] = await context.page.content()
+
+        @crawler.failed_request_handler
+        async def _failed(context, error):    # retries spent; crawlee only logs it
+            got["error"] = error
+
+        # always_enqueue: crawlee caches its storages process-wide, so a URL an
+        # earlier fetch in this run already handled would be skipped silently.
+        await crawler.run([Request.from_url(url, always_enqueue=True)])
+        return got
+    got = asyncio.run(_run())
+    if "html" not in got:
+        err = got.get("error")
+        raise RuntimeError(
+            f"crawlee could not fetch {url}: "
+            f"{err if err is not None else 'no page was returned'}") from err
+    return got["html"].encode("utf-8"), "text/html"
+
+
 def fetch_one(url: str, backend: str = "auto") -> tuple[bytes, str]:
     """Return (payload_bytes, content_type). Explicit missing backend raises
     readable; 'auto' tries crawl4ai -> scrapling -> requests, using whatever
-    exists (requests is a hard dependency of the project)."""
+    exists (requests is a hard dependency of the project). crawlee is never in
+    that chain: it runs only when asked for by name."""
     if backend not in FETCH_BACKENDS:
         raise ValueError(f"backend must be one of {FETCH_BACKENDS}")
     if backend == "requests":
@@ -113,6 +155,8 @@ def fetch_one(url: str, backend: str = "auto") -> tuple[bytes, str]:
         return _fetch_crawl4ai(url)
     if backend == "scrapling":
         return _fetch_scrapling(url)
+    if backend == "crawlee":
+        return _fetch_crawlee(url)
     for fn in (_fetch_crawl4ai, _fetch_scrapling):
         try:
             return fn(url)
@@ -229,26 +273,42 @@ def fetch_urls(urls: list[str], dest_dir: Path, backend: str = "auto",
 
 # ---------------------------------------------------------------- converting
 
-def _ocr_pdf_pages(pdf_path: Path, pages_spec: str) -> str:
+def _ocr_pdf_pages(pdf_path: Path, pages_spec: str, lang: str = "eng") -> str:
     """OCR the selected 1-based pages of a PDF with Tesseract (the same engine
-    the ingest lane uses) and return them as markdown-ish text."""
-    try:
-        import fitz                            # pymupdf
-        import pytesseract
-        from PIL import Image
-    except ImportError as e:
-        raise RuntimeError(
-            "OCR needs pymupdf + pytesseract + pillow in this venv") from e
+    the ingest lane uses) and return them as markdown-ish text. `lang` is the
+    Tesseract language code; the caller reads it from pdf.ocr_language, so this
+    helper never re-loads config.yaml.
+
+    Runs through PyMuPDF's built-in Tesseract hook, not pytesseract: that
+    package is in neither requirements.txt nor the runtime venv, so the old
+    implementation raised on every call. PyMuPDF is already a hard dependency."""
+    import fitz                                # pymupdf
     from src.ingestion.pdf_loader import parse_page_spec
-    import io
     doc = fitz.open(pdf_path)
     try:
         idxs = parse_page_spec(pages_spec, page_count=doc.page_count)
         parts = []
         for i in idxs:
-            pix = doc[i].get_pixmap(dpi=200)
-            img = Image.open(io.BytesIO(pix.tobytes("png")))
-            txt = pytesseract.image_to_string(img)
+            page = doc[i]
+            try:
+                # full=True OCRs the whole page image, as the old pixmap ->
+                # Tesseract path did; the default only fills in image areas and
+                # keeps the page's own text layer, which is what the caller is
+                # bypassing. 200 dpi because PyMuPDF's default of 72 is
+                # unreadable to Tesseract.
+                tp = page.get_textpage_ocr(language=lang, dpi=200, full=True)
+            except (RuntimeError, fitz.mupdf.FzErrorLibrary) as e:
+                # Both are what PyMuPDF raises when Tesseract or its tessdata is
+                # unusable: RuntimeError when none can be found, FzErrorLibrary
+                # (not a RuntimeError) when the folder lacks the language. Neither
+                # message names the env var or the language, so say both here.
+                raise RuntimeError(
+                    f"Tesseract OCR failed on page {i + 1}: it needs tessdata for "
+                    f"language {lang!r} - set TESSDATA_PREFIX to the tessdata "
+                    f"folder that holds it. PyMuPDF said: {e}") from e
+            # textpage= is load-bearing: without it get_text() quietly returns
+            # the page's own text layer, which for a scan is empty.
+            txt = page.get_text("text", textpage=tp)
             parts.append(f"## Page {i + 1}\n\n{txt.strip()}")
         return "\n\n".join(parts)
     finally:
@@ -256,10 +316,11 @@ def _ocr_pdf_pages(pdf_path: Path, pages_spec: str) -> str:
 
 
 def convert_files(files: list[str], inbox: Path, dest_dir: Path,
-                  ocr_pages: str = "") -> list[dict]:
+                  ocr_pages: str = "", ocr_language: str = "eng") -> list[dict]:
     """Convert named inbox files to markdown into dest_dir via markitdown.
     `ocr_pages` (e.g. \"1-4,9\") additionally OCRs those pages of each PDF and
-    appends the OCR text — for scanned pages markitdown's text layer misses.
+    appends the OCR text — for scanned pages markitdown's text layer misses —
+    in `ocr_language` (a Tesseract code; the CLI passes pdf.ocr_language).
     Names must be plain filenames living in the inbox (no path parts)."""
     dest_dir.mkdir(parents=True, exist_ok=True)
     md = _markitdown()
@@ -277,7 +338,7 @@ def convert_files(files: list[str], inbox: Path, dest_dir: Path,
         try:
             text = md.convert(str(src)).text_content or ""
             if ocr_pages and src.suffix.lower() == ".pdf":
-                ocr_txt = _ocr_pdf_pages(src, ocr_pages)
+                ocr_txt = _ocr_pdf_pages(src, ocr_pages, ocr_language)
                 text += f"\n\n---\n\n# OCR (pages {ocr_pages})\n\n{ocr_txt}"
             dest = _unique(dest_dir, src.stem, ".md")
             header = f"# {src.stem}\n\n> Converted from: {name}\n\n"

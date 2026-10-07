@@ -35,6 +35,18 @@ def shipped_cfg():
     return shipped_config()
 
 
+@pytest.fixture(autouse=True)
+def _chroma_telemetry_off(monkeypatch):
+    """Chroma raises ValueError when a second client opens a store path with
+    settings that differ from the first client's. The repo opens every store with
+    Settings(anonymized_telemetry=False) (src/utils/chroma_client.py), so a test
+    that builds its own bare chromadb.PersistentClient(path) on a path the code
+    under test also opens would clash with it. Default Settings reads this
+    variable, so the two agree. (tests/test_chroma_telemetry.py checks what the
+    code passes to chromadb itself, which this variable cannot mask.)"""
+    monkeypatch.setenv("ANONYMIZED_TELEMETRY", "False")
+
+
 @pytest.fixture
 def management_module(tmp_path, monkeypatch):
     """Import the console against the config a fresh clone actually ships.

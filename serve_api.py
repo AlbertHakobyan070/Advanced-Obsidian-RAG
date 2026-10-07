@@ -20,6 +20,8 @@ Endpoints (agent-facing; GET /schema returns this list machine-readably):
     GET  /omnisearch   -> raw LIVE-vault results (Obsidian passthrough)
     POST /search       -> retrieval ONLY (chunks + labels + text; no LLM needed)
     POST /query        -> full RAG (retrieve + grounded, cited generation)
+    POST /graph/expand -> Graph RAG: walk canvas edges, no LLM (mode c)
+    POST /answer       -> generate over a CALLER-SUPPLIED doc set (modes a + b)
     POST /compare      -> bounded query tree across retrieval/provider branches
     GET  /compare/options -> ready-to-post branch sets for /compare
     POST /config       -> live-update retrieval defaults
@@ -74,6 +76,7 @@ from pydantic import BaseModel, Field
 from src.generation.generator import Generator
 from src.llm.llm_client import LLMClient
 from src.pipeline import RAGPipeline
+from src.retrieval.retriever import LANES, RetrievedDoc
 from src.retrieval.reranker import RERANK_MODES, RerankerExecutionError
 from src.utils.config_loader import load_config, persist_config_values
 from src.utils.branding import QUERY_API_TITLE, QUERY_SERVICE
@@ -92,9 +95,16 @@ _HISTORY: deque = deque(maxlen=50)
 
 
 def _record_history(endpoint: str, body, retrieval: dict | None,
-                    confidence: str, n_sources: int, t0: float) -> None:
+                    confidence: str, n_sources: int, t0: float,
+                    timings: dict | None = None) -> None:
+    # t0 is a time.perf_counter() reading (a duration, not a timestamp); "at"
+    # stays on the wall clock because it IS a timestamp.
+    #
+    # `docs` and `seeds` are id LISTS the caller chose, not knobs — keeping
+    # them would fill the rolling history with hashes nobody can read.
     knobs = {k: v for k, v in body.model_dump().items()
-             if v is not None and k not in ("q", "include_text", "max_sources")}
+             if v is not None and k not in ("q", "include_text", "max_sources",
+                                            "docs", "seeds")}
     _HISTORY.appendleft({
         "at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "endpoint": endpoint,
@@ -103,7 +113,8 @@ def _record_history(endpoint: str, body, retrieval: dict | None,
         "retrieval": retrieval or {},
         "confidence": confidence,
         "sources": n_sources,
-        "ms": int((time.time() - t0) * 1000),
+        "ms": int((time.perf_counter() - t0) * 1000),
+        "timings": timings or {},
     })
 
 
@@ -186,16 +197,50 @@ class QueryIn(BaseModel):
     hype: bool | None = None
     # Rerank method for this call: cross_encoder (local semantic model) | http
     # (configured external /v1/rerank service) | lexical (model-free) | none
-    # (fused order as-is).
+    # (fused order as-is) | laya (EXPERIMENTAL fine-tuned scorer: refused unless
+    # retrieval.laya.enabled, never swapped for another method).
     rerank: str | None = None
     # Ranking CRITERION for this call, in plain language: "prefer worked
     # procedures", "prefer primary sources over summaries". Applied only to the
     # text the reranker scores against, after retrieval has already built the
     # candidate pool — so it reweights results and can never remove any.
-    # Ignored by rerank=lexical|none (see the retrieval echo, which reports
+    # Ignored by rerank=lexical|none|laya (see the retrieval echo, which reports
     # whether it was actually applied). Pass "" to disable a configured
     # instruction for this call only.
     rerank_instruction: str | None = Field(default=None, max_length=2000)
+    # Per-lane RRF fusion weights, e.g. {"sparse": 1.5, "hype": 0.5}. Merged
+    # over the configured retrieval.lane_weights and over the preset's, lane
+    # by lane — so setting one lane leaves the other seven where they were.
+    # Every lane defaults to 1.0. A weight of 0 keeps the lane's candidates in
+    # the pool for the reranker but drops its contribution to the fused order.
+    # Lanes: dense, sparse, dense_code, sparse_code, dense_scope, sparse_scope,
+    # omnisearch, hype. An unknown lane name is an error, not a no-op.
+    lane_weights: dict[str, float] | None = None
+    # Restrict this call to these lanes (see retrieve()): lanes outside the
+    # list are not run at all. Restricts only — a conditional lane (code,
+    # scope, omnisearch, hype) still needs its own trigger. Unknown or empty
+    # is an error.
+    lanes: list[str] | None = None
+    # Force the course/domain/tag metadata boost on or off for this call.
+    metadata_boost: bool | None = None
+    # Post-rerank relevance gate for this call: chunks scoring below
+    # gate_threshold are dropped BEFORE generation (and before parent/neighbor
+    # expansion), and when none survive the answer is the fixed "nothing
+    # relevant" reply with no LLM call. Unset = retrieval.relevance_gate.enabled.
+    # The default scorer reads the reranker's own scores, so rerank=none is an
+    # error here, not a pass-through.
+    gate: bool | None = None
+    # The gate's cutoff, in the scorer's own units (rerank_score = the active
+    # reranker's scale, e.g. cross-encoder logits). Beats the configured one,
+    # and sent alone it turns the gate on for this call. Finite numbers only:
+    # inf or nan would keep or drop everything.
+    gate_threshold: float | None = Field(default=None, allow_inf_nan=False)
+    # The gate's scorer for this call: rerank_score | laya (EXPERIMENTAL, needs
+    # retrieval.laya.enabled). Unset = retrieval.relevance_gate.scorer. A scorer
+    # other than the configured one needs its own gate_threshold (thresholds
+    # are in the scorer's units); sent alone it turns the gate on. An unknown
+    # name is an error, not a no-op.
+    gate_scorer: str | None = None
     # true = skip generation entirely; the response carries the reranked chunks
     # (with labels + text) and confidence "RETRIEVE_ONLY". No LLM involved, so
     # this works even when the generation proxy is down — the calling agent can
@@ -229,17 +274,43 @@ class SearchIn(BaseModel):
     parent_context: bool | None = None
     neighbor_context: bool | None = None
     hype: bool | None = None
-    # Rerank method for this call: cross_encoder | http | lexical | none.
+    # Rerank method for this call: cross_encoder | http | lexical | none | laya
+    # (EXPERIMENTAL: refused unless retrieval.laya.enabled).
     # Unset = the configured retrieval.rerank_mode (cross_encoder).
     rerank: str | None = None
     # Ranking CRITERION for this call, in plain language: "prefer worked
     # procedures", "prefer primary sources over summaries". Applied only to the
     # text the reranker scores against, after retrieval has already built the
     # candidate pool — so it reweights results and can never remove any.
-    # Ignored by rerank=lexical|none (see the retrieval echo, which reports
+    # Ignored by rerank=lexical|none|laya (see the retrieval echo, which reports
     # whether it was actually applied). Pass "" to disable a configured
     # instruction for this call only.
     rerank_instruction: str | None = Field(default=None, max_length=2000)
+    # Per-lane RRF fusion weights, e.g. {"sparse": 1.5, "hype": 0.5}. Merged
+    # over the configured retrieval.lane_weights and over the preset's, lane
+    # by lane — so setting one lane leaves the other seven where they were.
+    # Every lane defaults to 1.0. A weight of 0 keeps the lane's candidates in
+    # the pool for the reranker but drops its contribution to the fused order.
+    # Lanes: dense, sparse, dense_code, sparse_code, dense_scope, sparse_scope,
+    # omnisearch, hype. An unknown lane name is an error, not a no-op.
+    lane_weights: dict[str, float] | None = None
+    # Restrict this call to these lanes (see retrieve()): lanes outside the
+    # list are not run at all. Restricts only — a conditional lane (code,
+    # scope, omnisearch, hype) still needs its own trigger. Unknown or empty
+    # is an error.
+    lanes: list[str] | None = None
+    # Force the course/domain/tag metadata boost on or off for this call.
+    metadata_boost: bool | None = None
+    # Post-rerank relevance gate, as on /query: drops chunks scoring below
+    # gate_threshold before they are returned (and before parent/neighbor
+    # expansion). Unset = retrieval.relevance_gate.enabled. The default scorer
+    # reads the reranker's own scores, so rerank=none is an error here.
+    gate: bool | None = None
+    # The gate's cutoff in the scorer's own units; sent alone it turns the gate
+    # on for this call. Finite numbers only.
+    gate_threshold: float | None = Field(default=None, allow_inf_nan=False)
+    # The gate's scorer for this call (rerank_score | laya), as on /query.
+    gate_scorer: str | None = None
     include_text: int = Field(default=1200, ge=0, le=6000)
     max_sources: int | None = Field(default=None, ge=1)
 
@@ -294,6 +365,14 @@ class CompareBranchIn(BaseModel):
     hype: bool | None = None
     rerank: str | None = None
     rerank_instruction: str | None = Field(default=None, max_length=2000)
+    lane_weights: dict[str, float] | None = None
+    lanes: list[str] | None = None
+    metadata_boost: bool | None = None
+    # The relevance gate (see QueryIn). Part of the retrieval key, so branches
+    # that differ only by gate do not share one evidence set.
+    gate: bool | None = None
+    gate_threshold: float | None = Field(default=None, allow_inf_nan=False)
+    gate_scorer: str | None = None
     provider: str | None = None
     model: str | None = None
 
@@ -316,6 +395,38 @@ class CompareIn(BaseModel):
     include_text: int = Field(default=900, ge=0, le=6000)
     max_sources: int | None = Field(default=None, ge=1)
     max_tokens: int | None = Field(default=None, ge=64, le=8192)
+
+
+class GraphExpandIn(BaseModel):
+    """Graph RAG traversal. This is human-in-the-loop option (c): retrieval
+    with NO generation at all."""
+    # Exactly one of q / seeds. Supplying both is a 400, not a silent
+    # precedence rule that would quietly ignore half the request.
+    q: str | None = None
+    seeds: list[str] | None = Field(default=None, max_length=50)
+    depth: int | None = Field(default=None, ge=0, le=5)
+    max_per_hop: int | None = Field(default=None, ge=1, le=50)
+    max_total: int | None = Field(default=None, ge=1, le=500)
+    seed_top_k: int | None = Field(default=None, ge=1, le=50)
+    # Reranker used to ORDER query-seeded seeds. Ignored when `seeds` is
+    # given — those already carry the order the caller saw.
+    rerank: str | None = None
+    include_text: int = Field(default=1200, ge=0, le=6000)
+
+
+class AnswerIn(BaseModel):
+    """Generation over a CALLER-SUPPLIED document set — human-in-the-loop
+    options (a) and (b). (a) merge: pass the previous result's ids plus the
+    graph's. (b) graph only: pass just the graph's. Same call, different list,
+    so the server holds no session state and the console owns "the previous
+    stack"."""
+    q: str = Field(min_length=1)
+    docs: list[str] = Field(min_length=1, max_length=100)
+    provider: str | None = None
+    model: str | None = None
+    max_tokens: int | None = Field(default=None, ge=64, le=8192)
+    include_text: int | None = Field(default=None, ge=0, le=6000)
+    max_sources: int | None = Field(default=None, ge=1)
 
 
 class ConfigIn(BaseModel):
@@ -413,10 +524,15 @@ def _sources_out(
     return out
 
 
+# EVERY per-call retrieval knob must be listed here. This tuple is hand
+# enumerated, so a field added to the models above and forgotten here is
+# accepted by the API, echoed back, and then silently ignored — which is
+# exactly how rerank_instruction was lost for a whole release.
 _RETRIEVAL_FIELDS = (
     "preset", "auto_preset", "top_k", "dense_top_k", "sparse_top_k",
     "hyde", "omnisearch", "parent_context", "neighbor_context", "hype",
-    "rerank", "rerank_instruction",
+    "rerank", "rerank_instruction", "lane_weights", "lanes", "metadata_boost",
+    "gate", "gate_threshold", "gate_scorer",
 )
 
 
@@ -678,7 +794,7 @@ def set_config(body: ConfigIn) -> dict:
 @app.post("/query", response_model=QueryOut)
 def query(body: QueryIn) -> QueryOut:
     rag = _rag()
-    t0 = time.time()
+    t0 = time.perf_counter()
 
     # ---- retrieval-only fast path: no LLM, works with the proxy down ----
     if body.retrieve_only:
@@ -696,7 +812,9 @@ def query(body: QueryIn) -> QueryOut:
                 confidence="ERROR", citations=[], sources=[])
         inc = 1200 if body.include_text is None else body.include_text
         _record_history("/query(retrieve_only)", body, info,
-                        "RETRIEVE_ONLY", len(docs), t0)
+                        "RETRIEVE_ONLY", len(docs), t0,
+                        timings={"retrieval": info.get("timings"),
+                                 "generation": None})
         return QueryOut(
             answer="",
             confidence="RETRIEVE_ONLY",
@@ -785,7 +903,13 @@ def query(body: QueryIn) -> QueryOut:
 
     citations = [CitationOut(n=c.number, label=c.source_label) for c in ans.citations]
     _record_history("/query", body, ans.retrieval, ans.confidence,
-                    len(ans.sources), t0)
+                    len(ans.sources), t0,
+                    timings={"retrieval": info.get("timings"),
+                             "generation": ans.timings})
+    # The generation call's own stages (generate / parse / verify); retrieval's
+    # are in retrieval["timings"].
+    generation = _generation_out(generator, ans.usage)
+    generation["timings"] = ans.timings or {}
     return QueryOut(
         answer=ans.text,
         confidence=ans.confidence,
@@ -793,7 +917,7 @@ def query(body: QueryIn) -> QueryOut:
         sources=_sources_out(ans.sources, ans.citations,
                              body.include_text or 0, body.max_sources),
         retrieval=ans.retrieval or {},
-        generation=_generation_out(generator, ans.usage),
+        generation=generation,
     )
 
 
@@ -806,7 +930,7 @@ def search(body: SearchIn) -> dict:
     and reason over them directly. Zero dependency on the generation proxy.
     """
     rag = _rag()
-    t0 = time.time()
+    t0 = time.perf_counter()
     try:
         docs, info = rag.search(body.q, **_retrieval_kwargs(body))
     except (KeyError, ValueError) as e:
@@ -817,12 +941,196 @@ def search(body: SearchIn) -> dict:
     except Exception as e:
         return {"error": f"Retrieval failed ({type(e).__name__}: {e})",
                 "results": [], "retrieval": {}}
-    _record_history("/search", body, info, "RETRIEVE_ONLY", len(docs), t0)
+    _record_history("/search", body, info, "RETRIEVE_ONLY", len(docs), t0,
+                    timings=info.get("timings"))
     results = _sources_out(docs, [], body.include_text, body.max_sources)
     return {
         "results": [r.model_dump() for r in results],
         "retrieval": info,
     }
+
+
+def _graph() -> Any:
+    """The graph expander, or a 503 that says why there isn't one."""
+    graph = getattr(_rag(), "graph", None)
+    if graph is None:
+        raise HTTPException(
+            status_code=503,
+            detail="graph mode is not available on this pipeline build")
+    if not graph.enabled:
+        raise HTTPException(
+            status_code=503,
+            detail="graph mode is EXPERIMENTAL and switched off — turn it on "
+                   "in the management console under Settings > Experimental "
+                   "features, or set graph.enabled: true in config.yaml, then "
+                   "restart this API. /query and /search are unaffected")
+    return graph
+
+
+@app.post("/graph/expand")
+def graph_expand(body: GraphExpandIn) -> dict:
+    """
+    Walk the canvas graph. NO LLM is involved, so this works with the
+    generation proxy down — human-in-the-loop option (c), raw graph retrieval.
+
+    Seed EITHER from a query (a search restricted to graph.file_type) OR from
+    explicit chunk ids taken from a previous result. The response carries the
+    nodes, the tree that was walked (parent -> child with each edge's label
+    and direction), the edges that loop back onto already-reached nodes, and
+    which cap — if any — stopped the walk.
+    """
+    graph = _graph()
+    t0 = time.perf_counter()
+    has_q = bool(body.q and body.q.strip())
+    has_seeds = bool(body.seeds)
+    if has_q == has_seeds:
+        raise HTTPException(
+            status_code=400,
+            detail="supply exactly one of `q` (search for seeds) or `seeds` "
+                   "(chunk ids from a previous result) — "
+                   + ("both were given" if has_q else "neither was given"))
+
+    missing: list[str] = []
+    try:
+        if has_q:
+            seeds = graph.seed_from_query(
+                body.q.strip(), seed_top_k=body.seed_top_k, rerank=body.rerank)
+        else:
+            seeds, missing = graph.seed_from_ids([str(s) for s in body.seeds])
+            if missing:
+                # A seed the index does not hold is a caller error worth
+                # naming, not a silently smaller traversal.
+                raise HTTPException(
+                    status_code=400,
+                    detail={"error": "unknown seed chunk id(s)",
+                            "unknown": missing})
+    except HTTPException:
+        raise
+    except RerankerExecutionError as e:
+        return {"error": f"Reranking failed: {e}", "nodes": [], "tree": []}
+    except Exception as e:
+        return {"error": f"Seeding failed ({type(e).__name__}: {e})",
+                "nodes": [], "tree": []}
+
+    if not seeds:
+        return {"nodes": [], "tree": [], "cross_edges": [],
+                "stats": {"seeds": 0, "nodes": 0, "edges": 0,
+                          "truncated_at": None},
+                "note": f"no {graph.file_type} chunks matched — this mode "
+                        f"only traverses the {graph.file_type} lane"}
+
+    try:
+        result = graph.expand(seeds, depth=body.depth,
+                              max_per_hop=body.max_per_hop,
+                              max_total=body.max_total)
+    except Exception as e:
+        return {"error": f"Traversal failed ({type(e).__name__}: {e})",
+                "nodes": [], "tree": []}
+
+    cap = body.include_text
+    for node in result["nodes"]:
+        text = (node.get("text") or "").strip()
+        node["text"] = (text if len(text) <= cap
+                        else text[: cap - 1].rstrip() + "…") if cap else None
+    result["q"] = body.q
+    result["seed_ids"] = [d.id for d in seeds]
+    result["seeded_by"] = "query" if has_q else "ids"
+    result["file_type"] = graph.file_type
+    result["ms"] = int((time.perf_counter() - t0) * 1000)
+    if not result["stats"]["edges_labelled"]:
+        result["note"] = (
+            "some chunks predate the aligned canvas_edges metadata, so their "
+            "edges came back UNLABELLED (direction '--'). Re-run "
+            "`main.py ingest-canvas` and append to restore labels.")
+    return result
+
+
+@app.post("/answer", response_model=QueryOut)
+def answer(body: AnswerIn) -> QueryOut:
+    """
+    Grounded generation over a document set the CALLER chose — the other half
+    of graph mode's human-in-the-loop fork. `docs` is a list of chunk ids;
+    merging a previous result with a traversal is simply both id lists.
+
+    Retrieval does not run. Which chunks ground the answer is entirely the
+    caller's decision, which is the point.
+    """
+    rag = _rag()
+    t0 = time.perf_counter()
+    ids = [str(d) for d in dict.fromkeys(body.docs)]
+    unfetchable = [i for i in ids if i.startswith(("live:", "parent:"))]
+    if unfetchable:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "these evidence ids cannot ground an answer: "
+                             "live excerpts are not indexed records, and "
+                             "parent sections are served by GET /chunks",
+                    "ids": unfetchable})
+    try:
+        rows = rag.retriever._get_collection().get(
+            ids=ids, include=["documents", "metadatas"])
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Chunk store unavailable ({type(e).__name__}: {e})") from e
+    by_id = {str(i): (t, m) for i, t, m in
+             zip(rows.get("ids") or [], rows.get("documents") or [],
+                 rows.get("metadatas") or [])}
+    missing = [i for i in ids if i not in by_id]
+    if missing:
+        # Never a silently smaller context: an answer grounded on fewer
+        # documents than the caller chose is a different answer.
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "unknown chunk id(s) — no answer was generated",
+                    "unknown": missing})
+    docs = [RetrievedDoc(id=i, text=by_id[i][0] or "", metadata=by_id[i][1] or {})
+            for i in ids]
+    # Built BEFORE generation so a generation failure still reports what
+    # grounded the attempt — an error payload with an empty echo reads as if
+    # nothing was chosen, when in fact the caller chose everything.
+    info = {"mode": "caller_supplied_docs", "docs": len(docs),
+            "retrieval_ran": False}
+
+    try:
+        generator = _generator_for(body.provider, body.model)
+    except Exception as e:
+        return QueryOut(
+            answer=f"Generation configuration failed: {e}",
+            confidence="ERROR", citations=[],
+            sources=_sources_out(docs, [], body.include_text or 0,
+                                 body.max_sources),
+            retrieval=info,
+            generation={"backend": body.provider, "model": body.model,
+                        "error": str(e)})
+    try:
+        ans = generator.generate(body.q, docs, max_tokens=body.max_tokens)
+    except Exception as e:
+        backend = getattr(generator.llm, "backend", generator.llm.provider)
+        return QueryOut(
+            answer=(f"Generation backend {backend!r} (model "
+                    f"{generator.llm.model!r}) failed — {type(e).__name__}: {e}. "
+                    "Tip: POST /graph/expand still returns the documents "
+                    "without any LLM."),
+            confidence="ERROR", citations=[],
+            sources=_sources_out(docs, [], body.include_text or 0,
+                                 body.max_sources),
+            retrieval=info,
+            generation={"backend": backend, "model": generator.llm.model,
+                        "error": f"{type(e).__name__}: {e}"})
+
+    ans.retrieval = info
+    _record_history("/answer", body, info, ans.confidence, len(ans.sources), t0)
+    return QueryOut(
+        answer=ans.text,
+        confidence=ans.confidence,
+        citations=[CitationOut(n=c.number, label=c.source_label)
+                   for c in ans.citations],
+        sources=_sources_out(ans.sources, ans.citations,
+                             body.include_text or 0, body.max_sources),
+        retrieval=info,
+        generation=_generation_out(generator, ans.usage),
+    )
 
 
 @app.get("/providers")
@@ -913,7 +1221,7 @@ def compare(body: CompareIn) -> dict:
                    f"fan-out")
 
     rag = _rag()
-    t0 = time.time()
+    t0 = time.perf_counter()
     evidence: dict[str, tuple[list, dict]] = {}
     out: list[dict[str, Any]] = []
     for branch in body.branches:
@@ -1026,7 +1334,7 @@ def compare(body: CompareIn) -> dict:
         "mode": body.mode,
         "branches": out,
         "comparison": summary,
-        "ms": int((time.time() - t0) * 1000),
+        "ms": int((time.perf_counter() - t0) * 1000),
     }
 
 
@@ -1191,6 +1499,10 @@ def schema() -> dict:
     """
     rag = _rag()
     rerank_choices = list(RERANK_MODES)
+    graph_lane = getattr(getattr(rag, "graph", None), "file_type", "canvas")
+    graph_on = bool(getattr(getattr(rag, "graph", None), "enabled", False))
+    # The reranker only holds a Laya scorer when retrieval.laya.enabled is on.
+    laya_on = getattr(getattr(rag, "reranker", None), "laya_scorer", None) is not None
     retrieval_body = {
         "q": "str",
         "top_k": "1-50? (reranked chunks returned)",
@@ -1203,12 +1515,67 @@ def schema() -> dict:
         "parent_context": "bool? (swap note chunks for full sections)",
         "neighbor_context": "bool? (add adjacent-page PDF context)",
         "hype": "bool? (question-matching lane; needs build_hype.py)",
-        "rerank": f"{'|'.join(rerank_choices)}? (per-call method)",
+        "rerank": f"{'|'.join(rerank_choices)}? (per-call method; laya is "
+                  "EXPERIMENTAL and refused unless retrieval.laya.enabled)",
         "rerank_instruction": "str? (<=2000 chars) ranking criterion in plain "
                               "language, applied to the text the reranker "
                               "scores against. Reweights the candidate pool; "
-                              "never filters it. Ignored by rerank=lexical|none. "
+                              "never filters it. Ignored by "
+                              "rerank=lexical|none|laya. "
                               "\"\" disables a configured instruction for one call",
+        "lane_weights": {
+            "purpose": "per-lane RRF fusion weights; fused score is "
+                       "sum(weight(lane) / (rrf_k + rank_in_lane))",
+            "lanes": list(LANES),
+            "default": "1.0 for every lane (plain unweighted RRF)",
+            "merging": "merges LANE BY LANE over the preset's map and the "
+                       "configured retrieval.lane_weights, so setting one "
+                       "lane leaves the others untouched",
+            "zero": "keeps the lane's candidates in the pool for the reranker "
+                    "but drops its contribution to the fused order; it does "
+                    "not disable the lane",
+            "errors": "an unknown lane name or a negative weight comes back "
+                      "as HTTP 200 with an `error` that names it (on /query: "
+                      "confidence ERROR, the same text as the answer); a "
+                      "non-number fails request validation with HTTP 422. "
+                      "Never a silent no-op",
+        },
+        "lanes": {
+            "purpose": "restrict this call to a subset of the lanes; a lane "
+                       "outside the list is not run at all (weights can only "
+                       "down-weight a lane, never remove it)",
+            "lanes": list(LANES),
+            "default": "null — every lane that applies runs, as before",
+            "restricts_only": "never forces a conditional lane on: "
+                              "dense_code/sparse_code still need the code "
+                              "preset, dense_scope/sparse_scope a detected "
+                              "scope, omnisearch and hype their own switch. "
+                              "Naming a lane with no trigger runs nothing",
+            "embedding": "no query embedding is computed when no dense, "
+                         "dense_code, dense_scope or hype lane is left",
+            "errors": "an empty list or an unknown lane name is an error that "
+                      "names the problem, never a silent no-op; the echo's "
+                      "lanes_requested and lanes_run show what ran",
+        },
+        "metadata_boost": "bool? (force the course/domain/tag metadata boost "
+                          "on or off for this call; unset follows "
+                          "retrieval.metadata_boost)",
+        "gate": "bool? (force the post-rerank relevance gate on or off for this "
+                "call; unset follows retrieval.relevance_gate.enabled. Chunks "
+                "scoring below gate_threshold are dropped before generation, "
+                "and when none survive /query abstains with the fixed 'nothing "
+                "relevant' answer and no LLM call. The rerank_score scorer "
+                "needs a scoring rerank mode: rerank=none is an error, not a "
+                "pass-through. The echo's `gate` reports what it did)",
+        "gate_threshold": "float? (finite; the gate's cutoff in the scorer's "
+                          "own units, e.g. the active reranker's score scale. "
+                          "Beats retrieval.relevance_gate.threshold, and sent "
+                          "alone it turns the gate on for this call)",
+        "gate_scorer": "str? (rerank_score | laya — the gate's scorer for this "
+                       "call; unset follows retrieval.relevance_gate.scorer. "
+                       "laya is EXPERIMENTAL and needs retrieval.laya.enabled. "
+                       "A scorer other than the configured one needs its own "
+                       "gate_threshold; an unknown name is an error)",
     }
     return {
         "service": QUERY_SERVICE,
@@ -1243,6 +1610,54 @@ def schema() -> dict:
                 "response": "stable evidence ids + origin ids, lookup support, "
                             "labels/text/scores, and an "
                             "effective retrieval/provenance echo",
+            },
+            "POST /graph/expand": {
+                "experimental": True,
+                "available": graph_on,
+                "purpose": "Graph RAG mode — walk the hand-drawn edges of the "
+                           f"{graph_lane} lane. "
+                           "NO LLM: works with the generation proxy down. This "
+                           "is the human-in-the-loop fork's option (c), raw "
+                           "graph retrieval",
+                "body": {
+                    "q": "str? — seed by searching the graph lane",
+                    "seeds": "list[str]? — seed from chunk ids of a previous "
+                             "result. Exactly ONE of q/seeds; both is a 400",
+                    "depth": "0-5? hops from the seed set",
+                    "max_per_hop": "1-50? neighbours followed per node",
+                    "max_total": "1-500? nodes in one traversal, seeds included",
+                    "seed_top_k": "1-50? seeds taken from a query-seeded run",
+                    "rerank": f"{'|'.join(rerank_choices)}? — orders "
+                              "query-seeded seeds; ignored when seeds are given",
+                    "include_text": "0-6000 chars (default 1200)",
+                },
+                "response": "nodes (with depth + graph metadata), tree "
+                            "(parent->child with each edge's label and "
+                            "direction), cross_edges (edges back onto nodes "
+                            "already reached — canvas graphs are cyclic), and "
+                            "stats.truncated_at naming the cap that stopped "
+                            "the walk",
+            },
+            "POST /answer": {
+                # /answer itself is not gated — it needs no graph — but it is
+                # only reachable as a fork of a traversal, so a caller that
+                # cannot traverse has nothing to feed it.
+                "experimental": True,
+                "available": True,
+                "purpose": "grounded generation over a CALLER-SUPPLIED doc "
+                           "set — no retrieval runs. The other half of graph "
+                           "mode's fork: (a) merge = previous ids + graph ids, "
+                           "(b) graph only = just the graph ids. Same call",
+                "body": {
+                    "q": "str",
+                    "docs": "list[str] (1-100 chunk ids). An unknown id is a "
+                            "400 — never a silently smaller context",
+                    "provider": "str?", "model": "str?",
+                    "max_tokens": "64-8192?",
+                    "include_text": "0-6000?", "max_sources": "int?",
+                },
+                "response": "the /query shape: answer, citations, sources, "
+                            "generation provenance",
             },
             "POST /query": {
                 "purpose": "full RAG: retrieve + grounded, cited answer",
@@ -1311,6 +1726,44 @@ def schema() -> dict:
             "sources": "stable evidence ids support overlap comparison; "
                        "origin_id preserves the indexed child and "
                        "lookup_available gates GET /chunks",
+        },
+        # Which endpoints are NOT part of the stable contract, and whether
+        # each is switched on right now. A 503 already explains itself when a
+        # disabled endpoint is called; this is so an agent can plan without
+        # calling it first, and so "experimental" is discoverable rather than
+        # implicit.
+        "experimental": {
+            "purpose": "features that are built and tested but not yet part of "
+                       "the default workflow. Flagged OFF by default; the "
+                       "console's Settings > Experimental features panel is "
+                       "the switch, and each flag lives in config.yaml",
+            "features": {
+                "graph_rag": {
+                    "config_key": "graph.enabled",
+                    "enabled": graph_on,
+                    "endpoints": ["POST /graph/expand", "POST /answer"],
+                    "unmeasured": "traversal has never been scored against "
+                                  "the golden set — the cost is known, the "
+                                  "retrieval benefit is not",
+                    "when_off": "POST /graph/expand answers 503 with the "
+                                "config key to set; /query and /search are "
+                                "unaffected and the "
+                                f"{graph_lane} lane still competes in "
+                                "ordinary retrieval",
+                },
+                "laya_rerank": {
+                    "config_key": "retrieval.laya.enabled",
+                    "enabled": laya_on,
+                    "endpoints": ["POST /search", "POST /query", "POST /compare"],
+                    "unmeasured": "it has never been scored against the eval "
+                                  "sets, so whether it ranks better than the "
+                                  "default reranker is not known",
+                    "when_off": "rerank=laya (and gate_scorer=laya) is refused "
+                                "with an error naming retrieval.laya.enabled, "
+                                "never answered by another reranker; every "
+                                "other rerank mode is unaffected",
+                },
+            },
         },
         "compare_branch_limits": {"min": _BRANCH_MIN, "max": _BRANCH_MAX,
                                   "max_query_mode": _BRANCH_MAX_QUERY},

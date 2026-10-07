@@ -21,8 +21,9 @@ flowchart TD
     S --> RRF
     SL --> RRF
     CL --> RRF
-    RRF --> RR["Configured rerank policy<br/>cross-encoder / HTTP / lexical / none"]
-    RR --> EX["Optional small-to-big<br/>context expansion"]
+    RRF --> RR["Configured rerank policy<br/>cross-encoder / HTTP / lexical / none<br/>(experimental: Laya)"]
+    RR --> GT["Optional relevance gate<br/>drops weak chunks · abstains if none pass"]
+    GT --> EX["Optional small-to-big<br/>context expansion"]
     EX --> G["Grounded generation<br/>answer + [n] citations + confidence"]
     G --> V["Optional second-pass<br/>citation verification"]
 ```
@@ -63,10 +64,10 @@ label — `taxonomy.label`, which defaults to `course` but is just as happily
     normalisation across incompatible scales, and $k=60$ damps the influence of any one
     lane's top ranks so a single list can't dominate.
 
-!!! info "Why fusion is unweighted"
-    Per-lane weights (`w_ℓ / (k + r)`) were evaluated and **deliberately skipped**. The
-    downstream cross-encoder already decides final order once the right chunks are in
-    the pool — weighting only re-introduces a tuning burden for gains inside the noise.
+!!! info "Lane weights are opt-in"
+    Each lane's term can be scaled — `w_ℓ / (k + r)` — with `retrieval.lane_weights`, per
+    preset or per call. Every weight defaults to `1.0`, so an untouched config is plain
+    RRF. See [Lane weights](api.md#lane-weights).
 
 ## Scope routing
 
@@ -100,13 +101,16 @@ Concept queries are untouched; code queries get their own material back at the t
 
 ## Reranking and context expansion
 
-The configured rerank policy is one of four deliberately different lanes:
+The configured rerank policy is one of several deliberately different lanes:
 
 - **`cross_encoder`** reads each query/candidate pair in process.
 - **`http`** delegates the same candidates to a configured OpenAI-style
   `/v1/rerank` service.
 - **`lexical`** measures model-free query-term coverage.
 - **`none`** preserves the fused RRF order for a no-rerank baseline.
+- **`laya`** (experimental, off by default) scores each passage with a fine-tuned Laya
+  checkpoint. It is refused unless `retrieval.laya.enabled`, and never replaced by
+  another mode.
 
 Known in-process models carry their context limits in the reranker registry.
 `BAAI/bge-reranker-base`, for example, accepts at most 512 input tokens; an
@@ -114,7 +118,13 @@ over-length configuration is rejected explicitly instead of failing later with a
 opaque tensor-index error. Runtime model failures are returned as reranking errors,
 distinct from generation-provider failures.
 
-After reranking, an optional **small-to-big** step expands each survivor with its
+After reranking, an optional **relevance gate** (off by default) drops chunks scoring below a
+threshold and, when none pass, makes the answer abstain with a fixed "nothing relevant" reply
+and no LLM call. It judges the original question, reads either the active reranker's own score
+or the experimental Laya scorer's probability, and runs before the next step; see
+[Relevance gate](api.md#relevance-gate).
+
+After that, an optional **small-to-big** step expands each survivor with its
 surrounding parent context before generation, trading prompt length for completeness.
 
 ## Grounded generation

@@ -75,11 +75,12 @@ Add other source families and append them (each writes its own JSONL, and `index
 ```bash
 python main.py ingest-pdfs                        # -> data/pdf_chunks.jsonl
 python main.py ingest-notebooks                   # -> data/ipynb_chunks.jsonl
-python main.py ingest-code --include-path "src"   # -> data/code_chunks.jsonl
+# a SCOPED run replaces whatever file it writes, so it gets its own output:
+python main.py ingest-code --include-path "src" --output data/src_code_chunks.jsonl
 
 python main.py index --append data/pdf_chunks.jsonl
 python main.py index --append data/ipynb_chunks.jsonl
-python main.py index --append data/code_chunks.jsonl
+python main.py index --append data/src_code_chunks.jsonl
 ```
 
 !!! note "Chunking strategy"

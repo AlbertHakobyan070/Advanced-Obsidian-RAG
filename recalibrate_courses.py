@@ -46,6 +46,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from src.utils.chroma_client import persistent_client
 from src.utils.config_loader import load_config
 from src.utils.logger import get_logger
 from src.ingestion.obsidian_parser import detect_course_from_path
@@ -84,8 +85,7 @@ def main():
     collection = None
     present_ids: set[str] = set()
     if not args.dry_run:
-        import chromadb
-        client = chromadb.PersistentClient(path=str(chroma_dir))
+        client = persistent_client(chroma_dir)
         collection = client.get_collection(collection_name)
         # Pre-fetch existing ids so we never call update() on a missing id.
         got = collection.get(include=[])  # ids always returned

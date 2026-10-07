@@ -6,21 +6,36 @@ embedding. Handles:
   - Daily notes with multiple back-to-back course lectures (heading-split)
   - Course-specific markdown notes (section-split)
   - Frontmatter (YAML) metadata extraction
-  - Wikilink / backlink resolution
+  - Wikilink extraction (recorded in metadata; links are not resolved)
   - Tag extraction and propagation
   - Hierarchical context inheritance (parent headings cascade into children)
 
 Output: List[Document] where each Document carries text + rich metadata
 suitable for ChromaDB / BM25 dual indexing.
 
+This module is also the shared base of the pdf, ipynb, code and canvas
+loaders, which import from it: the course/domain maps (canvas also takes
+detect_course_from_path), the chunk splitters, clean_text and
+build_context_header, the vault walker (iter_vault_files) and
+apply_forced_meta. configure_taxonomy is applied from config_loader. It
+imports nothing from src/ at import time (main() imports config_loader
+lazily), so any module can depend on it without a cycle.
+
 Usage:
     parser = ObsidianParser("/path/to/vault")
     documents = parser.parse_all()
     # Each document has .text, .metadata (dict), .doc_id (deterministic hash)
+
+The CLI (`python -m src.ingestion.obsidian_parser`, main() below) reads
+config.yaml through load_config() for the same two things main.py's ingest-md
+takes from it: the chunking strategy (parser.chunking; --chunking overrides
+it) and the `taxonomy:` block. Chunk sizes are NOT read from the config:
+--max-chunk / --min-chunk / --overlap default to the constants above.
 """
 
 import hashlib
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass, field, asdict
@@ -37,7 +52,13 @@ import yaml
 
 @dataclass
 class Document:
-    """A single chunk ready for embedding + vector store insertion."""
+    """A single chunk ready for embedding + vector store insertion.
+
+    doc_id = sha256("<source_file>::<first 500 chars of text>")[:16]. The text
+    starts with the context header (course, date, heading path), so a
+    taxonomy or heading change re-parses into NEW ids even when the note body
+    did not change — new vectors on the next append, with the old ones left
+    behind until deleted, rather than an in-place update."""
     text: str
     metadata: dict = field(default_factory=dict)
     doc_id: str = ""
@@ -329,8 +350,14 @@ def configure_taxonomy(cfg) -> None:
 
 
 def detect_course_from_path(parts: list[str]) -> dict:
-    """Detect course from path components. Single source of truth used by the
-    PDF and notebook loaders (and the recalibration pass).
+    """Detect course from path components (pass VAULT-RELATIVE parts).
+
+    Callers: canvas_loader, recalibrate_courses.py and the Omnisearch lane.
+    The pdf, ipynb and code loaders do NOT call it — each keeps its own
+    _detect_course over the same maps running steps 1-2 only (no keyword
+    fallback, no detect_from_path switch) — and ObsidianParser uses its own
+    _detect_course_from_path. So the MAPS are the single source of truth; the
+    detection logic exists in five places.
 
     Order:
       1. Exact FOLDER_COURSE_MAP (root->leaf). Only leaf course folders are
@@ -412,8 +439,15 @@ class HeadingNode:
 
 def build_heading_tree(body: str) -> list[HeadingNode]:
     """
-    Parse markdown body into a tree of HeadingNode.
-    Top-level content (before any heading) becomes a level-0 node.
+    Parse markdown body into a FLAT, document-ordered list of HeadingNode —
+    `children` is never filled in; section_spans / section_ancestors recover
+    the hierarchy from `level`. Top-level content (before any heading)
+    becomes a level-0 node.
+
+    Known limit: the heading regex does not know about code fences, so a
+    line like "# load the data" inside a ```python block starts a new section
+    and splits the code (verified 2026-09-24). extract_tags() skips fences;
+    this function does not.
     """
     heading_re = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
     lines = body.split("\n")
@@ -662,14 +696,22 @@ DAILY_NOTE_PATTERNS = [
 ]
 
 
-def is_daily_note(filepath: Path) -> bool:
-    """Detect if a file is a daily note based on its filename."""
+def is_daily_note(filepath: Path, vault_root: Optional[Path] = None) -> bool:
+    """Detect if a file is a daily note from its filename, or from a
+    'daily' / 'journal'-style folder in its path.
+
+    Pass `vault_root` and the folder check reads only the path BELOW it, so a
+    vault stored under a folder named e.g. "journal" is not made of daily
+    notes. Without it `filepath` is judged exactly as given: hand it a
+    vault-relative path, or accept that its ancestors are read too. A file
+    outside `vault_root` raises ValueError."""
     stem = filepath.stem
     for pattern in DAILY_NOTE_PATTERNS:
         if re.match(pattern, stem):
             return True
     # Also check if it's inside a "Daily Notes" or "daily" folder
-    parts = [p.lower() for p in filepath.parts]
+    inside = filepath if vault_root is None else filepath.relative_to(vault_root)
+    parts = [p.lower() for p in inside.parts]
     return any(d in parts for d in ["daily notes", "daily", "dailies", "journal",
                                      "daily_study_notes", "09 - daily_study_notes"])
 
@@ -710,6 +752,46 @@ def extract_tags(text: str) -> list[str]:
         if not in_code:
             tags.update(re.findall(r"(?:^|\s)#([a-zA-Z][\w/-]*)", line))
     return sorted(tags)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Vault walking (shared by every loader)
+# ─────────────────────────────────────────────────────────────────────
+
+def iter_vault_files(root: Path, suffixes, skip_dirs=None):
+    """Every file under `root` whose suffix is in `suffixes`, pruning skipped
+    directories as the walk goes. Yields absolute paths, unsorted.
+
+    os.walk, NOT Path.rglob("*.ext"). Three reasons, in order of how much they
+    actually matter:
+
+    1. PRUNING. rglob descends into a skipped directory and the caller throws
+       the results away afterwards. On this vault that means walking
+       `.obsidian`, `_Backups` and every `node_modules` in full before
+       discarding them. Pruning never enters them. The gap is small on a warm
+       filesystem cache and large on a cold one — which is exactly the run
+       somebody is sitting and waiting for.
+    2. THE SKIP BECOMES STRUCTURAL. A post-filter is a rule the caller has to
+       remember to apply, and comparing the wrong path components is how a
+       vault stored under a directory named `.git` came to discover nothing at
+       all. Here the skip happens once, in one place, against the directory
+       names actually being entered.
+    3. DIRECTORIES NAMED LIKE FILES. This vault really does contain a folder
+       called `PSS2_Solutions.sql/`. rglob("*") returns it and `open()` then
+       fails with EACCES on Windows; os.walk puts it in `dirnames`, so it can
+       never reach a caller expecting a file.
+
+    `suffixes` is matched against `Path(name).suffix.lower()`, which is what
+    the loaders' own filters use, so a caller can pass its configured
+    extension set unchanged.
+    """
+    skip = set(skip_dirs or ())
+    wanted = {s.lower() for s in suffixes}
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in skip]
+        for name in filenames:
+            if Path(name).suffix.lower() in wanted:
+                yield Path(dirpath) / name
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -975,6 +1057,23 @@ def build_context_header(heading_stack: list[str], file_meta: dict) -> str:
     return "[" + " | ".join(parts) + "]\n"
 
 
+def _normalise_tag(tag) -> str:
+    """A tag with no comma in it.
+
+    Tags survive into ChromaDB as a ", "-joined string (Chroma values must be
+    scalars), so a comma inside a tag is indistinguishable from the separator
+    between two tags on read-back — the canvas edge-label bug in miniature.
+    Rather than escape it, the invariant is enforced here, where tags enter:
+    commas become spaces.
+
+    That costs nothing in practice. `main.py --force-tags` already splits its
+    argument on "," so a comma-bearing tag cannot be expressed on the CLI at
+    all, and a scan of every chunk in this corpus found zero of them. This
+    makes an accidental property a guaranteed one.
+    """
+    return " ".join(str(tag).replace(",", " ").split())
+
+
 def apply_forced_meta(meta: dict, force_domain: str | None,
                       force_tags: list[str] | None) -> None:
     """Stamp a batch/per-file domain + tags onto a chunk's metadata IN PLACE.
@@ -988,7 +1087,9 @@ def apply_forced_meta(meta: dict, force_domain: str | None,
         have = meta.get("tags") or []
         if isinstance(have, str):
             have = [t.strip() for t in have.split(",") if t.strip()]
-        meta["tags"] = have + [t for t in force_tags if t not in have]
+        have = [_normalise_tag(t) for t in have]
+        incoming = [_normalise_tag(t) for t in force_tags]
+        meta["tags"] = have + [t for t in incoming if t and t not in have]
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1040,10 +1141,15 @@ class ObsidianParser:
     Parse an Obsidian vault into Document chunks for RAG ingestion.
 
     Architecture decision: heading-level splitting with context inheritance.
-    Each H2/H3 section becomes its own chunk. The heading hierarchy is
-    prepended as a context header so that "Results" in isolation becomes
-    "[Course: Time Series | Section: ARIMA Models > Results]" — giving
-    the embedding model the context it needs.
+    Every heading (H1-H6) starts a new section, and each section becomes its
+    own chunk (an oversized one is split by the configured strategy). The
+    heading hierarchy is prepended as a context header so that "Results" in
+    isolation becomes "[Course: Time Series | Section: ARIMA Models > Results]"
+    — giving the embedding model the context it needs.
+
+    A section whose own text is under min_chunk_size is SKIPPED, not merged
+    into a neighbour: its text reaches no index, and survives only inside an
+    E2 parent section when parent context is on.
     """
 
     def __init__(self, vault_path: str, config: Optional[dict] = None):
@@ -1115,12 +1221,12 @@ class ObsidianParser:
     def discover_files(self) -> list[Path]:
         """Find all markdown files in the vault, respecting skip rules."""
         files = []
-        for f in self.vault_path.rglob("*.md"):
-            # Skip hidden / system directories
-            if any(part in self.skip_dirs for part in f.parts):
-                continue
-            # Skip excluded top-level trees (agent projects etc.)
+        # iter_vault_files prunes self.skip_dirs as it walks, so the old
+        # post-filter over path components is gone entirely — along with the
+        # bug where it compared the directories ABOVE the vault root.
+        for f in iter_vault_files(self.vault_path, {".md"}, self.skip_dirs):
             rel_parts = f.relative_to(self.vault_path).parts
+            # Skip excluded top-level trees (agent projects etc.)
             if rel_parts and rel_parts[0] in self.skip_roots:
                 self.stats["files_skipped"] += 1
                 continue
@@ -1151,7 +1257,7 @@ class ObsidianParser:
         base_meta = {
             "source_file": rel_path,
             "filename": filepath.stem,
-            "file_type": "daily_note" if is_daily_note(filepath) else "note",
+            "file_type": "daily_note" if is_daily_note(filepath, self.vault_path) else "note",
             "vault_path": str(self.vault_path),
             "tags": extract_tags(body),
             "wikilinks": extract_wikilinks(body)[:20],  # cap for metadata size
@@ -1166,13 +1272,13 @@ class ObsidianParser:
             base_meta["frontmatter_course"] = frontmatter["course"]
         if "date" in frontmatter:
             base_meta["date"] = str(frontmatter["date"])
-        elif is_daily_note(filepath):
+        elif is_daily_note(filepath, self.vault_path):
             date = extract_date_from_filename(filepath)
             if date:
                 base_meta["date"] = date
 
         # Route to appropriate parser
-        if is_daily_note(filepath):
+        if is_daily_note(filepath, self.vault_path):
             self.stats["daily_notes"] += 1
             return self._parse_daily_note(body, base_meta)
         else:
@@ -1192,20 +1298,27 @@ class ObsidianParser:
           1. Frontmatter 'course' key
           2. Heading-pattern match on directory/filename parts
           3. FOLDER_COURSE_MAP exact lookup (catches full names with & / spaces)
+          4. Heading-pattern match on the filename stem
+
+        Steps 2-3 walk the VAULT-RELATIVE parts, root first: folders above the
+        vault root say nothing about a note, so a vault stored under a folder
+        named "ML Notes" is not labelled "Machine Learning & AI".
         """
         # 1. Frontmatter wins
         if "course" in frontmatter:
             return str(frontmatter["course"])
 
+        parts = filepath.relative_to(self.vault_path).parts
+
         # 2. Try heading-pattern detection on each path part
-        for part in filepath.parts:
+        for part in parts:
             course = detect_course_from_heading(part)
             if course and course != "__SKIP__":
                 return course
 
         # 3. Folder-name exact lookup (case-insensitive) — catches full-title
         #    folder names like "Statistics & Inference" that have special chars
-        for part in filepath.parts:
+        for part in parts:
             match = FOLDER_COURSE_MAP.get(part.lower().strip())
             if match:
                 return match
@@ -1367,7 +1480,8 @@ class ObsidianParser:
     def _parse_standard_note(self, body: str, base_meta: dict) -> list[Document]:
         """
         Parse a standard (non-daily) note.
-        Splits on H2/H3 boundaries with context inheritance.
+        Splits on every heading (H1-H6) with context inheritance; see the
+        class docstring for what happens to sections under min_chunk_size.
         """
         nodes = build_heading_tree(body)
         spans = section_spans(nodes)
@@ -1502,7 +1616,11 @@ class ObsidianParser:
 # ─────────────────────────────────────────────────────────────────────
 
 def main():
+    """The whole-vault markdown parse (the README quickstart's first step).
+    Takes the chunking strategy and the taxonomy from config.yaml — see the
+    module docstring; the flags below still override."""
     import argparse
+    from src.utils.config_loader import load_config
     ap = argparse.ArgumentParser(description="Parse Obsidian vault for RAG ingestion")
     ap.add_argument("vault_path", help="Path to Obsidian vault root")
     ap.add_argument("-o", "--output", default="chunks.jsonl",
@@ -1513,9 +1631,10 @@ def main():
                     help=f"Min chunk size in chars (default: {MIN_CHUNK_SIZE})")
     ap.add_argument("--overlap", type=int, default=OVERLAP_SIZE,
                     help=f"Overlap between split chunks (default: {OVERLAP_SIZE})")
-    ap.add_argument("--chunking", default="heading", choices=CHUNKING_STRATEGIES,
+    ap.add_argument("--chunking", default=None, choices=CHUNKING_STRATEGIES,
                     help="How oversized sections are split: 'heading' = "
-                         "paragraph packing (default), 'fixed' = sliding window")
+                         "paragraph packing, 'fixed' = sliding window "
+                         "(default: parser.chunking in config.yaml)")
     ap.add_argument("--preview", type=int, default=0,
                     help="Print N sample chunks to stdout")
     ap.add_argument("--parents-out", default="data/parents_md.jsonl",
@@ -1534,11 +1653,17 @@ def main():
         ap.error("--include-path requires an explicit non-default --output "
                  "(a scoped parse would clobber the full chunks.jsonl)")
 
+    cfg = load_config()
+    # Run as `python -m`, this file is __main__: load_config() applies the
+    # taxonomy to a second copy of it imported by name, not to the maps this
+    # copy's ObsidianParser reads. configure_taxonomy is idempotent.
+    configure_taxonomy(cfg)
+
     config = {
         "max_chunk_size": args.max_chunk,
         "min_chunk_size": args.min_chunk,
         "overlap_size": args.overlap,
-        "chunking": args.chunking,
+        "chunking": args.chunking or cfg.get("parser.chunking", "heading"),
         "skip_roots": [s.strip() for s in args.skip_roots.split(",") if s.strip()],
         "include_path": args.include_path or None,
     }

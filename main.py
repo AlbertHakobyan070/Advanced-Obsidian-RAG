@@ -2,14 +2,33 @@
 """
 main.py — CLI entry point for Noetrix.
 
-    python main.py index                      # build dense + sparse indexes from chunks.jsonl
+Build the corpus
+    python -m src.ingestion.obsidian_parser <vault> -o data/chunks.jsonl
+                                               # whole-vault markdown parse
+    python main.py index                       # FULL rebuild from chunks.jsonl only
+    python main.py index --append FILE.jsonl   # add one more chunk file
+    python main.py stamp                       # verify, then record, which embedder built
+                                               # the collection (:8051 refuses a mismatch)
+
+Ingest lanes (each writes its own *_chunks.jsonl; then `index --append` it)
+    ingest-pdfs | ingest-notebooks | ingest-code | ingest-canvas | ingest-md
+    fetch-web | convert-files                  # stage web pages / office files
+                                               # into <inbox>/_converted first
+
+Ask and measure
     python main.py query "What is ARIMA?"      # one-shot question
     python main.py chat                        # interactive REPL
-    python main.py eval                        # run the golden-query eval suite
+    python main.py eval [--retrieval-only]     # the golden-query eval suite
+    python main.py bench run --configs ladder  # the v2 eval: labelled questions scored per
+                                               # named pipeline configuration; also
+                                               # bench validate | split | report | sample
     python main.py serve                       # launch the Streamlit app
 
-The 'parse' step is handled by the existing obsidian_parser.py (run separately
-to produce data/chunks.jsonl); 'index' picks up from there.
+`index` WITHOUT --append deletes the dense collection and rebuilds both
+indexes from chunks.jsonl alone, so every appended lane (PDFs, notebooks,
+code, canvases) drops out of both — see Embedder.build_indexes. The console
+runs these same commands as subprocesses (manage_api._build_argv), including
+that full rebuild as the `index_rebuild` job.
 """
 from __future__ import annotations
 
@@ -20,9 +39,14 @@ from pathlib import Path
 # Make 'src' importable when run as `python main.py`
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from eval.bench.cli import add_bench_parser
 from src.utils.config_loader import load_config
+from src.utils.console import force_utf8_console
 from src.utils.logger import configure_logging, get_logger
 
+# This import-time call configures logging with the DEFAULTS, which turns
+# every _bootstrap_logging(cfg) below into a no-op: config.yaml's
+# logging.level / logging.file are not applied. See src/utils/logger.py.
 log = get_logger(__name__)
 
 
@@ -196,6 +220,37 @@ def cmd_ingest_code(args):
     print(f"   Now run: python main.py index --append {out}")
 
 
+def cmd_ingest_canvas(args):
+    cfg = load_config(args.config)
+    _bootstrap_logging(cfg)
+    from src.ingestion.canvas_loader import CanvasLoader
+
+    loader = CanvasLoader.from_config(cfg)
+    if args.vault:
+        loader.vault_path = Path(args.vault)
+    if args.output:
+        loader.output_file = Path(args.output)
+    if args.include_path:
+        loader.include_path = args.include_path.lower()
+    if getattr(args, "max_chunk_size", None):
+        loader.max_chunk = int(args.max_chunk_size)
+    if getattr(args, "chunking", None):
+        loader.chunking = args.chunking
+    if getattr(args, "context_depth", None) is not None:
+        loader.context_depth = int(args.context_depth)
+    if getattr(args, "force_domain", None):
+        loader.force_domain = args.force_domain.strip().lower()
+    if getattr(args, "force_tags", None):
+        loader.force_tags = [t.strip().lstrip("#").lower()
+                             for t in args.force_tags.split(",") if t.strip()]
+    out = loader.ingest_vault()
+    if loader.stats["chunks_total"] == 0:
+        print("\n❌ 0 canvas chunks produced — no matching files in scope.")
+        sys.exit(3)
+    print(f"\n✅ Canvas chunks written to {out}")
+    print(f"   Now run: python main.py index --append {out}")
+
+
 def cmd_ingest_md(args):
     """Scoped markdown parse (inbox md lane). Unlike the vault-wide parser
     run, this REQUIRES an include filter + its own output so the canonical
@@ -252,7 +307,8 @@ def cmd_convert_files(args):
     inbox = _inbox_dir(cfg)
     out_dir = Path(args.out_dir) if args.out_dir else inbox / "_converted"
     files = [f.strip() for f in args.files.split(",") if f.strip()]
-    res = convert_files(files, inbox, out_dir, ocr_pages=args.ocr_pages or "")
+    res = convert_files(files, inbox, out_dir, ocr_pages=args.ocr_pages or "",
+                        ocr_language=cfg.get("pdf.ocr_language", "eng"))
     ok = sum(1 for r in res if r["ok"])
     for r in res:
         print(("✅" if r["ok"] else "❌") + f" {r.get('file')}: "
@@ -347,6 +403,43 @@ def cmd_eval(args):
              judge=getattr(args, "judge", False),
              limit=getattr(args, "limit", None),
              judge_export=getattr(args, "judge_export", None))
+
+
+def cmd_stamp(args):
+    cfg = load_config(args.config)
+    _bootstrap_logging(cfg)
+    from src.embeddings.embedder import Embedder
+    from src.embeddings.sidecar import (
+        EmbeddingMismatchError, StampError, read_sidecar, sidecar_label, sidecar_path,
+        stamp_collection)
+
+    emb = Embedder.from_config(cfg)
+    try:
+        sidecar, outcome = stamp_collection(cfg, emb, args.collection, force=args.force)
+    except (StampError, EmbeddingMismatchError) as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    name, chroma_dir = sidecar["collection"], cfg.path("paths.chroma_dir")
+    label = sidecar_label(sidecar)
+    if outcome == "already":
+        print(f"✅ {name!r} already has a matching fingerprint: {label}, "
+              f"{sidecar['dimension']}-d. Nothing to do.")
+    else:
+        verified = sidecar["verified"]
+        print(f"Verifying {name!r} ({sidecar['count']} chunks) against {label} ...")
+        print(f"  {verified['sample']} sampled chunks re-embedded: min cosine "
+              f"{verified['min_cosine']:.5f} (threshold {verified['threshold']})")
+        print(f"✅ Stamped {name!r}: {label}, {sidecar['dimension']}-d, {sidecar['count']} chunks")
+        print(f"   {sidecar_path(chroma_dir, name)}")
+    # The HyPE twin is a collection of its own: say so when it exists unstamped.
+    twin = sidecar.get("hype_collection")
+    if sidecar["role"] == "chunks" and twin:
+        from src.utils.chroma_client import persistent_client
+        existing = {c.name for c in persistent_client(chroma_dir).list_collections()}
+        if twin in existing and read_sidecar(chroma_dir, twin) is None:
+            print(f"   HyPE collection {twin!r} is not stamped: "
+                  f"`rag stamp --collection {twin}` verifies it too.")
 
 
 def cmd_serve(args):
@@ -468,6 +561,32 @@ def build_parser() -> argparse.ArgumentParser:
                       help="Stamp these #tags on every chunk (metadata only)")
     code.set_defaults(func=cmd_ingest_code)
 
+    canvas = sub.add_parser("ingest-canvas",
+                            help="Ingest Obsidian .canvas files (nodes + labelled "
+                                 "edges) into data/canvas_chunks.jsonl")
+    canvas.add_argument("--vault", default=None, metavar="PATH", help="Override vault root")
+    canvas.add_argument("--output", default=None, metavar="JSONL",
+                        help="Write chunks here instead of data/canvas_chunks.jsonl")
+    canvas.add_argument("--include-path", default=None, metavar="SUBSTR",
+                        help="Only files whose vault-relative path contains SUBSTR")
+    canvas.add_argument("--force-domain", default=None, metavar="DOMAIN",
+                        help="Stamp this domain on every chunk (metadata only)")
+    canvas.add_argument("--max-chunk-size", type=int, default=None, metavar="N",
+                        help="Split node bodies longer than N chars (default: "
+                             "canvas.max_chunk_size, null = no splitting)")
+    canvas.add_argument("--chunking", default=None,
+                        choices=["heading", "fixed", "document", "none"],
+                        help="Splitter used when --max-chunk-size applies")
+    canvas.add_argument("--context-depth", type=int, default=None,
+                        choices=[0, 1, 2], metavar="0|1|2",
+                        help="How much of a NEIGHBOUR is inlined into each "
+                             "chunk: 0 titles only, 1 neighbour text, 2 also "
+                             "second-hop titles. Duplicates text across "
+                             "chunks; the run reports the measured cost")
+    canvas.add_argument("--force-tags", default=None, metavar="TAG,TAG",
+                        help="Stamp these #tags on every chunk (metadata only)")
+    canvas.set_defaults(func=cmd_ingest_canvas)
+
     mdp = sub.add_parser("ingest-md",
                          help="SCOPED markdown parse (inbox md lane) — needs "
                               "--include-path and its own --output, never "
@@ -489,12 +608,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     fw = sub.add_parser("fetch-web",
                         help="Fetch web pages to markdown (inbox _converted "
-                             "staging) via requests/crawl4ai/scrapling + markitdown")
+                             "staging) via requests/crawl4ai/scrapling/crawlee "
+                             "+ markitdown")
     fw.add_argument("--urls", required=True, metavar="URL,URL",
                     help="Comma-separated http(s) URLs")
     fw.add_argument("--backend", default="auto",
-                    choices=("auto", "requests", "crawl4ai", "scrapling"),
-                    help="Fetch backend (auto = best installed; requests always works)")
+                    choices=("auto", "requests", "crawl4ai", "scrapling", "crawlee"),
+                    help="Fetch backend (auto = best installed of crawl4ai/"
+                         "scrapling/requests; requests always works; crawlee "
+                         "runs only when named)")
     fw.add_argument("--format", default="md", choices=("md", "pdf"),
                     help="md = convert to markdown (markitdown); pdf = print "
                          "the rendered page via headless Chromium (keeps "
@@ -552,11 +674,24 @@ def build_parser() -> argparse.ArgumentParser:
                         "scorecard. Runs no queries")
     e.set_defaults(func=cmd_eval)
 
+    st = sub.add_parser("stamp",
+                        help="Verify which embedder built a collection, then record it")
+    st.add_argument("--collection", default=None, metavar="NAME",
+                    help="Collection to stamp (default: paths.collection_name; a HyPE "
+                         "question collection is verified query-side)")
+    st.add_argument("--force", action="store_true",
+                    help="Replace an existing fingerprint that disagrees with the "
+                         "configured embedder. The sample check still has to pass")
+    st.set_defaults(func=cmd_stamp)
+
+    add_bench_parser(sub)
+
     sub.add_parser("serve", help="Launch the Streamlit app").set_defaults(func=cmd_serve)
     return p
 
 
 def main():
+    force_utf8_console()
     parser = build_parser()
     args = parser.parse_args()
     args.func(args)

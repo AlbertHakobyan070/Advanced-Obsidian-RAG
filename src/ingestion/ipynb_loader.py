@@ -60,6 +60,7 @@ from src.ingestion.obsidian_parser import (
     FOLDER_COURSE_MAP,
     DOMAIN_MAP,
     COURSE_MAP,
+    iter_vault_files,
     split_large_chunk,
     build_context_header,
     apply_forced_meta,
@@ -263,14 +264,13 @@ class NotebookLoader:
         }
         inc = (self.include_path or "").replace("\\", "/").lower() or None
         found = []
-        for f in self.vault_path.rglob("*"):
-            if f.suffix.lower() not in self.exts:
-                continue
-            if any(part in skip_parts for part in f.parts):
-                continue
+        # iter_vault_files prunes skip_parts during the walk and matches the
+        # suffix, so the two filters that used to run per candidate are gone.
+        for f in iter_vault_files(self.vault_path, self.exts, skip_parts):
+            rel = f.relative_to(self.vault_path)
             if self.include_files is not None and f.name not in self.include_files:
                 continue
-            if inc and inc not in f.relative_to(self.vault_path).as_posix().lower():
+            if inc and inc not in rel.as_posix().lower():
                 continue
             found.append(f)
         self.stats["files_found"] = len(found)
@@ -556,6 +556,13 @@ class NotebookLoader:
     # ---- vault-wide ----
 
     def ingest_vault(self, verbose: bool = True) -> Path:
+        """Walk the vault and write every chunk to output_file.
+
+        The output is opened with "w", so that file is REPLACED. A scoped run
+        (include_path / include_files) left on the default output truncates
+        the canonical data/ipynb_chunks.jsonl down to that scope; the
+        console's _build_argv refuses that, a direct CLI run does not. Give
+        every scoped run its own output file."""
         files = self.discover_files()
         if verbose:
             log.info("Found %d file(s) across %s.", len(files), sorted(self.exts))

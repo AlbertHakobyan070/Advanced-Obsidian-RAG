@@ -115,7 +115,7 @@ Do not relay a weak result — branch:
   but the wrong *kind* of thing. `rerank_instruction` ("prefer worked procedures
   over definitions") reorders the pool you already have; it costs no extra
   retrieval and cannot drop anything. Check `rerank_instruction_applied` in the
-  echo — `lexical` and `none` ignore it by design.
+  echo — `lexical`, `none` and `laya` ignore it by design.
 - Check `GET /history` before re-tuning: it lists what was already tried, with
   the retrieval echo of what each run actually did.
 
@@ -144,6 +144,8 @@ operator hunting in the wrong place:
 |---|---|
 | `GET /health` → `state: "loading"` | Indexes/models still loading. Wait. |
 | `GET /health` → `state: "failed"` | The pipeline could not be built from the current config. Waiting will not help. `error` names the cause; `GET /api/service/log` on `:8052` has the traceback. |
+| Answer begins `Bad request:` (or `/search` returns an `error`) | A per-call knob was rejected: a bad value, not an outage, and answered with HTTP 200. Fix the knob. See [When a knob is wrong](api.md#when-a-knob-is-wrong). |
+| `LOW` confidence with `retrieval.gate.abstained: true` | The optional relevance gate dropped every chunk, so no LLM call was made. A threshold set too high does this too: re-run `/search` with `gate: false` and look at what was dropped before reporting a coverage gap. |
 | Answer begins `Reranking failed:` | A **retrieval** failure. It never reached generation. Check `GET /config` for the active reranker. Do not report it as a generation outage. |
 | `confidence: "ERROR"` | The generation backend failed or is unreachable. Retrieval still works — fall back to `/search`. |
 | 503 from a retrieval endpoint | The service is up but not ready; the body carries the same reason as `/health`. |

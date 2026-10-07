@@ -48,6 +48,7 @@ nav:
   - API reference: api.md
   - Agent integration: agents.md
   - Evaluation: evaluation.md
+  - Laya fine-tune: laya-finetune.md
   - Operations: operations.md
   - Docker deployment: deployment-docker.md
 

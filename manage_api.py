@@ -29,7 +29,9 @@ the indexes at startup and stays warm.
 """
 from __future__ import annotations
 
+import copy
 import itertools
+import hashlib
 import json
 import os
 import re
@@ -44,12 +46,17 @@ from pathlib import Path
 from queue import Queue
 from typing import Any, Iterator, Optional
 
+import yaml
 from fastapi import FastAPI, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
+from eval.bench.questions import (
+    STATUSES, SUITES, SchemaError, load_sets, question_from_dict, question_to_dict,
+    save_suite, sets_lock)
 from src.utils.branding import CONSOLE_API_TITLE, CONSOLE_SERVICE
+from src.utils.chroma_client import persistent_client
 from src.utils.config_loader import Config, load_config
 from src.utils.logger import configure_logging, get_logger
 
@@ -57,6 +64,8 @@ log = get_logger("manage_api")
 
 ROOT = Path(__file__).resolve().parent
 CFG: Config = load_config()
+# A no-op in practice: get_logger() above already configured logging with the
+# defaults, and the first configuration wins (see src/utils/logger.py).
 configure_logging(level=CFG.get("logging.level", "INFO"), console=True)
 
 JOBS_DIR = CFG.path("webui.jobs_dir") if CFG.get("webui.jobs_dir") else ROOT / "logs" / "jobs"
@@ -241,10 +250,16 @@ class Job:
     ended: float | None = None
     returncode: int | None = None
     log_file: str = ""
+    # True for a job rebuilt from its on-disk record rather than run by this
+    # process. The console shows it so nobody waits for output that is never
+    # coming, and so "interrupted" is readable as "the console died", not "the
+    # job failed".
+    restored: bool = False
 
     def public(self) -> dict:
         d = asdict(self)
         d["argv"] = " ".join(self.argv)
+        d["record"] = _job_record_path(self.id).name
         return d
 
 
@@ -305,6 +320,77 @@ def _files_csv(files) -> str:
     return ",".join(names)
 
 
+# Every chunk-writing lane's canonical chunk file: (the config key that names it,
+# the loader's built-in default). One table, so every output guard agrees on which
+# file names are protected. "markdown" is the whole-vault parse, chunks.jsonl.
+_LANE_CHUNK_FILES = {
+    "pdf": ("pdf.output_file", "pdf_chunks.jsonl"),
+    "notebooks": ("notebooks.output_file", "ipynb_chunks.jsonl"),
+    "code": ("code.output_file", "code_chunks.jsonl"),
+    "canvas": ("canvas.output_file", "canvas_chunks.jsonl"),
+    "markdown": ("paths.chunks_file", "chunks.jsonl"),
+}
+
+
+def _refuse_other_lanes_file(out: str | None, lane: str) -> None:
+    """Refuse an --output that is ANOTHER lane's canonical chunk file.
+
+    Every loader opens its output with "w", so a run pointed at a different
+    lane's file (or at chunks.jsonl) replaces that lane's rows with its own: they
+    drop out of the sparse index, which is re-derived from the JSONLs, while they
+    stay in the dense one. This holds for a whole-lane run as much as a scoped
+    one. `lane`'s OWN file is the caller's business (a whole-lane run may write
+    it; a scoped run is refused by the caller's own guard). Names are compared
+    case-insensitively because NTFS is, and against the file each lane would
+    write itself (config's output file, else the built-in default).
+    """
+    if out is None:
+        return
+    name = Path(out).name.lower()
+    owners = sorted(other for other, (key, default) in _LANE_CHUNK_FILES.items()
+                    if other != lane
+                    and Path(CFG.get(key) or default).name.lower() == name)
+    if owners:
+        raise ValueError(
+            f"{Path(out).name} is the chunk file of the {' and '.join(owners)} lane, "
+            f"and the loader truncates its output: this {lane} run would wipe that "
+            f"lane's rows out of the sparse index while they stay in the dense one. "
+            f"Give this run its own output file (name it *_chunks.jsonl so the "
+            f"sparse rebuild picks it up).")
+
+
+def _lane_output(cfg_key: str, default_name: str, prm: dict,
+                 scope: tuple[str, ...]) -> list[str]:
+    """The ["--output", path] pair for a lane whose loader opens its output
+    with "w", or [] to leave the loader's own default in force.
+
+    A run narrowed by any `scope` param must not write the lane's canonical
+    file. The loader replaces what it writes, so a run scoped to one folder,
+    file or page range truncates the whole-lane file down to that scope. The
+    dense index keeps every chunk (append upserts, it never deletes) while
+    build_sparse_union re-derives the sparse half from the JSONLs and loses the
+    rest — a silent dense/sparse drift, from a job that reported success. The
+    same guard ingest_canvas and ingest_md carry. The canonical name is the one
+    the loader would pick itself (config's `output_file`, else its built-in
+    default), compared case-insensitively because NTFS is. Whatever the scope, a
+    run may not take ANOTHER lane's canonical file either
+    (_refuse_other_lanes_file).
+    """
+    canonical = Path(CFG.get(cfg_key) or default_name).name
+    out = _vault_data_path(str(prm["output"])) if prm.get("output") else None
+    if (any(prm.get(k) for k in scope)
+            and (out is None or Path(out).name.lower() == canonical.lower())):
+        raise ValueError(
+            f"a scoped {cfg_key.partition('.')[0]} run must not write "
+            f"{canonical} — the loader truncates its output, so everything "
+            f"outside this scope would drop out of the sparse index while "
+            f"staying in the dense one, and out of this lane's only chunk "
+            f"file. Give this run its own output file (name it *_chunks.jsonl "
+            f"so the sparse rebuild picks it up).")
+    _refuse_other_lanes_file(out, cfg_key.partition(".")[0])
+    return ["--output", out] if out else []
+
+
 def _build_argv(kind: str, prm: dict) -> list[str]:
     py = sys.executable
     if kind == "ingest_pdfs":
@@ -317,8 +403,9 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
             argv += ["--include-path", str(prm["include_path"])]
         if prm.get("exclude_path"):
             argv += ["--exclude-path", str(prm["exclude_path"])]
-        if prm.get("output"):
-            argv += ["--output", _vault_data_path(str(prm["output"]))]
+        argv += _lane_output("pdf.output_file", "pdf_chunks.jsonl", prm,
+                             ("include_path", "exclude_path", "include_files",
+                              "only_books", "skip_books", "max_pages", "pages"))
         if prm.get("max_pages"):
             argv += ["--max-pages", str(int(prm["max_pages"]))]
         if prm.get("pages"):
@@ -351,8 +438,8 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
         return argv
     if kind == "ingest_notebooks":
         argv = [py, "main.py", "ingest-notebooks"]
-        if prm.get("output"):
-            argv += ["--output", _vault_data_path(str(prm["output"]))]
+        argv += _lane_output("notebooks.output_file", "ipynb_chunks.jsonl", prm,
+                             ("include_path", "include_files", "exts"))
         if prm.get("no_outputs"):
             argv.append("--no-outputs")
         if prm.get("save_figures"):
@@ -373,8 +460,8 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
         return argv
     if kind == "ingest_code":
         argv = [py, "main.py", "ingest-code"]
-        if prm.get("output"):
-            argv += ["--output", _vault_data_path(str(prm["output"]))]
+        argv += _lane_output("code.output_file", "code_chunks.jsonl", prm,
+                             ("include_path", "exclude_path", "include_files", "exts"))
         if prm.get("include_path"):
             argv += ["--include-path", str(prm["include_path"])]
         if prm.get("exclude_path"):
@@ -391,6 +478,46 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
                 tags = ",".join(str(t) for t in tags)
             argv += ["--force-tags", str(tags)]
         return argv
+    if kind == "ingest_canvas":
+        argv = [py, "main.py", "ingest-canvas"]
+        out = _vault_data_path(str(prm.get("output") or "data/canvas_chunks.jsonl"))
+        # A SCOPED run must not write the canonical file. The loader opens its
+        # output with "w", so a run scoped to one folder truncates the
+        # whole-vault file down to that folder. The dense index keeps every
+        # chunk (append upserts, it never deletes) while build_sparse_union
+        # re-derives the sparse half from the JSONLs and loses the rest — a
+        # silent dense/sparse drift, from a job that reported success. Same
+        # guard ingest_md carries for chunks.jsonl.
+        if prm.get("include_path") and Path(out).name == "canvas_chunks.jsonl":
+            raise ValueError(
+                "a scoped canvas run must not write canvas_chunks.jsonl — the "
+                "loader truncates its output, so every canvas outside this "
+                "scope would drop out of the sparse index while staying in "
+                "the dense one. Give this run its own output file.")
+        _refuse_other_lanes_file(out, "canvas")
+        if prm.get("output") or prm.get("include_path"):
+            argv += ["--output", out]
+        if prm.get("include_path"):
+            argv += ["--include-path", str(prm["include_path"])]
+        if prm.get("max_chunk_size"):
+            argv += ["--max-chunk-size", str(int(prm["max_chunk_size"]))]
+        if prm.get("chunking"):
+            if prm["chunking"] not in ("heading", "fixed", "document", "none"):
+                raise ValueError("chunking must be heading|fixed|document|none")
+            argv += ["--chunking", str(prm["chunking"])]
+        if prm.get("context_depth") is not None:
+            depth = int(prm["context_depth"])
+            if depth not in (0, 1, 2):
+                raise ValueError("context_depth must be 0, 1 or 2")
+            argv += ["--context-depth", str(depth)]
+        if prm.get("force_domain"):
+            argv += ["--force-domain", str(prm["force_domain"])]
+        if prm.get("force_tags"):
+            tags = prm["force_tags"]
+            if isinstance(tags, (list, tuple)):
+                tags = ",".join(str(t) for t in tags)
+            argv += ["--force-tags", str(tags)]
+        return argv
     if kind == "ingest_md":
         # Scoped md parse (inbox md lane): include filter + own output are
         # REQUIRED so the canonical chunks.jsonl can never be clobbered.
@@ -399,6 +526,7 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
         out = _vault_data_path(str(prm.get("output") or ""))
         if Path(out).name == "chunks.jsonl":
             raise ValueError("ingest_md must not write chunks.jsonl")
+        _refuse_other_lanes_file(out, "markdown")
         argv = [py, "main.py", "ingest-md",
                 "--include-path", str(prm["include_path"]),
                 "--output", out]
@@ -425,8 +553,8 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
             if not re.match(r"^https?://", u):
                 raise ValueError(f"only http(s) URLs are fetched: {u!r}")
         backend = prm.get("backend") or "auto"
-        if backend not in ("auto", "requests", "crawl4ai", "scrapling"):
-            raise ValueError("backend must be auto|requests|crawl4ai|scrapling")
+        if backend not in ("auto", "requests", "crawl4ai", "scrapling", "crawlee"):
+            raise ValueError("backend must be auto|requests|crawl4ai|scrapling|crawlee")
         fmt = prm.get("format") or "md"
         if fmt not in ("md", "pdf"):
             raise ValueError("format must be md|pdf")
@@ -444,6 +572,11 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
         return [py, "main.py", "index", "--append",
                 _vault_data_path(str(prm.get("file", "")))]
     if kind == "index_rebuild":
+        # DESTRUCTIVE in effect: `main.py index` deletes the dense collection
+        # and rebuilds both indexes from chunks.jsonl ALONE, so every appended
+        # lane (pdf / notebook / code / canvas / inbox files) drops out — see
+        # Embedder.build_indexes. Hence the "destructive" tier in api_schema
+        # and the warning in the Ingest tab's hint.
         return [py, "main.py", "index"]
     if kind == "rebuild_bm25":
         return [py, "rebuild_bm25.py"]
@@ -473,6 +606,162 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
     raise ValueError(f"unknown job kind {kind!r}")
 
 
+# ---------------------------------------------------------------------------
+#  Job records — the durable half of the job system
+# ---------------------------------------------------------------------------
+#
+# WHY THIS EXISTS. `_JOBS` is in-memory and dies with the process, so until now
+# the only trace a finished job left was its .log file. That was enough to see
+# WHAT happened and not enough to see HOW: a 2026-09-20 audit found that ~97%
+# of this corpus — every large lane — had no recorded ingest command anywhere,
+# which makes those chunk files primary data rather than regenerable artefacts.
+#
+# A record is written beside the log at QUEUE time (so a crash still leaves
+# one) and rewritten when the job ends. It carries the argv, so the run can be
+# repeated by hand, plus the two things argv alone does not capture:
+#
+#   * WHICH VAULT was active. The vault switcher moves DATA_DIR, and replaying
+#     an ingest against the wrong one writes a corpus into its neighbour —
+#     silently, which is the trap `_vault_data_path` exists to prevent.
+#   * WHAT THE CONFIG SAID. The loaders read chunk sizes, splitter choice and
+#     the taxonomy from config.yaml, so identical argv under a different config
+#     produces different chunks and different doc_ids. The digest answers "has
+#     anything changed since?" and the subset answers "changed from what?"
+#     without needing the old file.
+#
+# It is a record, not a guarantee: it cannot reproduce a vault whose FILES have
+# changed. What it does is make a replay's divergence visible instead of
+# silent.
+
+_JOB_RECORD_VERSION = 1
+
+# Keys that actually shape chunks, and therefore doc_ids. Kept explicit rather
+# than dumping the whole config: this file is written on every job, config.yaml
+# carries machine paths, and an enumerated list says which settings the author
+# believed were load-bearing at the time.
+_FINGERPRINT_KEYS = (
+    "parser.chunking", "parser.max_chunk_size", "parser.min_chunk_size",
+    "parser.overlap_size", "parser.skip_dirs",
+    "pdf.chunking", "pdf.max_chunk_size", "pdf.min_chunk_size",
+    "pdf.overlap_size", "pdf.ocr_engine",
+    "code.max_chunk_size", "code.min_chunk_size", "code.overlap_size",
+    "notebooks.max_chunk_size", "notebooks.min_chunk_size",
+    "notebooks.overlap_size",
+    "canvas.chunking", "canvas.max_chunk_size", "canvas.min_chunk_size",
+    "canvas.chunk_overlap", "canvas.context_depth",
+    "embedding.local_model", "embedding.provider",
+    "paths.collection_name",
+)
+
+
+def _ingestion_fingerprint() -> dict:
+    """The config state a replay would need to match, read fresh from disk."""
+    cfg_path = ROOT / "config.yaml"
+    try:
+        raw = cfg_path.read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()[:16]
+    except OSError:
+        digest = None
+    try:
+        disk = load_config()
+        values = {k: disk.get(k) for k in _FINGERPRINT_KEYS}
+    except Exception:                       # never fail a job over bookkeeping
+        values = {}
+    return {"config_sha256_16": digest, "values": values}
+
+
+def _output_of(argv: list[str]) -> str | None:
+    """The --output this job writes, so a chunk file can be traced back to the
+    command that produced it. That lookup is the whole point of the record."""
+    for flag in ("--output", "--append"):
+        if flag in argv:
+            i = argv.index(flag)
+            if i + 1 < len(argv):
+                return Path(argv[i + 1]).name
+    return None
+
+
+def _job_record_path(jid: str) -> Path:
+    return JOBS_DIR / f"{jid}.json"
+
+
+def _write_job_record(job: "Job") -> None:
+    """Persist (or refresh) a job's record. Bookkeeping must never take a job
+    down with it, so every failure here is logged and swallowed."""
+    try:
+        rec = {
+            "record_version": _JOB_RECORD_VERSION,
+            "id": job.id,
+            "kind": job.kind,
+            "status": job.status,
+            "argv": list(job.argv),
+            "params": job.params,
+            "cwd": str(ROOT),
+            "output": _output_of(job.argv),
+            "log_file": Path(job.log_file).name,
+            "returncode": job.returncode,
+            "created": job.created,
+            "started": job.started,
+            "ended": job.ended,
+            "created_iso": time.strftime("%Y-%m-%dT%H:%M:%S",
+                                         time.localtime(job.created)),
+            "vault_path": str(CFG.get("parser.vault_path") or ""),
+            "data_dir": str(DATA_DIR),
+            "ingestion": _ingestion_fingerprint(),
+        }
+        p = _job_record_path(job.id)
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(rec, indent=1, ensure_ascii=False, default=str),
+                       encoding="utf-8")
+        tmp.replace(p)                      # atomic: never a half-written record
+    except Exception as e:
+        log.warning("could not write job record for %s: %s", job.id, e)
+
+
+def _load_job_records(limit: int = 200) -> int:
+    """Rehydrate finished jobs from disk at import, newest first.
+
+    Restored jobs exist so the console's history survives a restart and so a
+    past run can be inspected and re-queued (`/api/jobs/{id}/retry` rebuilds
+    the argv from `params`). They are never re-run on their own: they come back
+    with their recorded terminal status, and a job left `running` by a killed
+    process is marked `interrupted` rather than resurrected — nothing is
+    waiting on it and the worker queue is empty at this point.
+    """
+    try:
+        records = sorted(JOBS_DIR.glob("*.json"),
+                         key=lambda p: p.stat().st_mtime, reverse=True)[:limit]
+    except OSError:
+        return 0
+    restored: list[Job] = []
+    for p in records:
+        try:
+            rec = json.loads(p.read_text(encoding="utf-8"))
+            job = Job(id=str(rec["id"]), kind=str(rec["kind"]),
+                      argv=list(rec.get("argv") or []),
+                      params=dict(rec.get("params") or {}))
+            status = str(rec.get("status") or "done")
+            job.status = "interrupted" if status in ("queued", "running") else status
+            job.created = float(rec.get("created") or p.stat().st_mtime)
+            job.started = rec.get("started")
+            job.ended = rec.get("ended")
+            job.returncode = rec.get("returncode")
+            job.log_file = str(JOBS_DIR / (rec.get("log_file") or f"{job.id}.log"))
+            job.restored = True
+            restored.append(job)
+        except Exception as e:
+            log.warning("skipping unreadable job record %s: %s", p.name, e)
+    restored.sort(key=lambda j: j.created)          # _ORDER is oldest-first
+    with _jobs_lock:
+        for job in restored:
+            if job.id not in _JOBS:
+                _JOBS[job.id] = job
+                _ORDER.append(job.id)
+    if restored:
+        log.info("restored %d job record(s) from %s", len(restored), JOBS_DIR)
+    return len(restored)
+
+
 def enqueue(kind: str, params: dict) -> Job:
     argv = _build_argv(kind, params or {})
     job = Job(id=uuid.uuid4().hex[:10], kind=kind, argv=argv, params=params or {})
@@ -480,6 +769,9 @@ def enqueue(kind: str, params: dict) -> Job:
     with _jobs_lock:
         _JOBS[job.id] = job
         _ORDER.append(job.id)
+    # Written BEFORE the job is queued: a process that dies mid-run must still
+    # leave behind what it was about to do.
+    _write_job_record(job)
     _QUEUE.put(job.id)
     log.info("job %s queued: %s", job.id, " ".join(argv))
     return job
@@ -520,6 +812,9 @@ def _worker() -> None:
         finally:
             job.ended = time.time()
             _PROCS.pop(jid, None)
+            # Rewrite the record with the terminal status, so a later session
+            # can tell a completed ingest from one that never finished.
+            _write_job_record(job)
             log.info("job %s %s (rc=%s)", jid, job.status, job.returncode)
             # Opt-in autopilot: after a SUCCESSFUL index-changing job, restart
             # the warm query API so it serves the new state. The flag is read
@@ -546,6 +841,10 @@ def _worker() -> None:
                         pass
 
 
+# Restore history BEFORE the worker starts: the queue is empty at this point,
+# so there is no chance of a restored entry being picked up and re-run.
+_load_job_records()
+
 threading.Thread(target=_worker, daemon=True, name="job-worker").start()
 
 # ============================================================================
@@ -553,8 +852,7 @@ threading.Thread(target=_worker, daemon=True, name="job-worker").start()
 # ============================================================================
 
 def _collection():
-    import chromadb
-    client = chromadb.PersistentClient(path=str(CFG.path("paths.chroma_dir")))
+    client = persistent_client(CFG.path("paths.chroma_dir"))
     return client.get_collection(COLLECTION)
 
 
@@ -646,7 +944,7 @@ class InboxDeleteIn(BaseModel):
 
 class ImportFetchIn(BaseModel):
     urls: list[str] = Field(min_length=1)
-    backend: str = "auto"           # auto | requests | crawl4ai | scrapling
+    backend: str = "auto"           # auto | requests | crawl4ai | scrapling | crawlee
     format: str = "md"              # md (markitdown) | pdf (Chromium print)
 
 
@@ -696,7 +994,19 @@ class RetagIn(BaseModel):
 def index_page():
     ui = ROOT / "webui" / "index.html"
     if ui.exists():
-        return FileResponse(ui)
+        # Without a Cache-Control header the browser falls back to HEURISTIC
+        # freshness: with only Last-Modified to go on it treats a file edited
+        # weeks ago as fresh for days and serves the stale copy WITHOUT ASKING.
+        # That is the "my handler isn't firing" trap that has cost this project
+        # time in two separate sessions.
+        #
+        # `no-cache` means revalidate before reuse. FileResponse sends an ETag
+        # but does NOT implement conditional responses (that lives in
+        # StaticFiles), so in practice every load re-sends the file — measured
+        # 200, not 304. Over loopback, for a single-user admin console, that is
+        # a few hundred KB nobody notices, and it is the right trade against a
+        # console that silently runs last week's JavaScript.
+        return FileResponse(ui, headers={"Cache-Control": "no-cache"})
     return JSONResponse({"error": "webui/index.html not found next to manage_api.py"},
                         status_code=404)
 
@@ -1006,6 +1316,85 @@ def jobs_create(body: JobIn) -> dict:
 def jobs_list() -> dict:
     with _jobs_lock:
         return {"jobs": [_JOBS[j].public() for j in _ORDER[::-1]]}
+
+
+@app.get("/api/jobs/provenance")
+def jobs_provenance() -> dict:
+    """Which command produced each chunk file — and which ones nothing records.
+
+    This answers the question that motivated job records at all. A chunk file
+    with no record is not regenerable: the flags it was ingested with (scope,
+    chunking strategy, forced domain/tags) are gone, so the JSONL itself is the
+    only surviving copy of that decision and must be treated as primary data,
+    not as a build artefact.
+
+    Records only exist for jobs run AFTER this was added, and only for jobs run
+    through the console — a `main.py` invocation from a terminal leaves none.
+    `unrecorded` is therefore expected to be large at first and to shrink; it
+    is a backlog, not a fault.
+    """
+    by_output: dict[str, list[dict]] = {}
+    for p in sorted(JOBS_DIR.glob("*.json")):
+        try:
+            rec = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        out = rec.get("output")
+        if out:
+            by_output.setdefault(out, []).append(rec)
+
+    recorded, unrecorded = [], []
+    for f in chunk_files():
+        runs = sorted(by_output.get(f.name, []),
+                      key=lambda r: r.get("created") or 0, reverse=True)
+        rows = None
+        try:
+            with open(f, "rb") as fh:
+                rows = sum(1 for line in fh if line.strip())
+        except OSError:
+            pass
+        entry = {"file": f.name, "rows": rows,
+                 "bytes": f.stat().st_size if f.exists() else None}
+        if runs:
+            latest = runs[0]
+            entry.update({
+                "job_id": latest.get("id"),
+                "kind": latest.get("kind"),
+                "status": latest.get("status"),
+                "when": latest.get("created_iso"),
+                "replay": " ".join(latest.get("argv") or []),
+                "cwd": latest.get("cwd"),
+                "vault_path": latest.get("vault_path"),
+                "config_sha256_16": (latest.get("ingestion") or {}).get("config_sha256_16"),
+                "runs": len(runs),
+            })
+            recorded.append(entry)
+        else:
+            unrecorded.append(entry)
+
+    current = _ingestion_fingerprint().get("config_sha256_16")
+    for e in recorded:
+        # A replay under a different config can produce different chunks and
+        # therefore different doc_ids, so say so rather than implying the
+        # command alone is sufficient.
+        e["config_changed_since"] = bool(
+            e.get("config_sha256_16") and e["config_sha256_16"] != current)
+
+    return {
+        "config_sha256_16": current,
+        "recorded": recorded,
+        "unrecorded": unrecorded,
+        "summary": {
+            "files": len(recorded) + len(unrecorded),
+            "with_a_recorded_command": len(recorded),
+            "rows_recorded": sum(e["rows"] or 0 for e in recorded),
+            "rows_unrecorded": sum(e["rows"] or 0 for e in unrecorded),
+        },
+        "note": "A file under `unrecorded` cannot be regenerated from records. "
+                "Treat it as primary data: never truncate or rebuild it "
+                "casually, and prove any change that would alter doc_ids "
+                "set-identical instead of planning to re-ingest.",
+    }
 
 
 @app.get("/api/jobs/{jid}")
@@ -1647,6 +2036,156 @@ def vault_tree(path: str = "") -> dict:
             "dirs": dirs, "files": files}
 
 
+# ---- graph / canvas lane: scope discovery + dry-run preview ----
+#
+# Canvas ingestion is NOT "one more file type", and the console shouldn't file
+# it as one. Canvases live in several unrelated trees, their filenames almost
+# never carry a course keyword, and the thing worth checking before committing
+# is the GRAPH (how many chunks actually carry edges), which no other lane has.
+# These two endpoints serve the Ingest tab's Graph section.
+
+# Vault-wide canvas scan, cached. Walking the vault is the slow part and the
+# Ingest tab asks for it on every visit; the console's rescan button sends
+# refresh=1 when the operator knows files changed.
+_CANVAS_SCAN: dict[str, dict] = {}
+_CANVAS_SCAN_TTL = 300.0
+
+
+class CanvasPreviewIn(BaseModel):
+    include_path: str | None = None
+    max_chunk_size: int | None = Field(default=None, ge=200, le=20000)
+    chunking: str | None = None
+    context_depth: int | None = Field(default=None, ge=0, le=2)
+    min_chunk_size: int | None = Field(default=None, ge=1, le=5000)
+
+
+@app.get("/api/canvas/folders")
+def canvas_folders(refresh: int = 0) -> dict:
+    """Where the canvases actually are, with counts.
+
+    A free-text include_path box asks the operator to guess a substring that
+    matches trees they cannot see. This lists the real ones instead.
+    """
+    vault = _vault_root()
+    if not vault.is_dir():
+        return JSONResponse(
+            {"error": f"the configured vault folder does not exist: {vault}"},
+            status_code=404)
+    # Cached: this walks the whole vault, and the Ingest tab asks on every
+    # visit. `refresh=1` (the console's ⟳ rescan) bypasses it.
+    cached = _CANVAS_SCAN.get(str(vault))
+    if cached and not refresh and (time.time() - cached["at"]) < _CANVAS_SCAN_TTL:
+        return {**cached["result"], "cached": True,
+                "age_s": int(time.time() - cached["at"])}
+
+    from src.ingestion.canvas_loader import iter_canvas_files
+    t0 = time.time()
+    roots: dict[str, int] = {}
+    total = 0
+    for f in iter_canvas_files(vault):
+        rel = f.relative_to(vault).parts
+        key = rel[0] if len(rel) > 1 else "(vault root)"
+        roots[key] = roots.get(key, 0) + 1
+        total += 1
+    result = {
+        "vault": str(vault),
+        "total": total,
+        "ms": int((time.time() - t0) * 1000),
+        "folders": [{"path": k, "canvases": v}
+                    for k, v in sorted(roots.items(), key=lambda kv: -kv[1])],
+    }
+    _CANVAS_SCAN[str(vault)] = {"at": time.time(), "result": result}
+    return {**result, "cached": False}
+
+
+@app.post("/api/canvas/preview")
+def canvas_preview(body: CanvasPreviewIn) -> dict:
+    """Run the canvas loader for real, WITHOUT touching the index.
+
+    Writes to a scratch directory and deletes it. It must never write into
+    `data/`: build_sparse_union globs `data/*_chunks.jsonl`, so a preview file
+    parked there would silently join the sparse index while the dense half
+    knows nothing about it.
+    """
+    import tempfile
+    from src.ingestion.canvas_loader import CanvasLoader, decode_canvas_edges
+
+    tmp = Path(tempfile.mkdtemp(prefix="canvas_preview_"))
+    try:
+        loader = CanvasLoader.from_config(CFG)
+        loader.output_file = tmp / "preview.jsonl"
+        if body.include_path:
+            loader.include_path = body.include_path.strip().lower()
+        if body.min_chunk_size is not None:
+            loader.min_chunk = int(body.min_chunk_size)
+        if body.max_chunk_size is not None:
+            loader.max_chunk = int(body.max_chunk_size)
+        if body.chunking:
+            from src.ingestion.obsidian_parser import CHUNKING_STRATEGIES
+            if body.chunking not in CHUNKING_STRATEGIES:
+                return JSONResponse(
+                    {"error": f"chunking must be one of {CHUNKING_STRATEGIES}"},
+                    status_code=400)
+            loader.chunking = body.chunking
+        if body.context_depth is not None:
+            loader.context_depth = int(body.context_depth)
+        try:
+            loader.ingest_vault(verbose=False)
+        except ValueError as e:
+            # A malformed .canvas names itself; that is worth seeing BEFORE a
+            # real run rather than as a failed job.
+            return JSONResponse({"error": str(e)}, status_code=400)
+
+        with_edges = 0
+        richest = None
+        rows = 0
+        with open(loader.output_file, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                rows += 1
+                rec = json.loads(line)
+                edges = decode_canvas_edges(rec["metadata"].get("canvas_edges"))
+                if edges:
+                    with_edges += 1
+                if richest is None or len(edges) > richest[0]:
+                    richest = (len(edges), rec)
+        st = loader.stats
+        chars = st["chars_total"]
+        sample = richest[1] if richest else None
+        return {
+            "chunks": rows,
+            "files_found": st["files_found"],
+            "files_skipped": st["files_skipped"],
+            "nodes_skipped": st["nodes_skipped"],
+            "nodes_split": st["nodes_split"],
+            "edges_total": st["edges_total"],
+            "with_edges": with_edges,
+            "with_edges_pct": round(100.0 * with_edges / rows, 1) if rows else 0.0,
+            "chars_total": chars,
+            "chars_context": st["chars_context"],
+            "context_pct": round(100.0 * st["chars_context"] / chars, 1) if chars else 0.0,
+            "settings": {"include_path": loader.include_path,
+                         "min_chunk_size": loader.min_chunk,
+                         "max_chunk_size": loader.max_chunk,
+                         "chunking": loader.chunking,
+                         "context_depth": loader.context_depth},
+            "sample": {
+                "doc_id": sample["doc_id"],
+                "source_file": sample["metadata"].get("source_file"),
+                "edges": decode_canvas_edges(sample["metadata"].get("canvas_edges")),
+                "domain": sample["metadata"].get("domain"),
+                "course_name": sample["metadata"].get("course_name"),
+                "text": sample["text"][:2500],
+            } if sample else None,
+            "note": "nothing was indexed; this ran the real loader into a "
+                    "scratch file and deleted it",
+        }
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 @app.get("/api/vault/search")
 def vault_search(q: str, limit: int = 60) -> dict:
     """Whole-vault filename search (books outside the tree root get their
@@ -1663,11 +2202,17 @@ def vault_search(q: str, limit: int = 60) -> dict:
     search_skip = _TREE_SKIP - {"_ingested"}
     for ext in _TREE_EXTS:
         for f in vault.rglob(f"*{ext}"):
-            if any(part in search_skip or part.startswith(".") for part in f.parts):
+            # Components BELOW the vault root only. The absolute path also
+            # carries the directories above it, and this check additionally
+            # rejects any component starting with "." — so a vault stored
+            # under a dotted folder would make search return nothing.
+            rel = f.relative_to(vault)
+            if any(part in search_skip or part.startswith(".")
+                   for part in rel.parts):
                 continue
             if ql not in f.name.lower():
                 continue
-            rows.append(_file_row(f, f.relative_to(vault).as_posix(), rag))
+            rows.append(_file_row(f, rel.as_posix(), rag))
             if len(rows) >= limit:
                 return {"rows": rows, "truncated": True}
     return {"rows": rows, "truncated": False}
@@ -1703,7 +2248,7 @@ EDITABLE_SETTINGS: dict[str, dict] = {
                                      "label": "Cross-encoder device"},
     "retrieval.rerank_mode":        {"kind": "enum", "restart": ":8051",
                                      "values": ["cross_encoder", "lexical",
-                                                "http", "none"],
+                                                "http", "none", "laya"],
                                      "label": "Default rerank method"},
     # Free text: it IS the feature. Blank turns it off.
     "retrieval.rerank_instruction": {"kind": "str",  "restart": ":8051",
@@ -1748,7 +2293,79 @@ EDITABLE_SETTINGS: dict[str, dict] = {
     "webui.auto_restart_rag":       {"kind": "enum", "restart": "none (read per job)",
                                      "values": ["true", "false"],
                                      "label": "Auto-restart :8051 after index-changing jobs"},
+    # The feature flag behind the Experimental features panel. It is an
+    # ordinary editable setting so it uses the SAME writer, validator and
+    # restart reporting as everything else — an experimental feature with its
+    # own bespoke save path would be the one setting nobody had tested.
+    "graph.enabled":                {"kind": "enum", "restart": ":8051 + reload this page",
+                                     "values": ["true", "false"],
+                                     "label": "Graph RAG mode (canvas traversal)"},
+    # Likewise the flag behind the Laya reranker's row below. It has no console
+    # controls to hide, so no page reload is needed — only the :8051 restart.
+    "retrieval.laya.enabled":       {"kind": "enum", "restart": ":8051",
+                                     "values": ["true", "false"],
+                                     "label": "Laya reranker (experimental)"},
 }
+
+
+# Features that are built and tested but NOT part of the default workflow, and
+# the config flag that turns each one on. The console renders this list; it does
+# not hardcode any feature, so the next experimental feature is a row here plus
+# its own flag in EDITABLE_SETTINGS.
+#
+# `key` must name a real EDITABLE_SETTINGS entry, so the flag is written by the
+# ordinary settings path (see the note on graph.enabled above) — asserted by
+# tests/test_experimental_features.py rather than left to a reviewer to notice.
+EXPERIMENTAL_FEATURES: list[dict] = [
+    {
+        "id": "graph_rag",
+        "key": "graph.enabled",
+        "label": "Graph RAG · canvas traversal",
+        "what": "A second query mode that walks the edges you drew between "
+                "Obsidian canvas nodes, then stops and asks a human what the "
+                "retrieved nodes are for: merge them into the previous "
+                "result, answer from the graph alone, or take the raw nodes "
+                "with no LLM at all.",
+        "why_off": "It works and is covered by tests, but it has never been "
+                   "scored against the golden set — so its retrieval "
+                   "benefit is unmeasured. Until it is, it stays out of the "
+                   "default Query tab instead of implying an answer quality "
+                   "nobody has checked.",
+        "unaffected": "Ordinary Ask / Search never touch it, and the canvas "
+                      "lane keeps competing in normal retrieval either way. "
+                      "Canvas INGESTION is not gated: that is how the lane "
+                      "gets indexed in the first place.",
+        "surfaces": ["Query tab: the Graph RAG panel",
+                     "API: POST /graph/expand"],
+    },
+    {
+        "id": "laya_rerank",
+        "key": "retrieval.laya.enabled",
+        "label": "Laya reranker · fine-tuned relevance scorer",
+        "what": "A fifth rerank method, laya: a ~420M-parameter Laya model "
+                "fine-tuned on your own notes (trained off-machine, see "
+                "docs/laya-finetune.md) gives every candidate passage a "
+                "probability that it answers the question, and that "
+                "probability orders the pool. Pick it per call (rerank: laya) "
+                "or as the default rerank method. It needs the laya package "
+                "and a checkpoint in models/laya-noetrix.",
+        "why_off": "It has never been scored against the eval sets, so whether "
+                   "it ranks better is unmeasured, and it must pass the spec "
+                   "§11 graduation rule first: beat the current default on "
+                   "dev with a paired CI that excludes zero, then hold on "
+                   "test. Upstream presents the base model as something to "
+                   "specialise, not a zero-shot ranker, so any benefit rests "
+                   "on the fine-tune alone.",
+        "unaffected": "Ordinary Ask / Search keep the configured reranker "
+                      "either way. While this is off, rerank: laya is "
+                      "refused with a readable error, never answered by "
+                      "another reranker, and nothing is imported or loaded "
+                      "at startup.",
+        "surfaces": ["API: rerank=laya on /search, /query, /compare",
+                     "Config: retrieval.rerank_mode: laya",
+                     "Bench: the laya-rerank config"],
+    },
+]
 
 
 def _provider_choices(disk_cfg) -> tuple[list[str], list[dict]]:
@@ -1998,6 +2615,12 @@ def settings() -> dict:
         "taxonomy": _taxonomy(disk_cfg),
         "config_path": str(ROOT / "config.yaml"),
         "editable": editable,
+        # Read off DISK (not boot-time CFG) for the same reason `editable` is:
+        # after a save with no restart yet, the panel must show what was saved.
+        "experimental": [
+            {**feat, "on": bool(disk_cfg.get(feat["key"]))}
+            for feat in EXPERIMENTAL_FEATURES
+        ],
     }
 
 
@@ -3100,6 +3723,167 @@ def service_log(lines: int = 80) -> dict:
     return {"ok": True, "path": str(path), "exists": True, "lines": tail}
 
 
+# ---- eval review queue (Eval tab: verify / reject / edit drafted questions) ----
+#
+# eval/sets/*.yaml holds the labelled questions (local data about the vault). The
+# schema, the loader and the writer live in eval.bench.questions; this section only
+# decides when a write may happen and keeps two console tabs from tearing a file.
+
+EVAL_SETS_DIR = CFG.path("eval.sets_dir", "eval/sets")
+_eval_lock = threading.Lock()    # a review write is load -> change -> replace: one at a time
+_EVAL_ACTIONS = {"verify": "verified", "reject": "rejected", "edit": "edited"}
+
+
+class EvalReviewIn(BaseModel):
+    action: str                           # verify | reject | edit
+    record: Optional[dict] = None         # edit only: the whole replacement record
+
+
+@app.exception_handler(SchemaError)
+def _eval_schema_error(_request, exc: SchemaError):
+    # A sets file the loader rejects (a hand edit with a typo): its SchemaError names
+    # the file, the question and the problem, so say that instead of a bare 500.
+    return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
+
+# Parsed sets, keyed on the directory and every file's name, mtime and size. Every
+# review request reads them, and re-parsing ~400 questions cost ~2 s per call.
+_eval_memo: tuple | None = None
+
+
+def _eval_questions() -> list:
+    # include_rejected: a rejected question still lives in its file, and a rewrite
+    # that left it out would delete it for good.
+    global _eval_memo
+    files = sorted(EVAL_SETS_DIR.glob("*.yaml")) if EVAL_SETS_DIR.exists() else []
+    sig = (str(EVAL_SETS_DIR),
+           tuple((p.name, p.stat().st_mtime_ns, p.stat().st_size) for p in files))
+    if _eval_memo is None or _eval_memo[0] != sig:
+        _eval_memo = (sig, load_sets(EVAL_SETS_DIR, include_rejected=True))
+    # Copies: the review path mutates provenance before it writes, and a write that
+    # fails must not leave the memo holding a status that never reached disk.
+    return copy.deepcopy(_eval_memo[1])
+
+
+def _eval_cache() -> dict:
+    """`bench validate --write-cache` output, {qid: {gold_texts, findings}}: read
+    only here, and as old as the last validate run. {} if it was never written; a
+    corrupt file raises instead of passing for "no findings"."""
+    path = EVAL_SETS_DIR / ".review_cache.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
+def _eval_save(new, questions: list) -> None:
+    """Write `new` over its namesake and rewrite that WHOLE sets file, atomically.
+
+    The file is found by the id inside it, not assumed to be <suite>.yaml: a suite
+    may span several files, and rewriting the wrong one would duplicate ids.
+    (load_sets has already validated every file, so each is a list of records.)
+    """
+    for path in sorted(EVAL_SETS_DIR.glob("*.yaml")):
+        text = path.read_text(encoding="utf-8")
+        ids = {d["id"] for d in yaml.safe_load(text)} if new.id in text else set()
+        if new.id in ids:
+            break
+    else:
+        raise LookupError(f"{new.id} is in no *.yaml under {EVAL_SETS_DIR}")
+    # save_suite is atomic itself (temp file, then an os.replace retried while a
+    # Windows scanner holds the file), so a reader sees the old file or the new one.
+    save_suite(path, [new if q.id == new.id else q for q in questions if q.id in ids])
+
+
+@app.get("/api/eval/progress")
+def eval_progress() -> dict:
+    """Per suite: its quota and how many questions sit in each review status
+    (`total` counts all four), plus a `totals` row summing the suites."""
+    rows = {s: {"quota": n, "total": 0, **dict.fromkeys(STATUSES, 0)}
+            for s, n in SUITES.items()}
+    for q in _eval_questions():
+        rows[q.suite]["total"] += 1
+        rows[q.suite][q.provenance["status"]] += 1
+    return {**rows, "totals": {k: sum(r[k] for r in rows.values())
+                               for k in ("quota", "total", *STATUSES)}}
+
+
+@app.get("/api/eval/questions")
+def eval_questions(suite: str = "", status: str = "", split: str = "") -> list[dict]:
+    """The review queue, one row per question; an empty filter matches everything.
+    n_errors / n_warnings count the question's cached validator findings."""
+    cache = _eval_cache()
+    rows = []
+    for q in _eval_questions():
+        st = q.provenance["status"]
+        if (suite and q.suite != suite) or (status and st != status) \
+                or (split and q.split != split):
+            continue
+        levels = [f["level"] for f in cache.get(q.id, {}).get("findings", [])]
+        rows.append({"id": q.id, "suite": q.suite, "tier": q.tier, "split": q.split,
+                     "status": st, "author": q.provenance["author"],
+                     "question": q.question, "n_errors": levels.count("error"),
+                     "n_warnings": levels.count("warn")})
+    return rows
+
+
+@app.get("/api/eval/questions/{qid}")
+def eval_question(qid: str) -> dict:
+    """One question as stored, with its gold chunk texts and validator findings
+    from the cache (empty lists when the cache does not cover it)."""
+    q = next((q for q in _eval_questions() if q.id == qid), None)
+    if q is None:
+        return JSONResponse({"error": f"no such question: {qid}"}, status_code=404)
+    cached = _eval_cache().get(qid, {})
+    return {"record": question_to_dict(q), "gold_texts": cached.get("gold_texts", []),
+            "findings": cached.get("findings", [])}
+
+
+@app.post("/api/eval/questions/{qid}")
+def eval_review(qid: str, body: EvalReviewIn) -> dict:
+    """Verify, reject or edit one question and write its sets file back.
+
+    An edit goes through the same validator the loader uses: a record that breaks
+    the schema is a 400 carrying the SchemaError text, and nothing is written. The
+    server sets only provenance.status and reviewed_at; the record keeps its author,
+    so an edited draft is still a draft (`owner` marks the operator's own).
+    """
+    status = _EVAL_ACTIONS.get(body.action)
+    if status is None:
+        return JSONResponse(
+            {"ok": False, "error": f"action must be one of {', '.join(_EVAL_ACTIONS)}, "
+                                   f"got {body.action!r}"}, status_code=400)
+    if (body.action == "edit") != (body.record is not None):
+        return JSONResponse(
+            {"ok": False, "error": "send `record` with edit, and only with edit"},
+            status_code=400)
+    # The load is inside both locks: two tabs (the thread lock) or a `bench draft`
+    # appending meanwhile (the cross-process sets lock) must never be overwritten
+    # by a stale copy.
+    with _eval_lock, sets_lock(EVAL_SETS_DIR):
+        questions = _eval_questions()
+        old = next((q for q in questions if q.id == qid), None)
+        if old is None:
+            return JSONResponse({"ok": False, "error": f"no such question: {qid}"},
+                                status_code=404)
+        new = old
+        if body.action == "edit":
+            try:
+                new = question_from_dict(body.record, "edit")
+            except SchemaError as e:
+                return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+            if new.split is None:
+                new.split = old.split    # a form that omits the split keeps the stored one
+            # The split is locked like the id: it is assigned once by `bench split`,
+            # and moving a question between dev and test would leak the sealed set.
+            if (new.id, new.suite, new.split) != (old.id, old.suite, old.split):
+                return JSONResponse(
+                    {"ok": False, "error": f"an edit cannot change id, suite or split "
+                                           f"({old.id}, {old.suite}, {old.split})"},
+                    status_code=400)
+        new.provenance["status"] = status
+        new.provenance["reviewed_at"] = time.strftime("%Y-%m-%d")
+        _eval_save(new, questions)
+    return {"ok": True, "record": question_to_dict(new)}
+
+
 @app.get("/api/schema")
 def api_schema() -> dict:
     """
@@ -3166,6 +3950,20 @@ def api_schema() -> dict:
                 "permission": "read",
                 "purpose": "whole-vault filename search + in-RAG membership check",
                 "query": {"q": "filename substring (>=2 chars)", "limit": "<=200"}},
+            "GET /api/canvas/folders": {
+                "permission": "read",
+                "purpose": "which vault trees hold .canvas files, with counts "
+                           "— the scope picker for the Graph ingest lane"},
+            "POST /api/canvas/preview": {
+                "permission": "read",
+                "purpose": "dry-run the canvas loader into a scratch file and "
+                           "report node/edge counts, the share of chunks that "
+                           "carry edges, the context-inflation cost and one "
+                           "composed sample. Indexes nothing",
+                "body": {"include_path": "substr?",
+                         "min_chunk_size": "int?", "max_chunk_size": "int?",
+                         "chunking": "heading|fixed|document|none",
+                         "context_depth": "0|1|2"}},
             "GET /api/inbox": {
                 "permission": "read",
                 "purpose": "files currently staged in the upload inbox"},
@@ -3227,7 +4025,7 @@ def api_schema() -> dict:
                            "LaTeX/tables/code as the site shows them). "
                            "Nothing indexed.",
                 "body": {"urls": "list[str]",
-                         "backend": "auto|requests|crawl4ai|scrapling",
+                         "backend": "auto|requests|crawl4ai|scrapling|crawlee",
                          "format": "md|pdf"}},
             "GET /api/import/file": {
                 "permission": "read",
@@ -3271,10 +4069,24 @@ def api_schema() -> dict:
                 "purpose": "move _converted .md files into the inbox root so "
                            "the ingest lanes can pick them up",
                 "body": {"names": "list[str]"}},
+            "GET /api/jobs/provenance": {
+                "permission": "read",
+                "purpose": "which command produced each chunk file, and which "
+                           "files nothing records. A file under `unrecorded` "
+                           "is NOT regenerable — the flags it was ingested "
+                           "with are gone, so the JSONL is the only surviving "
+                           "copy of that decision and must be treated as "
+                           "primary data. `config_changed_since` warns that a "
+                           "recorded command would no longer reproduce the "
+                           "same chunks, because chunk sizes and the splitter "
+                           "come from config.yaml rather than from argv."},
             "GET /api/settings": {
                 "permission": "read",
                 "purpose": "runtime info + the editable config surface (paths, "
-                           "models, defaults) with current values"},
+                           "models, defaults) with current values, plus "
+                           "`experimental`: the features that are built but "
+                           "not part of the default workflow, each with its "
+                           "config flag and whether it is on"},
             "POST /api/settings": {
                 "permission": "mutating",
                 "purpose": "persist whitelisted config values into config.yaml "
@@ -3357,6 +4169,34 @@ def api_schema() -> dict:
                            "JSONL row removal + queued rebuild). Vault files are "
                            "NEVER touched. Confirm the exact source_files first.",
                 "body": {"source_files": "list[str]", "rebuild": "bool"}},
+            "GET /api/eval/progress": {
+                "permission": "read",
+                "purpose": "eval review-queue progress: per suite {quota, total, "
+                           "draft, verified, edited, rejected}, plus a `totals` "
+                           "row summing the suites"},
+            "GET /api/eval/questions": {
+                "permission": "read",
+                "purpose": "the eval question review queue, one row per question "
+                           "with its status and the validator's error/warning "
+                           "counts (empty filter = no filter)",
+                "query": {"suite": "str?",
+                          "status": "draft|verified|edited|rejected?",
+                          "split": "dev|test?"}},
+            "GET /api/eval/questions/{qid}": {
+                "permission": "read",
+                "purpose": "one eval question as stored, plus its gold chunk "
+                           "texts and validator findings from the review cache "
+                           "(empty lists when the cache does not cover it)"},
+            "POST /api/eval/questions/{qid}": {
+                "permission": "mutating",
+                "purpose": "verify, reject or edit one eval question: sets "
+                           "provenance.status + reviewed_at and rewrites its "
+                           "sets file atomically. An invalid edit is a 400 "
+                           "carrying the schema error and writes nothing; an "
+                           "edit may not change id, suite or split.",
+                "body": {"action": "verify|reject|edit",
+                         "record": "dict (edit only: the whole replacement "
+                                   "record)"}},
         },
         "job_kinds": {
             "ingest_pdfs": {
@@ -3398,6 +4238,22 @@ def api_schema() -> dict:
                         "(.js/.ts/.sql/.go/.java/.c/.cpp/.rs/… — NOT "
                         ".py/.R/.ipynb/.Rmd); agent-project roots need an "
                         "include_path to be scoped in"},
+            "ingest_canvas": {
+                "permission": "mutating",
+                "params": {"output": "data/*.jsonl", "include_path": "substr",
+                           "max_chunk_size": "int? (split oversized node "
+                                             "bodies; omit = no splitting)",
+                           "chunking": "heading|fixed|document|none",
+                           "context_depth": "0|1|2 (how much of a NEIGHBOUR is "
+                                            "inlined; >0 duplicates text and "
+                                            "inflates the index)",
+                           "force_domain": "str", "force_tags": "csv or list"},
+                "note": ".canvas files only — one chunk per text node, with "
+                        "that node's edges flattened into the chunk as a "
+                        "Connections footer plus aligned edge metadata. "
+                        "GET /api/canvas/folders lists where canvases live; "
+                        "POST /api/canvas/preview dry-runs the loader without "
+                        "indexing anything"},
             "ingest_md": {
                 "permission": "mutating",
                 "params": {"include_path": "substr (REQUIRED)",
@@ -3409,7 +4265,7 @@ def api_schema() -> dict:
             "fetch_web": {
                 "permission": "mutating",
                 "params": {"urls": "list[str] (http/https only)",
-                           "backend": "auto|requests|crawl4ai|scrapling",
+                           "backend": "auto|requests|crawl4ai|scrapling|crawlee",
                            "format": "md|pdf (pdf = Chromium page print)"},
                 "note": "writes .md/.pdf to <inbox>/_converted; indexes nothing"},
             "convert_files": {
@@ -3420,8 +4276,14 @@ def api_schema() -> dict:
             "index_append": {"permission": "mutating",
                              "params": {"file": "data/*.jsonl"},
                              "note": "idempotent upsert; also rebuilds sparse"},
-            "index_rebuild": {"permission": "mutating", "params": {},
-                              "note": "full rebuild from chunks.jsonl — heavy"},
+            "index_rebuild": {"permission": "destructive", "params": {},
+                              "note": "DELETES the dense collection and rebuilds "
+                                      "both indexes from chunks.jsonl ALONE — "
+                                      "every appended lane (pdf / notebook / "
+                                      "code / canvas / inbox files) drops out "
+                                      "until its JSONL is re-appended, a fresh "
+                                      "re-embed each. Heavy; disaster recovery "
+                                      "or an embedding-model change only"},
             "rebuild_bm25": {"permission": "mutating", "params": {},
                              "note": "sync sparse after ingest/delete/retag"},
             "build_hype": {"permission": "mutating",

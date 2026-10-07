@@ -34,8 +34,10 @@ DISCOVERY GUARDS (session-8 decision)
 
 USAGE
     python main.py ingest-code                         # walk vault -> data/code_chunks.jsonl
-    python main.py ingest-code --include-path "Capstone"
     python main.py index --append data/code_chunks.jsonl
+    # a SCOPED run needs its own output — see ingest_vault for why:
+    python main.py ingest-code --include-path "Capstone" --output data/capstone_code_chunks.jsonl
+    python main.py index --append data/capstone_code_chunks.jsonl
 """
 from __future__ import annotations
 
@@ -52,6 +54,7 @@ from src.ingestion.obsidian_parser import (
     FOLDER_COURSE_MAP,
     DOMAIN_MAP,
     COURSE_MAP,
+    iter_vault_files,
     split_large_chunk,
     build_context_header,
     apply_forced_meta,
@@ -280,17 +283,14 @@ class CodeLoader:
         found = []
         # skip_roots only apply when NOT explicitly scoping a path in
         apply_root_skip = self.include_path is None
-        for f in self.vault_path.rglob("*"):
-            if f.suffix.lower() not in self.exts:
-                continue
-            # Directories named like files exist in the vault (a real
-            # "PSS2_Solutions.sql/" folder) — rglob returns them and open()
-            # then dies with EACCES on Windows. Files only.
-            if not f.is_file():
-                continue
-            if any(part in _SKIP_DIRS for part in f.parts):
-                continue
-            rel_posix = f.relative_to(self.vault_path).as_posix().lower()
+        # iter_vault_files prunes _SKIP_DIRS during the walk, matches on the
+        # suffix, and yields files only — so the extension test, the skip
+        # filter and the is_file() guard against directories named like files
+        # (this vault has a real "PSS2_Solutions.sql/" folder) all collapse
+        # into the call.
+        for f in iter_vault_files(self.vault_path, self.exts, _SKIP_DIRS):
+            rel = f.relative_to(self.vault_path)
+            rel_posix = rel.as_posix().lower()
             # include_files: exact-filename scope for file-scoped custom jobs
             # (set post-construction by main.py; None = no filter).
             if getattr(self, "include_files", None) \
@@ -424,6 +424,15 @@ class CodeLoader:
     # ---- vault-wide ----
 
     def ingest_vault(self, verbose: bool = True) -> Path:
+        """Walk the vault and write every chunk to output_file.
+
+        The output is opened with "w", so that file is REPLACED. A scoped run
+        (include_path / include_files) left on the default output truncates
+        the canonical data/code_chunks.jsonl down to that scope. The dense
+        index keeps the old rows (append only upserts) while the next sparse
+        rebuild derives BM25 from the truncated file — a silent dense/sparse
+        drift from a job that reported success. The console's _build_argv
+        refuses that; a direct CLI run does not, so give it its own output."""
         files = self.discover_files()
         if verbose:
             log.info("Found %d code file(s) across %s.", len(files), sorted(self.exts))

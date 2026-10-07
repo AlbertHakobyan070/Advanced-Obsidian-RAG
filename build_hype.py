@@ -10,11 +10,13 @@ doc_id; at query time an extra dense lane matches query→question
 maps hits back to the parent chunks for RRF fusion.
 
 COST REALITY (why this is scoped, cached, and opt-in): one LLM call per
-chunk. The full 172K corpus is months of free-tier quota — DON'T. Scope to
-one book / one course with --include-path, or markdown notes with
---file-types note,daily_note. Runs are resumable: chunks whose questions
-already exist in the collection are skipped (keyed by doc_id, which changes
-with the text — stale questions never survive a corpus swap).
+chunk. The full corpus — well over a hundred thousand chunks — is months of
+free-tier quota. DON'T. Scope to one book / one course with --include-path,
+or markdown notes with --file-types note,daily_note. Runs are resumable:
+chunks whose questions already exist in the collection are skipped (keyed by
+doc_id, which changes with the text — so after a corpus swap the old
+questions stay in the collection but can no longer map to a chunk; the query
+lane drops parents it cannot fetch).
 
     python build_hype.py --include-path "Albada" --dry-run
     python build_hype.py --include-path "Albada"
@@ -33,9 +35,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from src.utils.chroma_client import persistent_client
 from src.utils.config_loader import load_config
+from src.utils.console import force_utf8_console
 from src.utils.logger import configure_logging, get_logger
 from src.embeddings.embedder import Embedder, iter_jsonl_records
+from src.embeddings.sidecar import (
+    EmbeddingMismatchError, check_collection, ids_digest, iter_ids, make_sidecar,
+    sidecar_path, stored_dimension, unstamped_warning, write_sidecar)
 
 log = get_logger("build_hype")
 
@@ -54,6 +61,7 @@ def _questions_from(text: str, n: int) -> list[str]:
 
 
 def main() -> None:
+    force_utf8_console()
     ap = argparse.ArgumentParser(description="Build HyPE question embeddings.")
     ap.add_argument("--include-path", default=None,
                     help="Only chunks whose source_file contains this substring")
@@ -117,13 +125,29 @@ def main() -> None:
         sys.exit(3)
 
     # ---- lazily build the heavy deps only past the guards ----
-    import chromadb
     from src.llm.llm_client import LLMClient
     llm = LLMClient.from_config(cfg, role="generation")
     emb = Embedder.from_config(cfg)
-    client = chromadb.PersistentClient(path=str(cfg.path("paths.chroma_dir")))
+    chroma_dir = cfg.path("paths.chroma_dir")
+    client = persistent_client(chroma_dir)
     col = client.get_or_create_collection(coll_name,
                                           metadata={"hnsw:space": "cosine"})
+
+    # Never mix two embedders' vectors in one collection: a fingerprint from
+    # another embedder ends the run before anything is embedded or written.
+    # No fingerprint on an EMPTY collection means this run creates it and
+    # records who embedded it; on one that already holds questions (the legacy
+    # hype_questions) it warns and carries on as before.
+    try:
+        stamped = check_collection(emb, chroma_dir, coll_name, role="hype")
+    except EmbeddingMismatchError as e:
+        print(f"ERROR: {e}")
+        sys.exit(3)
+    new_collection = stamped is None and col.count() == 0
+    if stamped is None and not new_collection:
+        print("WARNING: " + unstamped_warning(
+            coll_name, sidecar_path(chroma_dir, coll_name), emb.spec,
+            command=f"rag stamp --collection {coll_name}"))
 
     # resume: skip chunks whose q0 is already there
     existing: set[str] = set()
@@ -143,7 +167,9 @@ def main() -> None:
                 qs = _questions_from(resp.text, n_q)
                 if not qs:
                     raise ValueError("no questions parsed from LLM output")
-                vecs = emb.backend.embed(qs)
+                # Questions are matched against query vectors, so they are
+                # embedded on the query side (its prefix, if one is configured).
+                vecs = emb.embed_queries(qs)
                 col.upsert(
                     ids=[f"{did}::q{j}" for j in range(len(qs))],
                     embeddings=vecs,
@@ -159,6 +185,12 @@ def main() -> None:
                 time.sleep(2)                     # give a rate-limited API air
             if i % 25 == 0 or i == len(pending):
                 print(f"  [{i}/{len(pending)}] ok={done} failed={failed}")
+
+    if new_collection and done > 0:
+        write_sidecar(chroma_dir, coll_name, make_sidecar(
+            emb.spec, collection=coll_name, role="hype", status="complete",
+            dimension=stored_dimension(col), count=col.count(), written_by="build_hype",
+            source_digest=ids_digest(iter_ids(col))))
 
     print(f"\n✅ HyPE: {done} chunks -> '{coll_name}' "
           f"({col.count()} question vectors total), {failed} failed "

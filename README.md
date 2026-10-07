@@ -59,8 +59,9 @@ flowchart TD
     S --> RRF
     SL --> RRF
     CL --> RRF
-    RRF --> RR["Rerank policy<br/>cross-encoder / HTTP / lexical / none"]
-    RR --> EX["Optional small-to-big<br/>context expansion"]
+    RRF --> RR["Rerank policy<br/>cross-encoder / HTTP / lexical / none<br/>(experimental: Laya)"]
+    RR --> GT["Optional relevance gate<br/>drops weak chunks · abstains if none pass"]
+    GT --> EX["Optional small-to-big<br/>context expansion"]
     EX --> G["Grounded generation<br/>answer + [n] citations + confidence"]
     G --> V["Optional second-pass<br/>citation verification"]
 ```
@@ -91,7 +92,9 @@ are optional lanes that open only when the query calls for them.
   model-free lexical scorer on hardware that cannot afford one.
   **Bigger is not automatically better on your corpus** — that is what
   `recall@k` and `MRR` in the eval suite are for, and the default stays the
-  cheap, portable model until your own numbers say otherwise.
+  cheap, portable model until your own numbers say otherwise. A further method, an
+  experimental fine-tuned scorer (Laya), sits behind a flag, off by default; see
+  Evaluation below.
 - **Grounded, cited generation** answers from the retrieved excerpts only, emits
   inline `[n]` citations and a confidence line, and can run a second pass that
   verifies each citation actually supports its sentence.
@@ -141,6 +144,66 @@ routed per rerank mode and the response echo reports whether it was actually
 applied — `lexical` scoring ignores it by design, because folding a sentence of
 instruction into a query-term set would dilute the query's own terms.
 
+### Follow the graph, then decide
+
+Obsidian canvases are graphs: nodes, plus edges the author drew by hand and
+often labelled. Those labels are the one place in a vault where someone has
+already written down *how two ideas relate* — and a plain retriever throws them
+away.
+
+The canvas lane flattens each node's edges into its chunk at ingest time, so the
+graph is visible to the embedder, the reranker and the model with no
+retrieval-time cost. On top of that sits **graph mode**, a separate endpoint
+rather than a knob on the main query — and, for now, an **experimental feature
+that ships switched off** (`graph.enabled: false`, flipped from the console's
+Settings > Experimental features panel). The cost of the traversal is measured;
+its retrieval benefit is not, and a mode nobody has scored against the golden
+set does not belong in the default workspace:
+
+```bash
+curl -s -X POST http://127.0.0.1:8051/graph/expand \
+  -H "Content-Type: application/json" \
+  -d '{"q": "how does the exam map break down", "depth": 2}'
+```
+
+It walks the edges and **stops**. No LLM runs. You get the nodes, the tree it
+walked with each edge's label and direction, the edges that loop back — canvas
+graphs are cyclic, and drawing one as a tree would hide that — and the name of
+whichever cap ended the walk, so a truncated traversal never passes for a whole
+graph.
+
+Then a human picks one of three things: take the raw nodes, answer from the
+graph alone, or merge the graph with the previous result's evidence. The last
+two are the same `POST /answer` call with a different id list, which keeps the
+API stateless and leaves "what counts as the previous stack" to the caller. An
+unknown id is an error, never a quietly smaller context.
+
+Depth lives here and not on `/query` on purpose: on the main path every ordinary
+question would pay for graph expansion it never asked for. The ingest-time twin
+of the same idea is `canvas.context_depth`, which inlines a neighbour's text
+into a chunk so the chunk is self-contained — opt-in, because it duplicates text
+across chunks, and the ingest run reports the measured inflation rather than
+assuming it.
+
+### Weight the lanes you fuse
+
+Hybrid retrieval here is not two lanes but eight: dense and sparse, their
+code-filtered and scope-filtered counterparts, the live-vault lane and the
+hypothetical-question lane. Reciprocal Rank Fusion merges them, and
+`retrieval.lane_weights` scales each one's contribution:
+
+```bash
+curl -s -X POST http://127.0.0.1:8051/search \
+  -H "Content-Type: application/json" \
+  -d '{"q": "exact loss function used", "lane_weights": {"sparse": 1.5}}'
+```
+
+Every lane defaults to `1.0`, so an untouched config fuses exactly as plain RRF.
+Weights merge lane by lane across config, preset and call, an unknown lane name
+is an error rather than a setting that does nothing, and the retrieval echo
+reports all eight effective weights — not just the ones you overrode. Tune them
+against the golden-set eval rather than by feel.
+
 ### Compare runs instead of guessing
 
 `POST /compare` runs a bounded tree of preset, reranker, or provider branches
@@ -162,8 +225,10 @@ same thing is a collapsible **Query comparison tree** panel under the composer.
 | **Corpus Ledger console** (`manage_api`) | `:8052` | Visual management: Query, Documents (search / filter / retag / delete), Vault browser, Ingest, Jobs, Settings, and an Info tab that diagrams the whole pipeline in-app. `GET /api/schema` is its machine-readable, permission-tiered capability map. |
 
 Both are documented endpoint by endpoint in the
-**[API reference](docs/api.md)** — 13 query endpoints and 38 management
-endpoints, every one of them callable by an agent without a browser.
+**[API reference](docs/api.md)**, and every one of them is callable by an agent
+without a browser. Each service also publishes its own live contract —
+`GET :8051/schema` and `GET :8052/api/schema` — so the authoritative list is
+the running server's, not a number in a README.
 
 The console's import lane pulls online sources straight into the corpus
 pipeline: fetch a URL as **markdown** or as a **printed PDF** of the fully
@@ -188,7 +253,63 @@ See **[Agent integration](docs/agents.md)**.
 
 ## Evaluation — honest by design
 
-A labelled suite (`eval/golden_queries.yaml`) scored automatically in three
+Two harnesses, for different questions. **The bench** (`python main.py bench …`)
+scores retrieval *per pipeline configuration* against labelled questions, which is
+what lets it say which component helps. **The golden suite** (`python main.py
+eval …`, further down) is the older one: cheap regression checks, and still the
+only home of the answer and calibration tiers.
+
+### The bench: which component helps?
+
+Each question carries its gold as a *locator* (a file, plus an optional page range
+or heading) rather than a chunk id, so labels survive a re-chunk or an embedding
+swap, which are exactly what the bench exists to compare. Each question gets a
+**dev** or a **test** split once, and the split is stored. One in-process pipeline
+is then scored under named configurations, each just a set of per-call overrides
+(`lanes`, `metadata_boost`, `rerank`, `hyde`, …), so nothing is rebuilt between
+rows:
+
+```bash
+python main.py bench sample                   # seed packs to draft questions from
+python main.py bench validate --write-cache   # gold files exist, locators resolve, nuggets are backed
+python main.py bench split                    # assign dev / test, once
+python main.py bench run --configs ladder     # also: loo, factorial, or named configurations
+python main.py bench report eval/runs/<run>   # re-render a finished run's scorecard
+```
+
+- **Ladder, leave-one-out, factorial.** The ladder adds one component per rung
+  (BM25, dense, hybrid, scope routing, the code lanes, the cross-encoder, HyDE);
+  leave-one-out removes each in turn from the full pipeline; the factorial runs
+  every subset, which is the input to an exact Shapley split of each component's
+  contribution. The report renders the ladder today; the Shapley computation exists
+  in `eval/bench/stats.py` but is not yet rendered.
+- **Paired statistics.** Every mean carries a bootstrap interval with a fixed seed.
+  A-versus-B comparisons are paired on the same questions, and a ladder step is
+  called real only when its paired 95% interval excludes zero. A suite with few
+  scored questions is marked as a diagnostic, and latency is reported per stage over
+  warm calls only.
+- **A sealed test split.** `--split test` refuses to run without `--unseal-test`,
+  and every opening is appended to a ledger before the first search; reports print
+  how many times the test split has been opened.
+- **Immutable run records.** Each run writes its own `eval/runs/<id>/`: code and
+  config digests, an index fingerprint, one row per question and configuration, a
+  summary with intervals, and the scorecard. Question sets and run records quote
+  the notes they were built from, so they stay local.
+
+**Measurable options, not claimed improvements.** Optional components ship
+**off** and unmeasured. A **relevance gate** drops chunks that score below a
+threshold after the rerank and, when none pass, abstains with the fixed "nothing
+relevant" answer without calling the LLM. An **experimental Laya reranker**
+(`rerank: laya`) is a scorer fine-tuned on the user's own notes. Both have named
+bench configurations (`gate-rerank-score`, `gate-laya`, `laya-rerank`) and a rule
+fixed in advance: tune on dev, show a paired interval that excludes zero against
+the current default, and only then check that it holds on test. This README quotes
+no bench results. [`docs/evaluation.md`](docs/evaluation.md) has the details, and
+says what the bench cannot do yet.
+
+### The golden suite
+
+It predates the bench. A labelled suite (`eval/golden_queries.yaml`) scored automatically in three
 tiers, each one clear about what it can and cannot prove. Every run writes a
 JSON result and a markdown scorecard, and **every metric reports the number of
 questions it was actually scored over** — a metric with no ground truth reports
@@ -266,7 +387,8 @@ python main.py index
 # 3. (optional) add PDFs, notebooks, and code, then append
 python main.py ingest-pdfs                       # -> data/pdf_chunks.jsonl
 python main.py ingest-notebooks                  # -> data/ipynb_chunks.jsonl
-python main.py ingest-code --include-path "src"  # -> data/code_chunks.jsonl
+# a SCOPED run replaces whatever file it writes, so it gets its own output:
+python main.py ingest-code --include-path "src" --output data/src_code_chunks.jsonl
 python main.py index --append data/pdf_chunks.jsonl
 
 # 4. Ask
@@ -338,7 +460,7 @@ benchmark behind that choice.
 config.yaml / config.example.yaml   # every tunable: providers, top-k, presets, paths, routing
 ocr-sidecar/                        # the OCR sidecar's source: one server.py, CPU + GPU images
 .env.example                        # secrets template (real .env is gitignored)
-main.py                             # CLI: index | ingest-* | query | chat | eval | serve
+main.py                             # CLI: index | ingest-* | query | chat | eval | bench | serve
 serve_api.py                        # warm query API (:8051)
 manage_api.py                       # Corpus Ledger console backend (:8052)
 webui/index.html                    # the console front-end
@@ -347,13 +469,15 @@ src/
   ingestion/   # obsidian_parser, pdf_loader (OCR-capable), ipynb_loader, code_loader,
                # ocr_vlm (vision-model OCR), ocr_paddle (PaddleOCR sidecar), web_import
   embeddings/  # embedder — builds ChromaDB + bm25s from chunk JSONL
-  retrieval/   # retriever (hybrid + RRF + code lane), reranker, hyde, scope, context_expand
+  retrieval/   # retriever (hybrid + RRF + code lane), reranker (+ experimental laya_reranker),
+               # relevance_gate, hyde, scope, context_expand
   generation/  # generator — grounded answers + citation verification
   llm/         # unified OpenAI-/Anthropic-compatible client
   prompts/     # versioned YAML prompt templates + loader
   utils/       # config_loader (comment-preserving persistence), logger
   pipeline.py  # wires the query path together
-eval/          # golden suite, tiered runner + pure metric layer (metrics.py)
+eval/          # golden suite + tiered runner (metrics.py); bench/ is the per-configuration
+               # harness, configs.yaml its named configurations
 tests/         # pytest suite
 docs/          # MkDocs documentation site
 ```
@@ -374,11 +498,6 @@ docs/          # MkDocs documentation site
   API returns a readable error object (not a 500) and retrieval still works; if
   the pipeline cannot be built at all, `/health` says so with the reason and
   every query answers 503 with the same text instead of a bare refusal.
-
-Deliberately **not** implemented: weighted RRF. It was evaluated and skipped —
-the downstream cross-encoder already absorbs the benefit once the right chunks
-are in the pool, and per-lane weights only re-introduce a tuning burden for
-gains within noise.
 
 ## License & credits
 

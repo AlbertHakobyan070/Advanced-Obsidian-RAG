@@ -107,6 +107,13 @@ nav button.on{color:var(--amber);border-bottom-color:var(--amber)}
 section{display:none} section.on{display:block;animation:rise .25s ease}
 @keyframes rise{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
 
+/* Experimental-feature gate. The attribute form (not a class) so the element
+   is hidden from assistive tech too, and !important so it beats any author
+   display rule the element already carries — #q-graph-panel is a <details>
+   styled by .q-compare. Nothing else in this file uses the `hidden`
+   attribute, so this rule has exactly one job. */
+[hidden]{display:none!important}
+
 /* panels + primitives */
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:18px 20px;margin-bottom:18px}
 .panel h2{margin:0 0 4px;font-size:17px}
@@ -306,6 +313,13 @@ button.btn.icon.on{border-color:var(--amber);color:var(--amber)}
 .thm-chip .sw{width:16px;height:16px;border-radius:50%;border:1px solid var(--line);flex:none}
 .thm-chip .op{opacity:.55;font-size:11px;padding:0 2px}
 .thm-chip .op:hover{opacity:1;color:var(--amber)}
+/* bulk theme export / import: result + warning blocks (tokens only; an empty one takes no room) */
+.thm-msg{margin-top:10px;padding:8px 12px;border-left:3px solid var(--amber-dim);background:var(--panel-2);
+  border-radius:0 var(--r) var(--r) 0;font-size:13px;overflow-wrap:anywhere}
+.thm-msg.bad{border-left-color:var(--red)}
+.thm-msg b{color:var(--ink)}   /* the red border says "problem"; the words stay at full contrast */
+.thm-msg code{font:11.5px var(--mono);background:var(--panel);border:1px solid var(--line);border-radius:3px;padding:0 4px;color:var(--ink)}
+.thm-msg:empty{margin:0;padding:0;border:0;background:none}
 /* folder picker rows */
 .fp-row{padding:4px 8px;border-radius:4px;cursor:pointer;font-size:13px}
 .fp-row:hover{background:var(--row-hover);color:var(--amber)}
@@ -493,6 +507,32 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
 #tab-query .qcmp-evidence div{margin-top:5px;padding:6px;border-left:2px solid var(--line);
   background:var(--panel-2);font:10.5px/1.45 var(--body);white-space:pre-wrap;word-break:break-word;
   max-height:220px;overflow:auto}
+/* ---- Graph RAG panel. Borrows the comparison tree's shell (qcmp-bar,
+   qcmp-head, qcmp-catalog) so the two experiment panels read as siblings;
+   everything below is only what a TRAVERSAL needs and a branch list doesn't:
+   depth indentation, edge labels on the connector, and cycle markers. ---- */
+#tab-query .qg-knobs{display:grid;grid-template-columns:repeat(5,1fr);gap:7px;margin-top:10px}
+#tab-query .qg-stats{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0 4px}
+#tab-query .qg-tree{margin-top:8px;border:1px solid var(--line);border-radius:8px;
+  background:var(--panel-2);padding:8px 10px;max-height:460px;overflow:auto}
+#tab-query .qg-node{position:relative;padding:5px 0 5px 12px;border-left:1px solid var(--line)}
+#tab-query .qg-node.d0{border-left:2px solid var(--amber-dim);padding-left:10px}
+#tab-query .qg-row{display:flex;align-items:flex-start;gap:7px;min-width:0}
+#tab-query .qg-row input[type=checkbox]{margin:3px 0 0;width:13px;height:13px;accent-color:var(--amber);flex:none}
+#tab-query .qg-edge{flex:none;font:600 10px var(--mono);color:var(--amber);white-space:nowrap;padding-top:2px}
+#tab-query .qg-body{min-width:0;flex:1}
+#tab-query .qg-title{font-size:12px;color:var(--ink);word-break:break-word}
+#tab-query .qg-meta{margin-top:2px;font:9.5px var(--mono);color:var(--ink-faint);word-break:break-all}
+#tab-query .qg-excerpt{margin-top:4px}
+#tab-query .qg-excerpt summary{cursor:pointer;font-size:9.5px;color:var(--ink-dim)}
+#tab-query .qg-excerpt div{margin-top:4px;padding:6px;border-left:2px solid var(--line);
+  background:var(--panel);font-size:11px;white-space:pre-wrap;max-height:200px;overflow:auto}
+#tab-query .qg-cycle{padding:3px 0 3px 12px;font:10px var(--mono);color:var(--ink-faint)}
+#tab-query .qg-cycle b{color:var(--amber-dim);font-weight:600}
+#tab-query .qg-fork{display:flex;gap:7px;flex-wrap:wrap;align-items:center;margin-top:12px;
+  padding-top:11px;border-top:1px solid var(--line)}
+#tab-query .qg-why{flex-basis:100%;margin:0;font-size:10.5px;color:var(--ink-faint)}
+#tab-query .qg-fork button[disabled]{opacity:.45;cursor:not-allowed}
 #tab-query .qcmp-pairs{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
 #tab-query .qcmp-pair{padding:5px 7px;border:1px solid var(--line);border-radius:6px;background:var(--panel);
   font:9.5px var(--mono);color:var(--ink-dim)}
@@ -512,12 +552,107 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
   #tab-query .fset-context{grid-column:auto}
   #tab-query .q-lanes{grid-template-columns:1fr}
   #tab-query .q-compare{margin-left:12px;margin-right:12px}
+  #tab-query .qg-knobs{grid-template-columns:repeat(2,1fr)}
+  #tab-query .qg-node{padding-left:10px}
   #tab-query .qcmp-controls{width:100%}
   #tab-query .qcmp-controls .q-tool{flex:1 1 120px}
   #tab-query .qcmp-grid{grid-template-columns:1fr}
   #tab-query .qcmp-grid:before{display:none}
 }
 @media(prefers-reduced-motion:reduce){.infocard{transition:none} .infocard:hover{transform:none}}
+
+/* ---- Eval review queue (Eval tab). Left: suite progress + the filtered list;
+   right: the selected question, sticky so it stays beside the list. Theme
+   tokens only (no colour literals), so every theme - dark, light, both mints,
+   imported ones - carries it. ---- */
+#tab-eval .ev-grid{grid-template-columns:minmax(0,1fr) minmax(0,1.5fr);align-items:start}
+#tab-eval .ev-left{display:flex;flex-direction:column;gap:18px;min-width:0}
+#tab-eval .ev-grid .panel{margin-bottom:0}
+/* progress: a track as long as the quota; solid = verified + edited, shaded =
+   drafted and still waiting for review */
+#tab-eval .ev-bars{display:flex;flex-direction:column;gap:7px;margin-top:10px}
+#tab-eval .ev-bar{display:grid;grid-template-columns:96px minmax(0,1fr) 84px;gap:10px;align-items:center}
+#tab-eval .ev-bar .lbl{font:12px var(--mono);color:var(--ink-dim);text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#tab-eval .ev-bar .n{font:12px var(--mono);color:var(--ink);white-space:nowrap}
+#tab-eval .ev-bar .n .pct{color:var(--ink-dim);font-size:10px;margin-left:4px}
+#tab-eval .ev-track{position:relative;height:14px;border-radius:3px;background:var(--panel-2);border:1px solid var(--line);overflow:hidden}
+#tab-eval .ev-fill{position:absolute;left:0;top:0;bottom:0}
+#tab-eval .ev-fill.draft{background:color-mix(in srgb,var(--amber) 28%,transparent)}
+#tab-eval .ev-fill.done{background:linear-gradient(90deg,var(--amber-dim),var(--amber))}
+#tab-eval .ev-bar.full .ev-fill.done{background:var(--green)}
+#tab-eval .ev-bar.total{margin-top:4px;padding-top:9px;border-top:1px solid var(--line)}
+#tab-eval .ev-bar.total .lbl{color:var(--ink);font-weight:600}
+/* filters + the question list */
+#tab-eval .ev-filters{margin-top:12px;gap:8px}
+#tab-eval .ev-filters select{flex:1 1 104px}
+#tab-eval .ev-count{margin:10px 0 6px;font-size:12px}
+#tab-eval .ev-list{max-height:58vh;overflow:auto;border:1px solid var(--line);border-radius:var(--r);background:var(--panel)}
+#tab-eval .ev-row{display:block;width:100%;appearance:none;text-align:left;font:inherit;color:inherit;background:none;
+  border:0;border-bottom:1px solid var(--td-line);border-left:3px solid transparent;padding:9px 12px 9px 10px;cursor:pointer}
+#tab-eval .ev-row:last-child{border-bottom:0}
+#tab-eval .ev-row:hover{background:var(--row-hover)}
+#tab-eval .ev-row[aria-current="true"]{background:var(--row-sel);border-left-color:var(--amber)}
+#tab-eval .ev-row:focus-visible{outline:2px solid var(--amber);outline-offset:-2px}
+#tab-eval .ev-row-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+#tab-eval .ev-id{font:600 12px var(--mono);color:var(--ink)}
+#tab-eval .ev-meta{font:11px var(--mono);color:var(--ink-dim)}
+#tab-eval .ev-flags{margin-left:auto;display:flex;gap:5px}
+#tab-eval .ev-q{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;margin-top:4px;
+  color:var(--ink-dim);font-size:13px;line-height:1.45;overflow-wrap:anywhere}
+#tab-eval .ev-row.rejected .ev-q{text-decoration:line-through;text-decoration-color:var(--ink-faint)}
+/* the selected question. Sticky, and never taller than the viewport minus its 12px
+   top offset and the page's own 80px bottom padding (.wrap): at maximum scroll the
+   grid ends 80px above the viewport's bottom, and a taller pane would be pushed up
+   out of view, taking its action bar with it. */
+#tab-eval .ev-detail{position:sticky;top:12px;max-height:calc(100vh - 92px);overflow:auto}
+#tab-eval .ev-dhead{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+#tab-eval .ev-dhead h2{margin:0 6px 0 0}
+#tab-eval .ev-actions{position:sticky;top:-18px;z-index:2;display:flex;flex-wrap:wrap;gap:8px;align-items:center;
+  margin:12px -20px 0;padding:10px 20px;background:var(--panel);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+#tab-eval .ev-actions.busy button{pointer-events:none;opacity:.45}
+#tab-eval .ev-sep{align-self:stretch;width:1px;margin:0 2px;background:var(--line)}
+#tab-eval .ev-pos{margin-left:auto;font:11px var(--mono);color:var(--ink-dim);white-space:nowrap}
+#tab-eval kbd{font:9.5px var(--mono);color:var(--ink-dim);background:var(--panel);border:1px solid var(--line);
+  border-bottom-color:var(--ink-faint);border-radius:4px;padding:1px 5px;margin-left:6px;box-shadow:0 1px 0 var(--line)}
+#tab-eval .btn.primary kbd{color:var(--btn-primary-ink);background:color-mix(in srgb,var(--btn-primary-ink) 14%,transparent);
+  border-color:color-mix(in srgb,var(--btn-primary-ink) 28%,transparent);box-shadow:none}
+#tab-eval .ev-question{margin:14px 0 2px;font-size:15px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}
+#tab-eval .ev-h{margin:18px 0 6px;font:11px var(--mono);color:var(--ink-dim);text-transform:uppercase;letter-spacing:.08em}
+#tab-eval .ev-nuggets{margin:0;padding-left:18px}
+#tab-eval .ev-nuggets li{margin:3px 0;overflow-wrap:anywhere}
+#tab-eval .ev-note{margin:6px 0 0;color:var(--ink-dim);font-size:12.5px;overflow-wrap:anywhere}
+#tab-eval .ev-notes{margin:0;padding:8px 12px;border-left:3px solid var(--line);background:var(--panel-2);
+  border-radius:0 var(--r) var(--r) 0;white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}
+#tab-eval .src .lab{overflow-wrap:anywhere}
+#tab-eval .src .txt{max-height:240px;overflow:auto;overflow-wrap:anywhere}
+#tab-eval .src .txt+.txt{border-top:1px dashed var(--line);padding-top:6px}
+#tab-eval .ev-find{display:flex;gap:8px;align-items:baseline;margin:5px 0;font-size:13px}
+#tab-eval .ev-find .code{font:11.5px var(--mono);color:var(--ink-dim);flex:none}
+#tab-eval code{font:11.5px var(--mono);background:var(--panel-2);border:1px solid var(--line);border-radius:3px;padding:0 4px;color:var(--ink)}
+#tab-eval .ev-err{margin-top:10px;padding:8px 12px;border-left:3px solid var(--red);background:var(--panel-2);
+  border-radius:0 var(--r) var(--r) 0;font-size:13px;overflow-wrap:anywhere;white-space:pre-wrap}
+#tab-eval .ev-err b{color:var(--red)}
+#tab-eval .ev-err:empty{margin:0;padding:0;border:0;background:none}
+#tab-eval #ev-check:not(:empty){margin-top:12px}
+/* the inline edit form */
+#tab-eval .ev-form input[type=text],#tab-eval .ev-form textarea,#tab-eval .ev-form select{width:100%}
+#tab-eval .ev-form textarea{resize:vertical;line-height:1.5}
+#tab-eval .ev-form input[readonly]{color:var(--ink-dim);background:var(--panel);cursor:default}
+#tab-eval .ev-lock{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+#tab-eval .ev-two{display:grid;grid-template-columns:120px minmax(0,1fr);gap:14px;align-items:end}
+#tab-eval .ev-gold-head,#tab-eval .ev-gold-row{display:grid;grid-template-columns:minmax(0,2.2fr) 112px minmax(0,1.4fr) 84px 30px;gap:8px;align-items:center}
+#tab-eval .ev-gold-head{font:10px var(--mono);color:var(--ink-dim);text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px}
+#tab-eval .ev-gold-row{margin-bottom:6px}
+/* a gold entry's alternatives (same passage in other files): read-only, under the source */
+#tab-eval .ev-alt{margin-top:6px;color:var(--ink-dim);font-size:12px}
+#tab-eval .ev-alt-h{font:10px var(--mono);text-transform:uppercase;letter-spacing:.08em}
+#tab-eval .ev-alt ul{margin:3px 0 0;padding-left:16px;font:11.5px var(--mono)}
+#tab-eval .ev-alt li{overflow-wrap:anywhere}
+#tab-eval .ev-gold-row .ev-alt{grid-column:1/-1;margin:0 0 4px}
+@media(max-width:1060px){
+  #tab-eval .ev-grid{grid-template-columns:minmax(0,1fr)}
+  #tab-eval .ev-detail{position:static;max-height:none}
+}
 </style>
 </head>
 <body>
@@ -541,6 +676,7 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
     <button data-tab="vault">Vault</button>
     <button data-tab="jobs">Jobs</button>
     <button data-tab="query">Query</button>
+    <button data-tab="eval">Eval</button>
     <button data-tab="settings">Settings</button>
     <button data-tab="info">Info</button>
   </nav>
@@ -606,14 +742,14 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
     <div class="panel">
     <h2>2 · Fetch &amp; convert <span class="hint" style="margin:0;display:inline">(optional)</span></h2>
     <p class="hint">Pull online articles as <b>.md</b> (markitdown) or as a <b>printed .pdf</b> of the rendered page (headless Chromium — LaTeX, tables and highlighted code exactly as the site shows them). Or convert uploaded files (pdf / docx / pptx / xlsx / html / …) to markdown. Outputs stage in <span class="mono">_converted</span> — <b>preview</b>, then <b>promote</b> to the inbox.</p>
-    <div class="desc">Paste <b>web links</b> (one per line) and Fetch. Output <code>→ .md</code> converts the page to markdown for the md ingest lane; <code>→ .pdf</code> prints the page through headless Chromium — the right choice for math-heavy or code-heavy sources, and the result ingests through the PDF lane (with real page numbers for OCR / --pages picking; use 👁 to find them). Backend <code>auto</code> = crawl4ai → scrapling → requests, whichever is installed. The optional <b>OCR pages</b> field applies to the <b>→md</b> convert button on inbox files: those PDF pages additionally go through Tesseract. Nothing touches the index until you <b>promote</b> a result and ingest it.</div>
+    <div class="desc">Paste <b>web links</b> (one per line) and Fetch. Output <code>→ .md</code> converts the page to markdown for the md ingest lane; <code>→ .pdf</code> prints the page through headless Chromium — the right choice for math-heavy or code-heavy sources, and the result ingests through the PDF lane (with real page numbers for OCR / --pages picking; use 👁 to find them). Backend <code>auto</code> = crawl4ai → scrapling → requests, whichever is installed; <code>crawlee</code> (headless Chromium via Crawlee) runs only when you pick it. The optional <b>OCR pages</b> field applies to the <b>→md</b> convert button on inbox files: those PDF pages additionally go through Tesseract. Nothing touches the index until you <b>promote</b> a result and ingest it.</div>
       <label class="f">Web links (one per line)</label>
       <textarea id="fx-urls" rows="3" style="width:100%" placeholder="https://example.com/article&#10;https://arxiv.org/abs/…"></textarea>
       <div class="row" style="margin-top:8px">
         <select id="fx-format" title="Output format. md = markdown via markitdown (text lane). pdf = print of the fully rendered page via headless Chromium — LaTeX/tables/code preserved; ingests through the PDF lane with page numbers.">
           <option value="md">output: → .md (markdown)</option><option value="pdf">output: → .pdf (printed page)</option></select>
-        <select id="fx-backend" title="Fetch backend for the .md path. auto = best installed (crawl4ai → scrapling → requests); requests always works. The .pdf path always renders in Chromium.">
-          <option value="auto">backend: auto</option><option value="requests">backend: requests</option><option value="crawl4ai">backend: crawl4ai</option><option value="scrapling">backend: scrapling</option></select>
+        <select id="fx-backend" title="Fetch backend for the .md path. auto = best installed (crawl4ai → scrapling → requests); requests always works; crawlee runs only when picked. The .pdf path always renders in Chromium.">
+          <option value="auto">backend: auto</option><option value="requests">backend: requests</option><option value="crawl4ai">backend: crawl4ai</option><option value="scrapling">backend: scrapling</option><option value="crawlee">backend: crawlee</option></select>
         <button class="btn primary" id="fx-fetch">Fetch</button>
       </div>
       <div class="row" style="margin-top:10px">
@@ -657,6 +793,7 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
       <option value="ingest_pdfs">ingest-pdfs</option>
       <option value="ingest_notebooks">ingest-notebooks</option>
       <option value="ingest_code">ingest-code</option>
+      <option value="ingest_canvas">ingest-canvas</option>
       <option value="index_append">index --append</option>
       <option value="index_rebuild">index (full rebuild)</option>
       <option value="rebuild_bm25">rebuild_bm25</option>
@@ -704,6 +841,16 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
       <div class="note">Covers the languages the notebook loader doesn't (.js/.ts/.sql/.go/.java/.c/.cpp/.rs/.sh/…). <b>.py/.R/.Rmd/.ipynb</b> stay on <b>ingest-notebooks</b>. Agent-project roots (Workspace1, Workspace2, …) are skipped unless an Include path names them.</div>
     </div>
 
+    <div id="jf-ingest_canvas" class="jform" style="display:none">
+      <div class="grid g2">
+        <div><label class="f">Include path (substring)</label><input id="p-canvas-include" placeholder="e.g. Capstone, Current Courses"></div>
+        <div><label class="f">Output JSONL</label><input id="p-canvas-output" placeholder="data/canvas_chunks.jsonl"></div>
+        <div><label class="f">Force domain</label><input id="p-canvas-domain" placeholder="domain (opt): swe / ml / nlp…"></div>
+        <div><label class="f">Force tags</label><input id="p-canvas-tags" placeholder="#tags (opt): a, b"></div>
+      </div>
+      <div class="note">One chunk per text node; that node's edges become a Connections footer + edge metadata. Canvas filenames rarely carry a course keyword — scope with Include path and set Force domain, or chunks land domain=general, course=unknown.</div>
+    </div>
+
     <div id="jf-index_append" class="jform" style="display:none">
       <label class="f">Chunk file to append</label>
       <select id="p-append-file"></select>
@@ -736,6 +883,61 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
     <div class="hint" style="margin:-2px 0 0">prefills the Advanced form with <span class="mono">--ocr-engine vlm</span></div>
   </div>
   </div><!-- /designer grid -->
+
+  <!-- ===== 4 · GRAPH & CANVASES =====================================
+       Its own section, NOT another row in the Advanced dropdown. A canvas
+       is not one more file format: the content is a graph, it lives in
+       several unrelated trees, its filenames carry no course keyword, and
+       the thing worth checking before committing is how many chunks come
+       out carrying edges — which no other lane has to answer. -->
+  <div class="grid g21" id="graph-ingest">
+  <div class="panel">
+    <h2>4 · Graph &amp; canvases <span class="hint" style="margin:0;display:inline">(.canvas)</span></h2>
+    <p class="hint">Obsidian canvases are graphs. Each text node becomes a chunk that carries its own edges — <b>preview first</b>, then queue.</p>
+    <div class="desc">The edges you drew between nodes are the one place in the vault where you already wrote down <b>how two ideas relate</b>. This lane flattens them into each chunk at ingest time as a <code>Connections</code> footer plus aligned edge metadata, which is what the <b>Graph RAG</b> panel on the Query tab traverses. Scope with a real folder rather than a guessed substring; <b>stamp a domain</b>, because canvas filenames almost never carry a course keyword and unscoped chunks land as <code>general / unknown</code>; then <b>Preview</b> — it runs the real loader into a scratch file, indexes nothing, and reports what you would actually get.</div>
+
+    <label class="f" style="margin-top:12px">Scope</label>
+    <div class="fc-grid" style="margin-top:6px">
+      <select id="cv-folder" title="Where canvases actually live in this vault, with counts. Picking one sets the include path below.">
+        <option value="">whole vault</option></select>
+      <input id="cv-include" placeholder="or a finer path substring: ArmHist EXAM, Spring 2025" title="Case-insensitive substring of the vault-relative path. Set by the folder picker, or type a narrower one.">
+      <button class="btn" id="cv-rescan" title="Re-scan the vault for .canvas files">⟳ rescan</button>
+    </div>
+    <div class="hint" id="cv-scope-msg" style="margin:6px 0 0">Scanning the vault for canvases…</div>
+
+    <label class="f" style="margin-top:14px">Graph chunking <span class="hint" style="margin:0;display:inline;text-transform:none;letter-spacing:0">(blank = config default; both are ingestion hyperparameters, not query ones)</span></label>
+    <div class="grid g4" style="gap:8px;margin-top:6px">
+      <label class="q-field"><span>Min chunk</span><input id="cv-min" class="num" type="number" min="1" max="5000" placeholder="50" title="Floor on the COMPOSED text (header + node text + Connections). Lower than the project-wide 200 because a short node with rich connections is worth keeping."></label>
+      <label class="q-field"><span>Max chunk</span><input id="cv-max" class="num" type="number" min="200" max="20000" placeholder="off" title="Split node bodies longer than this. Blank = no splitting, which is how every canvas chunk currently in the index was made. Node bodies here run p50 399 / p90 1782 / max 9408 chars."></label>
+      <label class="q-field"><span>Splitter</span><select id="cv-chunking" title="Used only when Max chunk bites."><option value="">heading (default)</option><option value="fixed">fixed</option><option value="document">document</option><option value="none">none</option></select></label>
+      <label class="q-field"><span>Node depth</span><select id="cv-depth" title="How much of a NEIGHBOUR is inlined into each chunk at ingest time. Above 0 duplicates text across chunks and inflates the index — Preview measures exactly how much."><option value="">0 · titles only (default)</option><option value="1">1 · inline neighbour text</option><option value="2">2 · + second-hop titles</option></select></label>
+    </div>
+
+    <label class="f" style="margin-top:14px">Metadata <span class="hint" style="margin:0;display:inline;text-transform:none;letter-spacing:0">(canvas filenames rarely carry a course keyword — without these, chunks land general / unknown)</span></label>
+    <div class="fc-grid" style="margin-top:6px">
+      <input id="cv-domain" placeholder="force domain: ml / nlp / stats / hist…" title="Stamped on every chunk this run produces. Feeds domain scope routing at query time.">
+      <input id="cv-tags" placeholder="force #tags: knowledge-map, exam-prep" title="Comma-separated. Stamped on every chunk — searchable, and boosted when a tag appears in the query.">
+      <input id="cv-output" placeholder="output: data/canvas_chunks.jsonl" title="A whole-vault run belongs in canvas_chunks.jsonl — doc_ids are keyed on the canvas node id, so re-running upserts rather than duplicating. A SCOPED run needs its own file: the loader truncates what it writes, so pointing a folder-scoped run at the canonical file would drop every other canvas out of the sparse index.">
+    </div>
+
+    <div class="row" style="margin-top:14px">
+      <button class="btn" id="cv-preview" title="Run the real loader into a scratch file. Indexes nothing.">👁 Preview</button>
+      <button class="btn primary" id="cv-queue" title="Queue the canvas ingest, then an index append of its output.">▶ Ingest + append</button>
+      <label class="chk" title="Queue an index --append of the produced JSONL right after the ingest, on the same serial queue."><input type="checkbox" id="cv-append" checked>append to the index</label>
+      <span id="cv-msg" class="hint" style="margin:0"></span>
+    </div>
+    <div id="cv-preview-out" style="margin-top:12px"></div>
+  </div>
+
+  <div class="panel">
+    <h2>What the graph lane gives you</h2>
+    <p class="hint">Why this is its own section rather than a file type.</p>
+    <div class="note" style="margin-top:10px"><b>Only text nodes become chunks.</b> <span class="mono">file</span>, <span class="mono">link</span> and <span class="mono">group</span> nodes never get their own chunk — chunking a <span class="mono">file</span> node would duplicate a note the vault already indexes. They still appear as edge endpoints and as a node's enclosing group.</div>
+    <div class="note"><b>doc_ids are keyed on the canvas node id</b>, not on the text. Two nodes saying the same thing don't collide, and editing a node's text <b>upserts</b> that chunk instead of orphaning it. Re-running this lane over the same canvases is safe.</div>
+    <div class="note"><b>Node depth is a real cost.</b> Inlining a neighbour's text duplicates it into every chunk that links to it. Measured on this vault: depth 1 ≈ 1.26× the canvas index text, depth 2 ≈ 1.36×. Preview reports the exact share for your scope before you commit.</div>
+    <div class="note"><b>After appending, restart :8051</b> — it loads the indexes once and stays warm. Then the <b>Graph RAG</b> panel on the Query tab can traverse what you just built.</div>
+  </div>
+  </div><!-- /graph ingest -->
 </section>
 
 <!-- ============================= DOCUMENTS ============================= -->
@@ -904,7 +1106,85 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
       <div class="qcmp-choices" id="q-compare-choices" aria-label="Comparison branches"></div>
       <div id="q-compare-out" aria-live="polite"></div>
     </details>
+
+    <!-- Graph RAG. A SEPARATE mode, not a knob on the query above: it walks
+         the edges drawn on canvases and then STOPS, waiting for a human to
+         decide what the retrieved nodes are for. Collapsed by default for the
+         same reason the comparison tree is — asking a question shouldn't
+         start below a panel nobody opened.
+
+         EXPERIMENTAL: `hidden` in the markup, revealed by
+         applyExperimentalGates() only when graph.enabled is true on disk.
+         Hidden by default rather than shown-then-hidden, so the panel never
+         flashes on a page load that is about to hide it — and hidden rather
+         than disabled, because a dead control in the default workspace
+         implies the feature is part of it. -->
+    <details class="q-compare q-graph" id="q-graph-panel" hidden
+             data-exp="graph_rag">
+      <summary class="qcmp-bar">
+        <span class="qcmp-caret" aria-hidden="true">▸</span>
+        <span class="qcmp-bar-text">
+          <b>Graph RAG · canvas traversal</b>
+          <small>Walk the edges you drew between canvas nodes, then choose what to do with what comes back</small>
+        </span>
+      </summary>
+      <div class="qcmp-head">
+        <div class="qcmp-title">
+          <p>Retrieval only — no LLM runs until you pick an action below. Depth lives here rather than on the main query so an ordinary question never pays for graph expansion it didn't ask for.</p>
+        </div>
+        <div class="qcmp-controls">
+          <label class="q-tool"><span>Seed from</span>
+            <select id="qg-seed" title="Search the canvas lane for seeds, or start from the chunks the last Ask/Search returned.">
+              <option value="q">The question above</option>
+              <option value="result">The last result's sources</option>
+            </select></label>
+          <button class="btn primary" id="qg-run" title="Walk the graph. No LLM is involved.">Walk the graph</button>
+        </div>
+      </div>
+      <div class="qg-knobs">
+        <label class="q-field"><span>Depth</span><input id="qg-depth" class="num" type="number" min="0" max="5" placeholder="config" title="Hops from the seed set. 0 returns the seeds untouched."></label>
+        <label class="q-field"><span>Seeds</span><input id="qg-seedk" class="num" type="number" min="1" max="50" placeholder="config" title="How many canvas chunks start the walk (query-seeded runs only)."></label>
+        <label class="q-field"><span>Per hop</span><input id="qg-perhop" class="num" type="number" min="1" max="50" placeholder="config" title="Neighbours followed per node. A hub with more edges than this reports max_per_hop."></label>
+        <label class="q-field"><span>Max nodes</span><input id="qg-total" class="num" type="number" min="1" max="500" placeholder="config" title="Total nodes in one traversal, seeds included."></label>
+        <label class="q-field"><span>Seed ranking</span><select id="qg-rerank" title="Reranker used to order query-seeded seeds. 'None' is much faster and uses the fused order."><option value="">Config default</option><option value="cross_encoder">Cross-encoder</option><option value="lexical">Lexical</option><option value="none">None · fused order</option></select></label>
+      </div>
+      <div class="qcmp-catalog" id="qg-msg" role="status">Nothing walked yet.</div>
+      <div id="qg-out" aria-live="polite"></div>
+      <!-- The fork. Rendered only after a traversal, and (a) is shown
+           DISABLED with its reason rather than hidden — a missing button
+           teaches nobody why it is missing. -->
+      <div id="qg-fork"></div>
+      <div id="qg-answer"></div>
+    </details>
     <div id="q-out" style="margin-top:14px"></div>
+  </div>
+</section>
+
+<!-- ============================= EVAL ============================= -->
+<!-- The review queue over eval/sets/*.yaml (served by manage_api /api/eval/*).
+     Left: suite progress + the filtered list. Right: the selected question and
+     its actions. Keyboard: V verify, R reject, E edit, J/K next/previous. -->
+<section id="tab-eval">
+  <div class="grid ev-grid">
+    <div class="ev-left">
+      <div class="panel">
+        <h2>Review progress</h2>
+        <p class="hint">Solid = verified + edited, out of each suite's quota. Shaded = drafted and still waiting for review. Rejected questions don't count.</p>
+        <div class="ev-bars" id="ev-bars"><div class="skel"></div><div class="skel" style="width:85%"></div><div class="skel" style="width:70%"></div></div>
+      </div>
+      <div class="panel">
+        <h2>Questions</h2>
+        <div class="row ev-filters">
+          <select id="ev-f-suite" aria-label="Filter by suite"><option value="">all suites</option></select>
+          <select id="ev-f-status" aria-label="Filter by status"><option value="">all statuses</option><option value="draft" selected>draft</option><option value="verified">verified</option><option value="edited">edited</option><option value="rejected">rejected</option></select>
+          <select id="ev-f-split" aria-label="Filter by split"><option value="">all splits</option><option>dev</option><option>test</option></select>
+          <button class="btn" id="ev-refresh" title="Reload the progress bars and the list from disk">⟳ reload</button>
+        </div>
+        <div class="hint ev-count" id="ev-count"></div>
+        <div class="ev-list" id="ev-list"><div class="skel"></div><div class="skel" style="width:80%"></div><div class="skel" style="width:65%"></div></div>
+      </div>
+    </div>
+    <div class="panel ev-detail" id="ev-detail"></div>
   </div>
 </section>
 
@@ -913,6 +1193,7 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
   <div class="grid g12">
   <div class="panel">
     <h2>Appearance</h2>
+    <div class="thm-msg bad" id="thm-warn" role="alert"></div>
     <div class="desc">Themes and description mode are <b>browser-local</b> (saved in this browser, not in config.yaml). The two shelves keep dark and light presets apart; click a chip to apply it. Custom presets carry <b>✎ rename</b> and <b>✕ delete</b>; built-ins don't. The header theme button cycles through everything on both shelves.</div>
     <label class="f">Dark presets</label>
     <div class="thm-shelf" id="thm-dark-shelf"></div>
@@ -937,6 +1218,19 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
         <button class="btn primary" id="thm-save" title="Save the pasted variables as a named preset on the chosen shelf and switch to it">Save as preset</button>
       </div>
       <div class="hint" style="margin-top:6px">Paste <span class="mono">--var: value;</span> pairs, with or without a <span class="mono">{…}</span> wrapper — Export shows every variable the console uses. Omitted variables inherit from Ledger dark. Saved presets live on the shelves above with rename / delete.</div>
+    </div>
+    <div style="margin-top:16px"><label class="f">All custom presets — back up, or move them to another browser</label>
+      <div class="row" style="margin-top:6px">
+        <button class="btn" id="thm-export-all" title="Download every custom preset as ONE JSON file (noetrix-themes-YYYY-MM-DD.json)">Export all themes</button>
+        <button class="btn" id="thm-import-all" title="Pick a themes JSON file and merge it in. Nothing is overwritten: a key that already exists with different content comes in as key-2, key-3, …">Import themes…</button>
+        <input type="file" id="thm-import-file" accept=".json,application/json" style="display:none">
+      </div>
+      <label class="f" for="thm-import-text" style="margin-top:12px">…or paste the JSON</label>
+      <textarea id="thm-import-text" rows="3" style="width:100%;font-family:var(--mono);font-size:12px" spellcheck="false" placeholder='{"format": "noetrix-themes", "version": 1, "themes": {…}}&#10;or a bare map: {"my-key": {"label": "…", "mode": "dark", "css": "--bg: …;"}}'></textarea>
+      <div class="row" style="margin-top:8px"><button class="btn" id="thm-import-paste" title="Merge the pasted JSON in, exactly as a file would be">Import pasted JSON</button></div>
+      <div class="thm-msg" id="thm-bulk-ok" role="status"></div>
+      <div class="thm-msg bad" id="thm-bulk-err" role="alert"></div>
+      <div class="hint" style="margin-top:6px">Importing merges and never overwrites: a key that already exists with different content comes in as <span class="mono">key-2</span> (then <span class="mono">-3</span>…), identical presets are skipped, and a file that fails validation changes nothing. Both the wrapped file and a bare <span class="mono">{key: {label, mode, css}}</span> map are accepted. The single-preset export and Save above work as before.</div>
     </div>
   </div>
 
@@ -964,6 +1258,19 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
       <button class="btn" id="set-reload" title="Discard edits and re-read current values">Reload</button>
       <span id="set-msg" class="hint" style="margin:0"></span>
     </div>
+  </div>
+
+  <!-- Experimental features. Rendered from the server's EXPERIMENTAL_FEATURES
+       registry, never hardcoded here: the next experimental feature is a row
+       there plus its own flag, with no change to this file. Each switch writes
+       its flag through the SAME /api/settings endpoint as everything else —
+       immediately rather than on Save, because a feature flag is one value and
+       staging it would only hide the restart it needs. -->
+  <div class="panel">
+    <h2>Experimental features <span class="hint" style="margin:0;display:inline">— built and tested, not yet part of the default workflow</span></h2>
+    <p class="hint">Off means the feature's controls are <b>hidden</b>, not merely disabled — an unproven panel sitting in the Query tab implies it is part of how you work. Turning one on writes <span class="mono">config.yaml</span> straight away and tells you what to restart.</p>
+    <div class="desc">These are features whose <b>cost is known and whose benefit is not measured yet</b>. They ship switched off on purpose: the honest place for a mode nobody has scored against the golden set is behind a flag, not in the default Query tab. Nothing here affects ordinary Ask / Search, and nothing here is removed from the API — the endpoints answer <span class="mono">503</span> with the reason while the flag is off, so an agent gets an explanation instead of a silent miss.</div>
+    <div id="exp-list"><div class="skel"></div></div>
   </div>
 </section>
 
@@ -1383,7 +1690,7 @@ const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const state={ragApi:"http://127.0.0.1:8051",jsonls:[],docsOffset:0,docsQuery:{},selDocs:new Set(),job:null,jobOffset:0,timers:{},
   queryCatalog:{presets:[],providers:[],schemaError:"",providersError:""},
   compareSelected:{preset:new Set(),reranker:new Set(),provider:new Set()},
-  queryProviderActive:null,queryBusy:false};
+  queryProviderActive:null,queryBusy:false,lastGraph:null,canvasFolders:null};
 const fmt=n=>typeof n==="number"?n.toLocaleString("en-US"):n;
 const gb=b=>b>1<<30?(b/(1<<30)).toFixed(2)+" GB":(b/(1<<20)).toFixed(1)+" MB";
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -1526,8 +1833,11 @@ $("#nav").addEventListener("click",e=>{const b=e.target.closest("button");if(!b)
   $$("section").forEach(s=>s.classList.toggle("on",s.id==="tab-"+b.dataset.tab));
   clearInterval(state.timers.tab);
   if(b.dataset.tab==="ledger"){loadOverview();state.timers.tab=setInterval(loadOverview,10000)}
-  if(b.dataset.tab==="ingest"){loadInbox();loadConverted()}
+  // The canvas scan walks the whole vault, which is slow on a cold drive —
+  // so it runs on first sight of the tab, not at boot, and caches.
+  if(b.dataset.tab==="ingest"){loadInbox();loadConverted();loadCanvasFolders()}
   if(b.dataset.tab==="settings")loadSettings();
+  if(b.dataset.tab==="eval")evOpen();
   if(b.dataset.tab==="jobs"){loadJobs();state.timers.tab=setInterval(loadJobs,2000)}
   if(b.dataset.tab==="vault"&&!state.vaultLoaded){state.vaultLoaded=true;loadVaultRoot()}
   if(b.dataset.tab==="info")renderInfoMath();
@@ -1890,7 +2200,7 @@ $("#fx-format").onchange=()=>{
   $("#fx-backend").style.opacity=pdf?".55":"";
   $("#fx-backend").title=pdf
     ?"Not used for .pdf — that path always renders in headless Chromium. Your choice here is kept for the next .md fetch."
-    :"Fetch backend for the .md path. auto = best installed (crawl4ai → scrapling → requests); requests always works.";
+    :"Fetch backend for the .md path. auto = best installed (crawl4ai → scrapling → requests); requests always works; crawlee runs only when picked.";
 };
 $("#fx-format").onchange();
 $("#fx-fetch").onclick=async()=>{
@@ -1952,8 +2262,9 @@ const JOB_KIND_HINTS={
   ingest_pdfs:"Extract + chunk vault PDFs (text layer, OCR fallback) into a JSONL. Scope with include/exclude paths or the Books filters; --pages trims front/back matter. Follow with index --append.",
   ingest_notebooks:"Parse .ipynb/.py/.R/.Rmd — code cells, markdown cells and (optionally) outputs become chunks. Owns the notebook formats; other languages go to ingest-code.",
   ingest_code:"Raw source files (.js/.ts/.sql/.go/.java/…) language-fenced into chunks. Agent-project roots are skipped unless an include path names them.",
+  ingest_canvas:"Parses .canvas files — one chunk per text node, edges flattened into a Connections footer. Most canvas filenames carry no course keyword, so an unscoped run lands them as general/unknown; scope with include path and stamp with force domain.",
   index_append:"Upsert one chunk JSONL into ChromaDB (dense) and auto-rebuild the sparse index. Idempotent by doc_id — safe to re-run.",
-  index_rebuild:"Full dense rebuild from chunks.jsonl — heavy (re-embeds everything). Only for disaster recovery or an embedding-model change.",
+  index_rebuild:"DESTRUCTIVE: deletes the dense collection and rebuilds both indexes from chunks.jsonl ALONE — every appended lane (PDFs, notebooks, code, canvases, inbox files) drops out until its JSONL is re-appended, a fresh re-embed each. Heavy. Only for disaster recovery or an embedding-model change.",
   rebuild_bm25:"Re-derive the sparse BM25 index from ALL chunk JSONLs (no embedding model involved). The fix for an ✗ drifted Index-health card.",
   recalibrate:"Re-run path-based course detection over existing metadata (no re-embed). Dry-run reports; wet run updates ChromaDB and needs a BM25 rebuild after.",
   eval:"Score the golden-query suite. retrieval_only runs offline in minutes; full mode needs the generation endpoint up.",
@@ -1977,12 +2288,132 @@ $("#btn-queue").onclick=async()=>{
   if(k==="ingest_code")params={output:$("#p-code-output").value||undefined,
     include_path:$("#p-code-include").value||undefined,exclude_path:$("#p-code-exclude").value||undefined,
     exts:$("#p-code-exts").value.trim()||undefined};
+  if(k==="ingest_canvas")params={output:$("#p-canvas-output").value||undefined,
+    include_path:$("#p-canvas-include").value||undefined,force_domain:$("#p-canvas-domain").value||undefined,
+    force_tags:$("#p-canvas-tags").value.trim()||undefined};
   if(k==="index_append")params={file:$("#p-append-file").value};
   if(k==="recalibrate")params={dry_run:$("#p-recal-dry").checked};
   try{const r=await api("/api/jobs",{method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({kind:k,params})});
     $("#queue-msg").textContent="queued "+r.job.id;toast("Job "+r.job.id+" queued")}
   catch(e){toast(e.message,1)}
+};
+
+/* ================= 4 · Graph & canvases (Ingest tab) =================
+   Its own lane, with the two things no other ingest lane needs: a scope
+   picker over the trees canvases actually live in, and a dry run that
+   reports the GRAPH (how many chunks come out carrying edges) before
+   anything is indexed. */
+async function loadCanvasFolders(force){
+  const sel=$("#cv-folder"),msg=$("#cv-scope-msg");
+  if(!sel)return;
+  if(state.canvasFolders&&!force)return;
+  msg.textContent="Scanning the vault for canvases…";
+  try{
+    const f=await api("/api/canvas/folders"+(force?"?refresh=1":""));
+    state.canvasFolders=f;
+    sel.innerHTML=`<option value="">whole vault · ${fmt(f.total)} canvas(es)</option>`+
+      (f.folders||[]).map(d=>`<option value="${esc(d.path)}">${esc(d.path)} · ${fmt(d.canvases)}</option>`).join("");
+    msg.textContent=(f.total
+      ? `${fmt(f.total)} canvas file(s) across ${f.folders.length} tree(s) in ${f.vault}`
+      : `No .canvas files found in ${f.vault}`)
+      +(f.cached?` · cached ${f.age_s}s ago — ⟳ rescan after adding canvases`:"");
+  }catch(e){msg.textContent="Could not scan the vault: "+e.message}
+}
+function canvasParams(){
+  const p={};
+  const inc=$("#cv-include").value.trim()||$("#cv-folder").value;
+  if(inc)p.include_path=inc;
+  const mx=$("#cv-max").value;if(mx)p.max_chunk_size=+mx;
+  const ck=$("#cv-chunking").value;if(ck)p.chunking=ck;
+  const dp=$("#cv-depth").value;if(dp!=="")p.context_depth=+dp;
+  return p;
+}
+function renderCanvasPreview(p){
+  const pill=(t,cls)=>`<span class="pill ${cls||""}">${esc(t)}</span>`;
+  const s=p.sample;
+  const edges=s&&s.edges&&s.edges.length
+    ? s.edges.slice(0,6).map(e=>`${e.direction==="<-"?"←":"→"} ${e.label?`[${esc(e.label)}]`:"(unlabelled)"}`).join(" · ")
+    : "none";
+  /* Flagged, not buried: this is the exact failure the force-domain field
+     exists to prevent, and it is invisible until someone queries later. */
+  const unscoped=s&&(!s.domain||s.domain==="general")&&(!s.course_name||s.course_name==="unknown")
+    &&!$("#cv-domain").value.trim();
+  $("#cv-preview-out").innerHTML=`
+    <div class="qg-stats" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+      ${pill(`${fmt(p.chunks)} chunk(s)`,"done")}
+      ${pill(`${fmt(p.files_found)} canvas file(s)`)}
+      ${p.files_skipped?pill(`${fmt(p.files_skipped)} out of scope`):""}
+      ${pill(`${fmt(p.edges_total)} edge(s)`)}
+      ${pill(`${p.with_edges_pct}% of chunks carry edges`,p.with_edges_pct>50?"done":"")}
+      ${p.nodes_split?pill(`${fmt(p.nodes_split)} node(s) split`,"live"):""}
+      ${p.nodes_skipped?pill(`${fmt(p.nodes_skipped)} below min chunk`):""}
+      ${pill(`${fmt(p.chars_total)} chars · ${p.context_pct}% graph context`)}
+    </div>
+    ${unscoped?`<div class="note" style="border-color:var(--amber-dim)"><b>These chunks would land <span class="mono">domain=general, course=unknown</span>.</b> Canvas filenames carry no course keyword, so nothing can infer one. Set <b>force domain</b> above unless that is what you want.</div>`:""}
+    ${s?`<label class="f" style="margin-top:10px">Sample composed chunk <span class="hint" style="margin:0;display:inline;text-transform:none;letter-spacing:0">(the node with the most edges — this is exactly what gets embedded)</span></label>
+    <div class="qg-meta" style="margin:5px 0">${esc(s.source_file||"")} · domain ${esc(s.domain||"?")} · course ${esc(s.course_name||"?")} · ${esc(s.doc_id)}</div>
+    <div class="qg-meta" style="margin-bottom:6px">edges · ${edges}</div>
+    <div class="qg-excerpt"><div style="white-space:pre-wrap;max-height:300px;overflow:auto;padding:8px;border-left:2px solid var(--line);background:var(--panel-2);font-size:11.5px">${esc(s.text||"")}</div></div>`
+    :`<div class="empty">No chunks would be produced in this scope.</div>`}
+    <div class="hint" style="margin-top:8px">${esc(p.note||"")}</div>`;
+}
+/* A SCOPED run must get its own output file. The loader truncates whatever
+   it writes, so a folder-scoped run pointed at the canonical
+   canvas_chunks.jsonl would shrink it to that folder — the dense index keeps
+   every chunk (append upserts) while the sparse half is re-derived from the
+   JSONLs and loses the rest. The endpoint refuses it; this names a file so
+   nobody has to hit that refusal to learn why. */
+function canvasScopedOutput(){
+  const scope=($("#cv-include").value.trim()||$("#cv-folder").value||"").trim();
+  const out=$("#cv-output");
+  if(!scope){out.placeholder="output: data/canvas_chunks.jsonl";out.dataset.auto="";return}
+  const slug=scope.toLowerCase().replace(/[^a-z0-9]+/g,"_").replace(/^_|_$/g,"").slice(0,40);
+  const name=`data/canvas_${slug||"scoped"}_chunks.jsonl`;
+  // Only ever overwrite a value this function itself suggested.
+  if(!out.value||out.value===out.dataset.auto){out.value=name;out.dataset.auto=name}
+  out.placeholder=name;
+}
+$("#cv-folder").onchange=()=>{$("#cv-include").value="";canvasScopedOutput()};
+$("#cv-include").oninput=canvasScopedOutput;
+$("#cv-rescan").onclick=()=>loadCanvasFolders(true);
+$("#cv-preview").onclick=async()=>{
+  const b=$("#cv-preview");b.disabled=true;
+  $("#cv-msg").textContent="running the loader into a scratch file…";
+  const p=canvasParams();
+  const mn=$("#cv-min").value;if(mn)p.min_chunk_size=+mn;
+  try{
+    const r=await api("/api/canvas/preview",{method:"POST",
+      headers:{"Content-Type":"application/json"},body:JSON.stringify(p)});
+    renderCanvasPreview(r);
+    $("#cv-msg").textContent="preview only — nothing indexed";
+  }catch(e){
+    $("#cv-preview-out").innerHTML=`<div class="empty" style="color:var(--red)">${esc(e.message)}</div>`;
+    $("#cv-msg").textContent="preview failed";
+  }finally{b.disabled=false}
+};
+$("#cv-queue").onclick=async()=>{
+  const b=$("#cv-queue");b.disabled=true;
+  const params=canvasParams();
+  const out=$("#cv-output").value.trim()||"data/canvas_chunks.jsonl";
+  params.output=out;
+  const dom=$("#cv-domain").value.trim();if(dom)params.force_domain=dom;
+  const tags=$("#cv-tags").value.trim();if(tags)params.force_tags=tags;
+  try{
+    const r=await api("/api/jobs",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({kind:"ingest_canvas",params})});
+    let msg=`queued ${r.job.id} (ingest-canvas)`;
+    if($("#cv-append").checked){
+      // Same serial queue, so the append always runs AFTER the ingest that
+      // writes the file it appends.
+      const a=await api("/api/jobs",{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({kind:"index_append",params:{file:out}})});
+      msg+=` → ${a.job.id} (index --append)`;
+    }
+    $("#cv-msg").textContent=msg;
+    toast(msg+" · watch the Jobs tab, then restart :8051");
+  }catch(e){$("#cv-msg").textContent=e.message;toast(e.message,1)}
+  finally{b.disabled=false}
 };
 
 /* ---------- documents ---------- */
@@ -2583,9 +3014,216 @@ async function runQuery(retrieveOnly){
     state.lastQ={q,answer:j.answer,confidence:j.confidence,echo,generation:gen,
       sources:j.sources||j.results||[]};
     renderResult();
+    // A new main-engine result is exactly what graph mode's MERGE action
+    // merges into, so refresh that button's availability and its reason.
+    if(state.lastGraph)renderGraphFork();
   }catch(e){$("#q-out").innerHTML=`<div class="empty" style="color:var(--red)">${esc(e.message)}</div>`}
   finally{setQueryBusy(false)}
 }
+/* ================= Graph RAG · canvas traversal =================
+   A separate mode. It calls /graph/expand (no LLM at all), draws the walk,
+   and then STOPS — the three actions below are the human's decision, which
+   is the entire point of the feature. /query and /search are untouched.  */
+
+/* Evidence ids that /answer cannot ground on: live Omnisearch excerpts are
+   not indexed records, and parent-expanded sections are served by GET
+   /chunks. Filtering them here (and SAYING so) beats letting the endpoint
+   400 with a list of hashes. */
+function groundableIds(sources){
+  const all=(sources||[]).map(s=>String(s.id||"")).filter(Boolean);
+  const ok=all.filter(id=>!id.startsWith("live:")&&!id.startsWith("parent:"));
+  return {ok,dropped:all.length-ok.length};
+}
+function graphSelectedIds(){
+  return $$("#qg-out .qg-row input[type=checkbox]:checked").map(c=>c.dataset.id);
+}
+function renderGraphTree(data){
+  const nodes={};(data.nodes||[]).forEach(n=>nodes[n.id]=n);
+  const kids={};(data.tree||[]).forEach(e=>(kids[e.parent]=kids[e.parent]||[]).push(e));
+  const loops={};(data.cross_edges||[]).forEach(e=>(loops[e.parent]=loops[e.parent]||[]).push(e));
+  const seeds=(data.seed_ids||[]).filter(id=>nodes[id]);
+  const drawn=new Set();
+  const arrow=e=>e.direction==="--"?"—":(e.direction==="<-"?"←":"→");
+  const nodeHtml=(n,edge)=>{
+    const file=String(n.source_file||"").split(/[\\/]/).pop().replace(/\.canvas$/,"");
+    const body=String(n.text||"").replace(/^\[Canvas:[^\]]*\]\s*/,"").trim();
+    const first=body.split("\n").find(l=>l.trim())||"(no text returned)";
+    return `<div class="qg-row">
+      <input type="checkbox" data-id="${esc(n.id)}" checked
+             title="Include this node in the answer">
+      <span class="qg-edge">${edge?`${arrow(edge)} ${edge.label?`[${esc(edge.label)}]`:"—"}`:"seed"}</span>
+      <div class="qg-body">
+        <div class="qg-title">${esc(first.slice(0,180))}</div>
+        <div class="qg-meta">hop ${n.depth} · ${esc(file)}${n.canvas_group?` · ${esc(n.canvas_group)}`:""}${n.canvas_degree!=null?` · degree ${esc(n.canvas_degree)}`:""}${n.canvas_part?` · part ${esc(n.canvas_part)}`:""} · <span title="Chunk id — usable as a seed">${esc(n.id)}</span></div>
+        ${body?`<details class="qg-excerpt"><summary>Chunk text</summary><div>${esc(body)}</div></details>`:""}
+      </div></div>`;
+  };
+  /* Depth-first, but a node is DRAWN once even when several parents reach it
+     (canvas graphs have diamonds as well as cycles); later arrivals become a
+     one-line reference so the extra path is still visible. */
+  const walk=(id,edge)=>{
+    const n=nodes[id];if(!n)return "";
+    if(drawn.has(id))
+      return `<div class="qg-cycle">${esc(edge?arrow(edge):"")} ${edge&&edge.label?`<b>[${esc(edge.label)}]</b> `:""}also reached from another branch · ${esc(id)}</div>`;
+    drawn.add(id);
+    const below=(kids[id]||[]).map(e=>walk(e.child,e)).join("")
+      +(loops[id]||[]).map(e=>`<div class="qg-cycle">↺ ${esc(arrow(e))} ${e.label?`<b>[${esc(e.label)}]</b> `:""}cycles back to ${esc((nodes[e.child]||{}).id||e.child)}</div>`).join("");
+    return `<div class="qg-node d${n.depth}">${nodeHtml(n,edge)}${below}</div>`;
+  };
+  let html=seeds.map(id=>walk(id)).join("");
+  const orphans=(data.nodes||[]).filter(n=>!drawn.has(n.id));
+  if(orphans.length)html+=orphans.map(n=>`<div class="qg-node d${n.depth}">${nodeHtml(n,null)}</div>`).join("");
+  return html||`<div class="empty">No nodes returned.</div>`;
+}
+function renderGraphResult(data){
+  state.lastGraph=data;
+  const s=data.stats||{};
+  const pill=(t,cls)=>`<span class="pill ${cls||""}">${esc(t)}</span>`;
+  const stats=[
+    pill(`${s.nodes??0} node(s)`,"done"),
+    pill(`${s.edges??0} edge(s)`),
+    s.cross_edges?pill(`${s.cross_edges} cycle edge(s)`,"live"):"",
+    s.dangling_edges?pill(`${s.dangling_edges} edge(s) to non-chunk nodes`):"",
+    pill(`depth ${s.hops??"?"}`),
+    s.truncated_at?pill(`stopped at ${s.truncated_at}`,"failed"):"",
+    s.edges_labelled===false?pill("edges unlabelled","failed"):"",
+    data.ms!=null?pill(`${data.ms} ms`):"",
+  ].filter(Boolean).join("");
+  $("#qg-out").innerHTML=`<div class="qg-stats">${stats}</div>`+
+    (data.note?`<div class="hint" style="margin:0 0 8px">${esc(data.note)}</div>`:"")+
+    `<div class="row" style="gap:8px;margin-bottom:6px">
+       <button class="btn" id="qg-all">Select all</button>
+       <button class="btn" id="qg-none">Select none</button>
+       <span class="hint" style="margin:0" id="qg-count"></span>
+     </div>
+     <div class="qg-tree">${renderGraphTree(data)}</div>`;
+  const count=()=>$("#qg-count").textContent=`${graphSelectedIds().length} node(s) selected`;
+  $("#qg-all").onclick=()=>{$$("#qg-out .qg-row input").forEach(c=>c.checked=true);count()};
+  $("#qg-none").onclick=()=>{$$("#qg-out .qg-row input").forEach(c=>c.checked=false);count()};
+  $$("#qg-out .qg-row input").forEach(c=>c.onchange=count);
+  count();
+  renderGraphFork();
+}
+/* The fork: (a) merge, (b) graph only, (c) raw nodes. (a) is DISABLED with
+   its reason visible when no main-engine result exists, never hidden. */
+function renderGraphFork(){
+  const prev=state.lastQ;
+  const {ok:prevIds,dropped}=groundableIds(prev&&prev.sources);
+  const canMerge=!!(prev&&prevIds.length);
+  const why=canMerge
+    ? `Merge sends ${prevIds.length} chunk(s) from your last ${prev.answer?"Ask":"Search"} plus the nodes you ticked above.`
+      +(dropped?` ${dropped} source(s) left out: live-vault excerpts and parent sections aren't indexed chunks, so they can't ground an answer.`:"")
+    : (prev?"Merge is unavailable: your last result has no chunk that can ground an answer (live-vault excerpts and parent sections aren't indexed records)."
+          :"Merge is unavailable until you run Ask or Search above — there is no previous document stack to merge into.");
+  $("#qg-fork").innerHTML=`
+    <button class="btn primary" id="qg-answer-graph" title="Run the LLM over the ticked graph nodes and nothing else.">Answer from the graph alone</button>
+    <button class="btn" id="qg-answer-merge" ${canMerge?"":"disabled"} title="${canMerge?"Run the LLM over your previous result's chunks PLUS the ticked graph nodes.":"No previous result to merge with."}">Merge with the last result${canMerge?` (+${prevIds.length})`:""}</button>
+    <button class="btn" id="qg-copy" title="Copy the ticked nodes as markdown — no LLM at all.">⧉ Copy raw nodes</button>
+    <p class="qg-why">${esc(why)}</p>`;
+  $("#qg-answer-graph").onclick=()=>runGraphAnswer(false);
+  const merge=$("#qg-answer-merge");
+  if(canMerge)merge.onclick=()=>runGraphAnswer(true);
+  $("#qg-copy").onclick=()=>{
+    const picked=new Set(graphSelectedIds());
+    const rows=(state.lastGraph.nodes||[]).filter(n=>picked.has(n.id));
+    if(!rows.length)return toast("Tick at least one node",1);
+    const md=`# Graph traversal — ${state.lastGraph.q||"seeded by id"}\n\n`+rows.map(n=>
+      `## hop ${n.depth} · ${String(n.source_file||"").split(/[\\/]/).pop()}\n\n${(n.text||"").trim()}\n`).join("\n");
+    navigator.clipboard.writeText(md).then(()=>toast(`Copied ${rows.length} node(s) as markdown`))
+      .catch(()=>toast("Clipboard blocked",1));
+  };
+}
+function setGraphBusy(on,msg){
+  state.queryBusy=on;
+  ["#qg-run","#q-ask","#q-search","#q-compare-run","#qg-answer-graph",
+   "#qg-answer-merge"].forEach(id=>{const e=$(id);if(e)e.disabled=on});
+  // Re-deriving the fork on release restores the merge button's real
+  // availability, which blanket-enabling here would wrongly grant.
+  if(!on&&state.lastGraph)renderGraphFork();
+  if(msg)$("#qg-msg").textContent=msg;
+}
+async function runGraphExpand(){
+  if(state.queryBusy)return;
+  const mode=$("#qg-seed").value;
+  const body={include_text:1200};
+  if(mode==="result"){
+    const {ok}=groundableIds(state.lastQ&&state.lastQ.sources);
+    if(!ok.length)return toast("Run Ask or Search first — no chunks to seed from",1);
+    body.seeds=ok.slice(0,50);
+  }else{
+    const q=$("#q-text").value.trim();
+    if(!q)return toast("Type a question first",1);
+    body.q=q;
+    const sk=$("#qg-seedk").value;if(sk)body.seed_top_k=+sk;
+    const rr=$("#qg-rerank").value;if(rr)body.rerank=rr;
+  }
+  const d=$("#qg-depth").value;if(d!=="")body.depth=+d;
+  const ph=$("#qg-perhop").value;if(ph)body.max_per_hop=+ph;
+  const mt=$("#qg-total").value;if(mt)body.max_total=+mt;
+  setGraphBusy(true,"walking the graph…");
+  $("#qg-out").innerHTML="";$("#qg-fork").innerHTML="";$("#qg-answer").innerHTML="";
+  try{
+    const j=await ragCall("/graph/expand",{method:"POST",
+      headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    renderGraphResult(j);
+    const st=j.stats||{};
+    // A walk that found no edges is not a failure and not an empty result —
+    // it usually means the seeds simply aren't graph chunks. Saying which
+    // beats letting it read as a broken traversal.
+    const noEdges=st.nodes&&!st.edges&&(st.hops||0)>0
+      ? ` No edges to follow — ${j.seeded_by==="ids"
+          ? `none of those chunks carry ${j.file_type||"canvas"} edges, so seed from the question instead`
+          : "these nodes are unconnected in their canvases"}.`
+      : "";
+    $("#qg-msg").textContent=
+      `Seeded by ${j.seeded_by==="ids"?"the last result's chunks":"searching the "+(j.file_type||"canvas")+" lane"}.`
+      +noEdges+" Nothing has been sent to an LLM.";
+  }catch(e){
+    $("#qg-out").innerHTML=`<div class="empty" style="color:var(--red)">${esc(e.message)}</div>`;
+    $("#qg-msg").textContent="Traversal failed.";
+  }finally{setGraphBusy(false)}
+}
+async function runGraphAnswer(merge){
+  if(state.queryBusy)return;
+  const q=$("#q-text").value.trim();
+  if(!q)return toast("Type the question these documents should answer",1);
+  const picked=graphSelectedIds();
+  if(!picked.length&&!merge)return toast("Tick at least one graph node",1);
+  const prevIds=merge?groundableIds(state.lastQ&&state.lastQ.sources).ok:[];
+  const docs=[...new Set([...prevIds,...picked])];
+  if(!docs.length)return toast("Nothing to answer from",1);
+  if(docs.length>100)return toast(`Too many documents (${docs.length}); the cap is 100 — untick some`,1);
+  const body={q,docs,include_text:900};
+  const mt=$("#q-maxtok").value;if(mt)body.max_tokens=+mt;
+  setGraphBusy(true,merge?"answering over merged documents…":"answering from the graph alone…");
+  $("#qg-answer").innerHTML=`<div class="empty">Generating over ${docs.length} document(s)…</div>`;
+  try{
+    const j=await ragCall("/answer",{method:"POST",
+      headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    const gen=j.generation||{};
+    const confCls={HIGH:"done",MEDIUM:"run",LOW:"failed",UNKNOWN:"failed",ERROR:"failed"}[j.confidence]||"";
+    $("#qg-answer").innerHTML=`<div class="panel" style="margin-top:12px">
+      <div class="qcmp-prov">${esc(merge?`merged · ${prevIds.length} from the last result + ${picked.length} graph node(s)`:`graph only · ${picked.length} node(s)`)} · retrieval did not run</div>
+      <div class="answer" id="qg-answer-body" style="margin-top:8px"></div>
+      <div class="hint" style="margin-top:10px">confidence: <span class="pill ${confCls}">${esc(j.confidence||"?")}</span>${gen.backend?` · ${esc(gen.backend)}${gen.model?" / "+esc(gen.model):""}`:""}${(j.citations||[]).length?` · ${j.citations.length} citation(s)`:""}</div>
+      </div>`;
+    renderAnswerBody($("#qg-answer-body"),j.answer||"");
+    $("#qg-msg").textContent=`Answered over ${docs.length} document(s).`;
+  }catch(e){
+    $("#qg-answer").innerHTML=`<div class="empty" style="color:var(--red)">${esc(e.message)}</div>`;
+  }finally{setGraphBusy(false);renderGraphFork()}
+}
+$("#qg-run").onclick=runGraphExpand;
+/* The merge button's availability depends on the MAIN result, so re-render
+   the fork whenever that changes rather than leaving a stale reason on screen. */
+$("#qg-seed").onchange=()=>{if(state.lastGraph)renderGraphFork()};
+(function(){
+  const panel=$("#q-graph-panel");if(!panel)return;
+  const KEY="ledger-graph-open";
+  if(localStorage.getItem(KEY)==="1")panel.open=true;
+  panel.addEventListener("toggle",()=>localStorage.setItem(KEY,panel.open?"1":"0"));
+})();
+
 $("#q-ask").onclick=()=>runQuery(false);
 $("#q-search").onclick=()=>runQuery(true);
 $("#q-compare-run").onclick=runComparison;
@@ -2639,8 +3277,100 @@ const THEME_VARS=["bg","panel","panel-2","line","ink","ink-dim","ink-faint",
   "skel-mid","td-line","row-sel","row-hover","bar-border","glow",
   "disp","body","mono"];
 const themeBtn=$("#theme-toggle");
-function customThemes(){try{return JSON.parse(localStorage.getItem("ledger-custom-themes")||"{}")}catch(e){return{}}}
+/* thm-bulk:pure-begin  (no DOM in this block: tests/test_theme_bulk_markup.py runs it under node) */
+const THEME_FILE_FORMAT="noetrix-themes",THEME_FILE_VERSION=1;
+/* a key lands inside [data-theme="c-<key>"]: nothing that could end that selector, and never __proto__ */
+const THEME_KEY_RE=/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+const themeHas=(o,k)=>Object.prototype.hasOwnProperty.call(o,k);
+let themeFault=null;      // {key, error, why, partial} while the stored presets are unreadable; null when they are fine
+let themeFaultRaw=null;   // the raw string themeFault describes: one backup per distinct bad value
+/* Copy an unreadable value aside BEFORE anything can overwrite it. One copy per distinct
+   value: a page reload, or the many customThemes() calls inside one render, reuse it. */
+function backupUnreadableThemes(raw){
+  const P="ledger-custom-themes.corrupt-";
+  for(let i=0;i<localStorage.length;i++){
+    const k=localStorage.key(i);
+    if(k&&k.startsWith(P)&&localStorage.getItem(k)===raw)return {key:k};
+  }
+  const base=P+new Date().toISOString().replace(/[:.]/g,"-");
+  let k=base,n=1;
+  while(localStorage.getItem(k)!==null)k=`${base}-${++n}`;
+  try{localStorage.setItem(k,raw);return {key:k}}
+  catch(e){return {key:null,error:e.message}}       // reported in the warning, never swallowed
+}
+function customThemes(){
+  const raw=localStorage.getItem("ledger-custom-themes");
+  if(!raw){themeFault=null;themeFaultRaw=null;return {}}                 // nothing stored: nothing is wrong
+  let t,why=null;
+  try{t=JSON.parse(raw)}catch(e){why=`the stored value is not valid JSON (${e.message})`}
+  if(!why&&(!t||typeof t!=="object"||Array.isArray(t)))why="the stored value is not a {key: preset} map";
+  let partial=false;
+  if(why)t={};
+  else{
+    // an entry without a css string would throw in themeList() and take the whole console down at load
+    const bad=Object.keys(t).filter(k=>!t[k]||typeof t[k]!=="object"||typeof t[k].css!=="string");
+    if(!bad.length){themeFault=null;themeFaultRaw=null;return t}
+    partial=true;
+    why=`${bad.length} preset${bad.length===1?" has":"s have"} no usable css (${bad.slice(0,5).join(", ")}${bad.length>5?", …":""}) and ${bad.length===1?"is":"are"} left out`;
+    t=Object.fromEntries(Object.entries(t).filter(([k])=>!bad.includes(k)));
+  }
+  if(themeFaultRaw!==raw){themeFault={...backupUnreadableThemes(raw),why,partial};themeFaultRaw=raw}
+  return t;
+}
 function saveCustomThemes(t){localStorage.setItem("ledger-custom-themes",JSON.stringify(t))}
+/* One entry of an imported file, or the reason it cannot be used. */
+function themeEntryProblem(k,v){
+  if(!THEME_KEY_RE.test(k))return `Theme key "${k}" is not allowed: start with a letter or digit, then letters, digits, - or _ (64 characters at most).`;
+  if(!v||typeof v!=="object"||Array.isArray(v))return `Theme "${k}" must be an object with label, mode and css.`;
+  if(typeof v.label!=="string"||!v.label.trim())return `Theme "${k}": label must be a non-empty string.`;
+  if(v.mode!=="dark"&&v.mode!=="light")return `Theme "${k}": mode must be "dark" or "light", not ${JSON.stringify(v.mode)}.`;
+  if(typeof v.css!=="string")return `Theme "${k}": css must be a string.`;
+  if(/[{}]/.test(v.css))return `Theme "${k}": css must be --variable: value; pairs only, with no { or }: one stray brace would swallow every preset after it.`;
+  if(!/--[\w-]+\s*:/.test(v.css))return `Theme "${k}": css has no --variable: value; pair.`;
+  return null;
+}
+/* Text of a themes file -> {key: {label, mode, css}}, or throws an Error saying what is wrong.
+   Accepts the wrapper {format, version, themes} and the bare map. All or nothing. */
+function parseThemesFile(text){
+  let j;
+  try{j=JSON.parse(text)}catch(e){throw new Error(`That is not valid JSON (${e.message}).`)}
+  if(!j||typeof j!=="object"||Array.isArray(j))throw new Error("Expected a JSON object: {format, version, themes} or a bare {key: {label, mode, css}} map.");
+  let map=j;
+  if(typeof j.format==="string"){   // the wrapper; a bare map's values are objects, so a theme named "format" cannot be mistaken for it
+    if(j.format!==THEME_FILE_FORMAT)throw new Error(`Unknown format "${j.format}" (expected "${THEME_FILE_FORMAT}").`);
+    if(j.version!==THEME_FILE_VERSION)throw new Error(`Unsupported version ${JSON.stringify(j.version)}: this console reads version ${THEME_FILE_VERSION}.`);
+    map=j.themes;
+    if(!map||typeof map!=="object"||Array.isArray(map))throw new Error('The file has no "themes" map.');
+  }
+  const out={};
+  for(const [k,v] of Object.entries(map)){
+    const p=themeEntryProblem(k,v);if(p)throw new Error(p);
+    out[k]={label:v.label.trim(),mode:v.mode,css:v.css.trim()};
+  }
+  return out;
+}
+/* Merge validated incoming presets into the existing map WITHOUT overwriting anything.
+   Same key + same content: skipped. Same key + different content: kept under key-2, key-3, …
+   (and if that content is already there under one of those names, it is skipped too, so
+   importing the same file twice changes nothing the second time). Never mutates `existing`. */
+function mergeThemes(existing,incoming){
+  const merged={...existing},imported=[],renamed=[],skipped=[];
+  const same=(a,b)=>String(a.label).trim()===b.label&&(a.mode==="light"?"light":"dark")===b.mode&&String(a.css).trim()===b.css;
+  for(const [k,v] of Object.entries(incoming)){
+    let cand=k,n=1;
+    for(;;){
+      if(!themeHas(merged,cand)){
+        merged[cand]={label:v.label,mode:v.mode,css:v.css};
+        if(cand===k)imported.push(k);else renamed.push([k,cand]);
+        break;
+      }
+      if(same(merged[cand],v)){skipped.push(k);break}
+      cand=`${k}-${++n}`;
+    }
+  }
+  return {merged,imported,renamed,skipped};
+}
+/* thm-bulk:pure-end */
 /* migrate the session-14 single-slot custom theme into a named preset */
 (function(){
   const old=localStorage.getItem("ledger-custom-theme");
@@ -2672,12 +3402,30 @@ function renderThemeShelves(){
   const dark=$("#thm-dark-shelf"),light=$("#thm-light-shelf");
   if(!dark)return;
   const cur=document.documentElement.dataset.theme;
-  const chip=t=>`<span class="thm-chip${t.id===cur?" on":""}" data-thm="${esc(t.id)}" title="${esc(t.label)}${t.custom?" (custom preset)":""}">
+  const chip=t=>`<span class="thm-chip${t.id===cur?" on":""}" data-thm="${esc(t.id)}" title="${esc(t.label)}${t.custom?` (custom preset, key ${esc(t.key)})`:""}">
       <span class="sw" style="background:linear-gradient(135deg,${esc(t.sw[0])} 55%,${esc(t.sw[1])} 55%)"></span>${esc(t.label)}
       ${t.custom?`<span class="op" data-ren="${esc(t.key)}" title="Rename this preset">✎</span><span class="op" data-del="${esc(t.key)}" title="Delete this preset">✕</span>`:""}</span>`;
   const L=themeList();
   dark.innerHTML=L.filter(t=>t.mode==="dark").map(chip).join("")||`<span class="hint" style="margin:0">none</span>`;
   light.innerHTML=L.filter(t=>t.mode==="light").map(chip).join("")||`<span class="hint" style="margin:0">none</span>`;
+  renderThemeWarning();                              // themeList() above has just re-read the stored presets
+}
+/* The stored presets were unreadable (see customThemes): say so in the panel, and once per page
+   load as a toast, because a user who never opens Settings would only see their presets missing. */
+let themeFaultShown=null;
+function renderThemeWarning(){
+  const el=$("#thm-warn");if(!el)return;
+  const f=themeFault;
+  if(!f){el.innerHTML="";themeFaultShown=null;return}
+  const why=f.why.charAt(0).toUpperCase()+f.why.slice(1);
+  el.innerHTML=`<b>${f.partial?"Some saved themes could not be read.":"Saved themes could not be read."}</b> ${esc(why)}. `+(f.key
+    ?`The raw value was copied to <code>${esc(f.key)}</code> in this browser's localStorage before anything could overwrite it. Saving or importing a preset replaces the unreadable value; the copy stays. Repair the JSON from that copy and paste it into <b>Import themes…</b> to get the presets back.`
+    :`<b>The backup copy failed</b> (${esc(f.error||"unknown error")}), so the unreadable value is still stored under <code>ledger-custom-themes</code>. Copy it out (browser DevTools → Application → Local Storage) before you save or import anything.`);
+  if(themeFaultShown!==f.why+"|"+f.key){
+    themeFaultShown=f.why+"|"+f.key;
+    toast(f.key?"Saved themes could not be read. A backup copy was kept: see Settings → Appearance."
+               :"Saved themes could not be read, and the backup copy FAILED: see Settings → Appearance.",1);
+  }
 }
 ["thm-dark-shelf","thm-light-shelf"].forEach(id=>{
   const el=document.getElementById(id);if(!el)return;
@@ -2739,6 +3487,54 @@ $("#thm-save").onclick=()=>{
   t[key]={label:name,mode:$("#thm-mode").value==="light"?"light":"dark",css:body};
   saveCustomThemes(t);injectCustomThemes();applyTheme("c-"+key);
   toast(existed?`Preset "${name}" updated ✓`:`Preset "${name}" saved ✓ (browser-local)`);
+};
+/* -- all custom presets at once: one JSON file out, a merging import in -- */
+function themeMsg(kind,html){                        // kind: "ok" | "bad" | "" (clear both)
+  $("#thm-bulk-ok").innerHTML=kind==="ok"?html:"";
+  $("#thm-bulk-err").innerHTML=kind==="bad"?html:"";
+}
+$("#thm-export-all").onclick=()=>{
+  const t=customThemes(),n=Object.keys(t).length;
+  if(!n)return themeMsg("bad","<b>Nothing to export.</b> There are no custom presets in this browser (the four built-in themes ship with the console).");
+  const d=new Date(),ymd=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+  const blob=new Blob([JSON.stringify({format:THEME_FILE_FORMAT,version:THEME_FILE_VERSION,exported_at:d.toISOString(),themes:t},null,2)+"\n"],
+    {type:"application/json"});
+  const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=`noetrix-themes-${ymd}.json`;
+  document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+  themeMsg("ok",`<b>Exported ${n} preset${n===1?"":"s"}</b> to <span class="mono">${esc(a.download)}</span> (in your browser's downloads).`);
+  toast("Downloaded "+a.download);
+};
+/* Returns true when the file was merged in. Anything wrong: an error shown, nothing changed. */
+function importThemesText(text){
+  let incoming;
+  try{incoming=parseThemesFile(text)}
+  catch(e){themeMsg("bad",`<b>Nothing imported.</b> ${esc(e.message)}`);return false}
+  if(!Object.keys(incoming).length){themeMsg("ok","<b>Nothing imported.</b> The file holds no themes.");return false}
+  const r=mergeThemes(customThemes(),incoming);
+  if(r.imported.length||r.renamed.length){           // an import of nothing but identical presets writes nothing at all
+    try{saveCustomThemes(r.merged)}
+    catch(e){themeMsg("bad",`<b>Nothing imported.</b> The browser refused to save (${esc(e.message)}).`);return false}
+    injectCustomThemes();applyTheme(document.documentElement.dataset.theme);
+  }
+  const sum=`${r.imported.length} imported, ${r.renamed.length} renamed, ${r.skipped.length} identical skipped`;
+  themeMsg("ok",`<b>${sum}.</b>`+(r.renamed.length
+    ?` Already here with different content, so brought in under a new key: ${r.renamed.map(([a,b])=>`<span class="mono">${esc(a)} → ${esc(b)}</span>`).join(", ")}.`:""));
+  toast(sum);
+  return true;
+}
+$("#thm-import-all").onclick=()=>$("#thm-import-file").click();
+$("#thm-import-file").onchange=async e=>{
+  const f=e.target.files[0];e.target.value="";       // reset, so picking the same file again still fires
+  if(!f)return;
+  let text;
+  try{text=await f.text()}
+  catch(err){themeMsg("bad",`<b>Nothing imported.</b> Could not read <span class="mono">${esc(f.name)}</span>: ${esc(err.message)}`);return}
+  importThemesText(text);
+};
+$("#thm-import-paste").onclick=()=>{
+  const box=$("#thm-import-text");
+  if(!box.value.trim())return themeMsg("bad","<b>Nothing to import.</b> Paste the themes JSON into the box first.");
+  if(importThemesText(box.value))box.value="";
 };
 injectCustomThemes();
 applyTheme(document.documentElement.dataset.theme||"dark");
@@ -2809,6 +3605,7 @@ $("#set-descs").onchange=e=>applyDescs(e.target.checked);
 
 /* ---------- settings tab: editable config surface ---------- */
 state.settingsOrig={};
+state.experimental=[];
 /* which path-ish keys get a 📁 Browse button, and how the pick applies:
    dir = the picked folder IS the value; file = keep the filename, swap its
    parent folder for the picked one. */
@@ -2821,7 +3618,11 @@ async function loadSettings(){
     $("#set-cfgpath").textContent=s.config_path||"config.yaml";
     const ed=s.editable||{};
     state.settingsOrig={};
-    $("#set-fields").innerHTML=Object.entries(ed).map(([key,f])=>{
+    /* Experimental flags are editable settings (same writer, same validator)
+       but they are NOT rendered into this grid: the Experimental panel owns
+       them, and two live controls for one key would make Save ambiguous. */
+    const expKeys=new Set((s.experimental||[]).map(f=>f.key));
+    $("#set-fields").innerHTML=Object.entries(ed).filter(([key])=>!expKeys.has(key)).map(([key,f])=>{
       state.settingsOrig[key]=String(f.value??"");
       const id="cfg-"+key.replace(/\./g,"-");
       const badge=`<span class="hint" style="margin:0;font-size:11px">restart ${esc(f.restart)}</span>`;
@@ -2840,6 +3641,7 @@ async function loadSettings(){
     }).join("");
     renderProviders(s);
     renderRerankers(s);
+    renderExperimental(s);
     /* Move the fields each panel drives INTO that panel, so a click on "Use"
        visibly changes the inputs sitting right underneath it. They are moved,
        not copied: one input per setting keeps Save unambiguous. */
@@ -2877,6 +3679,76 @@ async function loadSettings(){
       }else input.value=posix;
     });
   }catch(e){$("#set-fields").innerHTML=`<span style="color:var(--red)">${esc(e.message)}</span>`}
+}
+
+/* ---------- experimental features ----------
+   The server's EXPERIMENTAL_FEATURES registry drives both halves: this panel,
+   and applyExperimentalGates() which shows or hides each feature's controls
+   elsewhere in the console. The link between them is a data-exp attribute
+   carrying the feature's id, set on the gated element — so a feature's UI can
+   live anywhere in this file without this code knowing where. (Spelled without
+   a literal attribute here on purpose: tests/test_experimental_features.py
+   scans this file for real gates and a comment must not look like one.) */
+function applyExperimentalGates(features){
+  const list=features||state.experimental||[];
+  if(!list.length)return;
+  /* Remember what the gate was last told, so a later bare call re-applies the
+     real flags instead of finding an empty list and silently doing nothing. */
+  state.experimental=list;
+  const on={};list.forEach(f=>{on[f.id]=!!f.on});
+  $$("[data-exp]").forEach(el=>{
+    const id=el.dataset.exp;
+    /* An unknown id stays hidden. A gate whose feature the server no longer
+       reports is a stale gate, and showing it would expose controls for a
+       flag nobody can find the switch for. */
+    el.hidden=!on[id];
+  });
+}
+function renderExperimental(s){
+  const box=$("#exp-list");if(!box)return;
+  const feats=s.experimental||[];
+  if(!feats.length){
+    state.experimental=feats;
+    box.innerHTML=`<div class="empty">No experimental features in this build.</div>`;
+    applyExperimentalGates(feats);return;
+  }
+  const restartOf=k=>((s.editable||{})[k]||{}).restart||"";
+  box.innerHTML=feats.map(f=>`
+    <div class="vault-row exp-row" data-id="${esc(f.id)}" style="align-items:flex-start">
+      <div style="flex:1;min-width:0">
+        <span class="nm">${esc(f.label)}</span>
+        <span class="pill ${f.on?"done":""}" style="margin-left:8px">${f.on?"on":"off"}</span>
+        <span class="pill mono" style="margin-left:6px">${esc(f.key)}</span>
+        <div class="pth" style="white-space:normal;margin-top:6px">${esc(f.what||"")}</div>
+        <div class="pth" style="white-space:normal;margin-top:6px"><b>Why it is off:</b> ${esc(f.why_off||"")}</div>
+        <div class="pth" style="white-space:normal;margin-top:6px"><b>Unaffected:</b> ${esc(f.unaffected||"")}</div>
+        ${(f.surfaces||[]).length?`<div class="pth" style="margin-top:6px">Turns on: ${f.surfaces.map(x=>`<span class="mono">${esc(x)}</span>`).join(" · ")}</div>`:""}
+        <div class="pth" style="margin-top:6px">After switching: restart <span class="mono">${esc(restartOf(f.key))}</span></div>
+      </div>
+      <label class="chk" title="Writes ${esc(f.key)} to config.yaml immediately">
+        <input type="checkbox" class="exp-toggle" data-exp-key="${esc(f.key)}" data-id="${esc(f.id)}"${f.on?" checked":""}>
+        ${f.on?"enabled":"enable"}
+      </label>
+    </div>`).join("");
+  /* data-exp-key, NOT data-key. The Save-changes scan selects on attribute
+     PRESENCE ($$("#tab-settings [data-key]")) and reads el.value — for a
+     checkbox that is the string "on", which has no saved counterpart, so a
+     data-key here would post an unknown setting and 400 the entire Save. */
+  $$(".exp-toggle").forEach(cb=>cb.onchange=async()=>{
+    const key=cb.dataset.expKey,want=cb.checked;
+    cb.disabled=true;
+    try{
+      const r=await api("/api/settings",{method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({changes:{[key]:want?"true":"false"}})});
+      toast(`${key}=${want} written — restart ${restartOf(key)}`,0);
+      $("#set-msg").textContent=(r.written||[]).join(", ")+" saved";
+      loadSettings();
+    }catch(e){
+      cb.checked=!want;toast(e.message,1);
+    }finally{cb.disabled=false}
+  });
+  applyExperimentalGates(feats);
 }
 
 /* Reranker: profiles (apply four knobs as a set) + per-model switch buttons.
@@ -3380,9 +4252,399 @@ $("#rag-restart").onclick=async()=>{
   }
 };
 
+/* ---------- eval review queue ----------
+   /api/eval/* (manage_api) is the review queue over eval/sets/*.yaml. "Check
+   retrieval" goes to the :8051 search through the same ragCall() the Query tab
+   uses. A failure is shown where it happened; nothing here is swallowed. */
+/* Check retrieval is a protocol, not a preference: it is how an `unanswerable`
+   question is spot-checked (plan Task 10). No HyDE (no LLM call, repeatable),
+   the top five, and a snippet long enough to judge "does any of this answer it". */
+const EV_CHECK={hyde:false,top_k:5,include_text:300};
+const EV_STATUS_PILL={draft:"",verified:"done",edited:"live",rejected:"failed"};
+const EV_EMPTY=`<div class="empty">Select a question on the left, or press <kbd>J</kbd> to start.<br>
+  <kbd>V</kbd> verify · <kbd>R</kbd> reject · <kbd>E</kbd> edit · <kbd>J</kbd> / <kbd>K</kbd> next / previous</div>`;
+state.ev={rows:[],sel:null,detail:null,progress:null,editing:false,dirty:false,busy:false,
+  checking:null,check:null,tok:0,listTok:0};
+$("#ev-detail").innerHTML=EV_EMPTY;
+
+/* api() throws the bare status ("500") when the body is not JSON, which tells a
+   reviewer nothing: name the route and say where the traceback is. */
+async function evApi(path,opts){
+  try{return await api(path,opts)}
+  catch(e){throw /^\d{3}$/.test(e.message)
+    ?new Error(`HTTP ${e.message} from ${path} (the console's terminal has the traceback)`):e}
+}
+const evPost=(path,body)=>evApi(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+const evErr=(el,title,msg,retry)=>{el.innerHTML=`<div class="ev-err" role="alert"><b>${esc(title)}</b> ${esc(msg)}${
+  retry?` <button class="btn mini" data-ev="retry">retry</button>`:""}</div>`};
+
+/* -- left column: progress, filters, list -- */
+function evRenderProgress(){
+  const {totals,...suites}=state.ev.progress;
+  const bar=(name,r,total)=>{
+    const rev=r.verified+r.edited,q=Math.max(r.quota,1);
+    const lo=Math.min(100,100*rev/q),hi=Math.min(100,100*(rev+r.draft)/q);
+    const tip=`${rev} reviewed (${r.verified} verified + ${r.edited} edited) · ${r.draft} draft · ${r.rejected} rejected · ${r.total} drafted in all · quota ${r.quota}`;
+    return `<div class="ev-bar${total?" total":""}${r.quota&&rev>=r.quota?" full":""}" title="${esc(tip)}">
+      <div class="lbl">${esc(name)}</div>
+      <div class="ev-track" role="progressbar" aria-label="${esc(name)}: ${rev} of ${r.quota} reviewed" aria-valuemin="0" aria-valuemax="${r.quota}" aria-valuenow="${rev}"><div class="ev-fill draft" style="width:${hi}%"></div><div class="ev-fill done" style="width:${lo}%"></div></div>
+      <div class="n">${rev}/${r.quota}<span class="pct">${Math.round(100*rev/q)}%</span></div></div>`;
+  };
+  $("#ev-bars").innerHTML=Object.entries(suites).map(([k,r])=>bar(k,r)).join("")+bar("total",totals,true);
+}
+async function evLoadProgress(){
+  try{
+    const p=await evApi("/api/eval/progress");
+    state.ev.progress=p;evRenderProgress();
+    const sel=$("#ev-f-suite"),cur=sel.value;       // the suite names come from the server, not from this file
+    sel.innerHTML=`<option value="">all suites</option>`+Object.keys(p).filter(k=>k!=="totals").map(s=>`<option>${esc(s)}</option>`).join("");
+    sel.value=cur;
+  }catch(e){evErr($("#ev-bars"),"Progress not loaded.",e.message,true)}
+}
+function evRowHtml(r){
+  const meta=[r.suite,r.tier,r.split||"no split",r.author==="owner"?"hand-written":""].filter(Boolean).join(" · ");
+  return `<button type="button" class="ev-row ${esc(r.status)}" data-qid="${esc(r.id)}"${r.id===state.ev.sel?' aria-current="true"':""}>
+    <span class="ev-row-top"><span class="ev-id">${esc(r.id)}</span><span class="ev-meta">${esc(meta)}</span>
+      <span class="ev-flags">${r.n_errors?`<span class="pill failed" title="Validator errors: the question cannot be scored as written">${r.n_errors} err</span>`:""}${
+        r.n_warnings?`<span class="pill run" title="Validator warnings: scoreable, but check the wording and the nuggets">${r.n_warnings} warn</span>`:""
+        }<span class="pill ${EV_STATUS_PILL[r.status]||""}">${esc(r.status)}</span></span></span>
+    <span class="ev-q">${esc(r.question)}</span></button>`;
+}
+function evRenderList(){
+  const list=$("#ev-list"),rows=state.ev.rows,sc=list.scrollTop,focused=list.contains(document.activeElement);
+  if(rows.length)list.innerHTML=rows.map(evRowHtml).join("");
+  else{
+    const on=[["suite","#ev-f-suite"],["status","#ev-f-status"],["split","#ev-f-split"]].filter(([,s])=>$(s).value).map(([k,s])=>`${k} ${$(s).value}`);
+    const nothing=state.ev.progress&&state.ev.progress.totals.total===0;
+    list.innerHTML=`<div class="empty">${nothing
+      ?`No question sets found. Drafts are YAML files under the configured <code>eval.sets_dir</code> (default <code>eval/sets</code>).`
+      :`No questions match ${on.length?esc(on.join(" · ")):"these filters"}. Clear a filter to see more.`}</div>`;
+  }
+  $("#ev-count").textContent=`${rows.length} shown`;
+  list.scrollTop=sc;
+  if(focused){const c=list.querySelector('[aria-current="true"]');if(c)c.focus({preventScroll:true})}
+  evSyncBar();                                       // the open question's "n of m" and Prev/Next follow the new list
+}
+async function evLoadList(){
+  const tok=++state.ev.listTok;
+  const q=new URLSearchParams({suite:$("#ev-f-suite").value,status:$("#ev-f-status").value,split:$("#ev-f-split").value});
+  $("#ev-list").innerHTML=`<div class="skel"></div><div class="skel" style="width:80%"></div><div class="skel" style="width:65%"></div>`;
+  try{
+    const rows=await evApi("/api/eval/questions?"+q);
+    if(tok!==state.ev.listTok)return;                // a newer filter already asked
+    state.ev.rows=rows;evRenderList();
+  }catch(e){
+    if(tok!==state.ev.listTok)return;
+    state.ev.rows=[];$("#ev-count").textContent="";
+    evErr($("#ev-list"),"Questions not loaded.",e.message,true);
+    evSyncBar();
+  }
+}
+function evOpen(){evLoadProgress();evLoadList()}
+function evMarkSelected(){
+  const a=document.activeElement,had=!!(a&&a.classList&&a.classList.contains("ev-row"));
+  let cur=null;
+  $$("#ev-list .ev-row").forEach(b=>{
+    if(b.dataset.qid===state.ev.sel){b.setAttribute("aria-current","true");cur=b}else b.removeAttribute("aria-current")});
+  if(cur){cur.scrollIntoView({block:"nearest"});if(had)cur.focus({preventScroll:true})}   // focus follows the selection
+}
+
+/* -- right pane: one question -- */
+async function evSelect(id,force){
+  const s=state.ev;
+  if(!force&&id===s.sel&&s.detail)return;
+  if(s.editing&&s.dirty&&!confirm(`Discard your unsaved edits to ${s.sel}?`))return;
+  s.sel=id;s.detail=null;s.editing=false;s.dirty=false;s.check=null;
+  evMarkSelected();
+  const tok=++s.tok;
+  $("#ev-detail").innerHTML=`<div class="skel"></div><div class="skel" style="width:70%"></div><div class="skel" style="width:85%"></div>`;
+  try{
+    const d=await evApi("/api/eval/questions/"+encodeURIComponent(id));
+    if(tok!==s.tok)return;                           // the reviewer already moved on
+    s.detail=d;evRenderDetail();
+  }catch(e){
+    if(tok!==s.tok)return;
+    evErr($("#ev-detail"),`Could not load ${id}.`,e.message);
+    $("#ev-detail").insertAdjacentHTML("beforeend",`<button class="btn mini" data-ev="reload" style="margin-top:10px">retry</button>`);
+  }
+}
+/* "file · p.12–14 · § heading": one gold source, or one of its alternatives */
+const evLoc=g=>[g.file,Array.isArray(g.pages)?`p.${g.pages[0]===g.pages[1]?g.pages[0]:g.pages.join("–")}`:"",g.heading?`§ ${g.heading}`:""].filter(Boolean).join(" · ");
+/* A gold entry may carry `alternatives`: the SAME passage in other files (twins), any
+   one of which satisfies the entry. They are shown read-only; the form keeps them. */
+function evAltHtml(g,kept){
+  const a=Array.isArray(g.alternatives)?g.alternatives:[];
+  return a.length?`<div class="ev-alt"><span class="ev-alt-h">same passage also in${kept?" (read-only; editing this source's file, pages or heading drops them)":""}</span><ul>${a.map(x=>`<li>${esc(evLoc(x||{}))}</li>`).join("")}</ul></div>`:"";
+}
+function evGoldHtml(r,d){
+  if(!r.answerable)return `<p class="ev-note">None. An unanswerable question has no gold; abstaining is the right answer.</p>`;
+  if(!r.gold.length)return `<p class="ev-note">No gold sources recorded.</p>`;
+  // gold_texts are keyed by the gold entry's own locator (file, pages, heading) as written in the record
+  const same=(a,b)=>JSON.stringify(a??null)===JSON.stringify(b??null);
+  return r.gold.map(g=>{
+    const texts=(d.gold_texts||[]).filter(t=>t.file===g.file&&same(t.pages,g.pages)&&same(t.heading,g.heading));
+    return `<div class="src"><span class="lab">${esc(evLoc(g))}</span>${g.required===false?` <span class="pill">optional</span>`:""}${evAltHtml(g)}${
+      texts.length?texts.map(t=>`<div class="txt">${esc(t.text)}</div>`).join("")
+        :`<div class="ev-note">No gold text cached for this source. Run <code>python main.py bench validate --write-cache</code> to see gold text.</div>`}</div>`;
+  }).join("");
+}
+function evFindingsHtml(d){
+  const f=d.findings||[];
+  if(!f.length)return `<p class="ev-note">None cached. Findings come from the last <code>python main.py bench validate --write-cache</code> run.</p>`;
+  return [...f].sort((a,b)=>(a.level==="error"?0:1)-(b.level==="error"?0:1)).map(x=>
+    `<div class="ev-find"><span class="pill ${x.level==="error"?"failed":"run"}">${esc(x.level)}</span><span class="code">${esc(x.code)}</span><span>${esc(x.message)}</span></div>`).join("")
+    +`<p class="ev-note">As of the last validate run; an edit does not refresh them.</p>`;
+}
+function evViewHtml(d){
+  const r=d.record,p=r.provenance||{};
+  const nug=r.nuggets.length?`<ul class="ev-nuggets">${r.nuggets.map(n=>`<li>${esc(n)}</li>`).join("")}</ul>`:`<p class="ev-note">None.</p>`;
+  const prov=[`author: ${p.author}`,p.drafted_by?`drafted by ${p.drafted_by}`:"",p.reviewed_at?`reviewed ${p.reviewed_at}`:"not reviewed yet",
+    Array.isArray(p.seed_chunks)&&p.seed_chunks.length?`${p.seed_chunks.length} seed chunk(s)`:""].filter(Boolean).join(" · ");
+  const chk=state.ev.check&&state.ev.check.id===r.id?state.ev.check.html:"";
+  return `<p class="ev-question">${esc(r.question)}</p><div id="ev-check">${chk}</div>
+    <h3 class="ev-h">Nuggets</h3>${nug}
+    <h3 class="ev-h">Gold sources</h3>${evGoldHtml(r,d)}
+    ${r.expect_course?`<h3 class="ev-h">Expected course</h3><p class="ev-note">${esc(r.expect_course)}</p>`:""}
+    <h3 class="ev-h">Validator findings</h3>${evFindingsHtml(d)}
+    ${r.notes?`<h3 class="ev-h">Notes</h3><p class="ev-notes">${esc(r.notes)}</p>`:""}
+    <h3 class="ev-h">Provenance</h3><p class="ev-note">${esc(prov)}</p>`;
+}
+function evGoldRow(g,i){          // i = this entry's index in the STORED record; a row added in the form has none
+  const pg=Array.isArray(g.pages)?(g.pages[0]===g.pages[1]?String(g.pages[0]):`${g.pages[0]}-${g.pages[1]}`):"";
+  return `<div class="ev-gold-row"${i===undefined?"":` data-gi="${i}"`}>
+    <input type="text" class="mono" name="g-file" value="${esc(g.file||"")}" aria-label="Gold source file" spellcheck="false">
+    <input type="text" class="mono" name="g-pages" value="${esc(pg)}" aria-label="Gold source pages" placeholder="12 or 12-14" spellcheck="false">
+    <input type="text" name="g-heading" value="${esc(g.heading||"")}" aria-label="Gold source heading" spellcheck="false">
+    <label class="chk"><input type="checkbox" name="g-req"${g.required===false?"":" checked"}> required</label>
+    <button type="button" class="btn mini" data-ev="rmgold" aria-label="Remove this gold source" title="Remove this gold source">✕</button>${evAltHtml(g,true)}</div>`;
+}
+function evFormHtml(r){
+  const mine=(r.provenance||{}).author==="owner";
+  return `<div class="ev-form" id="ev-form">
+    <div class="ev-lock">
+      <div><label class="f" for="ev-e-id">ID</label><input id="ev-e-id" type="text" class="mono" readonly value="${esc(r.id)}"></div>
+      <div><label class="f" for="ev-e-suite">Suite</label><input id="ev-e-suite" type="text" readonly value="${esc(r.suite)}"></div>
+      <div><label class="f" for="ev-e-split">Split</label><input id="ev-e-split" type="text" readonly value="${esc(r.split||"none yet")}"></div>
+    </div>
+    <p class="ev-note">ID, suite and split are locked. The server refuses an edit that changes them: the split is assigned once, so the sealed test set stays sealed.</p>
+    <label class="f" for="ev-e-question">Question</label>
+    <textarea id="ev-e-question" name="question" rows="3">${esc(r.question)}</textarea>
+    <div class="ev-two">
+      <div><label class="f" for="ev-e-tier">Tier</label><select id="ev-e-tier" name="tier">${["T1","T2","T3","T4"].map(t=>`<option${t===r.tier?" selected":""}>${t}</option>`).join("")}</select></div>
+      <label class="chk" style="padding-bottom:9px"><input type="checkbox" name="answerable"${r.answerable?" checked":""}> Answerable: needs at least one gold source and one nugget</label>
+    </div>
+    <label class="f" for="ev-e-nuggets">Nuggets, one per line</label>
+    <textarea id="ev-e-nuggets" name="nuggets" rows="4" spellcheck="false">${esc(r.nuggets.join("\n"))}</textarea>
+    <label class="f">Gold sources</label>
+    <div class="ev-gold-head"><span>file</span><span>pages</span><span>heading</span><span>required</span><span></span></div>
+    <div id="ev-gold-rows">${r.gold.map(evGoldRow).join("")}</div>
+    <button type="button" class="btn mini" data-ev="addgold">＋ add gold source</button>
+    <label class="f" for="ev-e-course">Expected course (blank = none)</label>
+    <input id="ev-e-course" type="text" name="expect_course" value="${esc(r.expect_course||"")}">
+    <label class="f" for="ev-e-notes">Notes</label>
+    <textarea id="ev-e-notes" name="notes" rows="3">${esc(r.notes||"")}</textarea>
+    <label class="chk" style="margin-top:12px"><input type="checkbox" name="rewrote"${mine?" checked disabled":""}> I rewrote this question: mark its author as owner${mine?" (already marked)":""}</label>
+  </div>`;
+}
+/* Where this question sits in the filtered list, and whether Prev/Next have anywhere to
+   go. Owned here, not by evRenderDetail: the list can change under an open pane (a
+   filter, a reload) and the bar must follow. Edit mode has no navigation to sync. */
+function evSyncBar(){
+  const prev=$('#ev-detail [data-ev="prev"]'),next=$('#ev-detail [data-ev="next"]'),pos=$("#ev-detail .ev-pos");
+  if(!prev||!next||!pos)return;
+  const rows=state.ev.rows,i=rows.findIndex(x=>x.id===state.ev.sel),n=rows.length;
+  prev.disabled=i<=0;next.disabled=i>=n-1;
+  pos.textContent=i>=0?`${i+1} of ${n}`:"not in this list";
+}
+function evRenderDetail(){
+  const box=$("#ev-detail"),d=state.ev.detail;
+  if(!d){box.innerHTML=EV_EMPTY;return}
+  const r=d.record,p=r.provenance||{};
+  const head=`<div class="ev-dhead"><h2 class="mono">${esc(r.id)}</h2>
+    <span class="pill">${esc(r.suite)}</span><span class="pill">${esc(r.tier)}</span><span class="pill">${esc(r.split||"no split")}</span>
+    <span class="pill ${EV_STATUS_PILL[p.status]||""}">${esc(p.status)}</span>
+    <span class="pill ${p.author==="owner"?"live":""}">author ${esc(p.author)}</span>${r.answerable?"":`<span class="pill run">unanswerable</span>`}</div>`;
+  const bar=state.ev.editing
+    ?`<div class="ev-actions"><button class="btn primary" data-ev="save">Save changes</button><button class="btn" data-ev="cancel">Cancel</button><span class="ev-pos">editing: shortcuts are off</span></div>`
+    :`<div class="ev-actions">
+        <button class="btn primary" data-ev="verify" aria-keyshortcuts="V">Verify<kbd>V</kbd></button>
+        <button class="btn" data-ev="edit" aria-keyshortcuts="E">Edit<kbd>E</kbd></button>
+        <button class="btn danger" data-ev="reject" aria-keyshortcuts="R">Reject<kbd>R</kbd></button>
+        <span class="ev-sep"></span>
+        <button class="btn" data-ev="prev" aria-keyshortcuts="K">Prev<kbd>K</kbd></button>
+        <button class="btn" data-ev="next" aria-keyshortcuts="J">Next<kbd>J</kbd></button>
+        <span class="ev-sep"></span>
+        <button class="btn" data-ev="check"${state.ev.checking===r.id?" disabled":""} title="Run this question through the query API's search: hyde off, top five. This is how an unanswerable question is spot-checked.">Check retrieval</button>
+        <span class="ev-pos"></span></div>`;
+  box.innerHTML=head+bar+`<div id="ev-err" class="ev-err" role="alert"></div>`+(state.ev.editing?evFormHtml(r):evViewHtml(d));
+  box.scrollTop=0;
+  evSyncBar();
+}
+
+/* -- actions -- */
+function evBusy(on){
+  state.ev.busy=on;
+  const bar=$("#ev-detail .ev-actions");
+  if(bar){bar.classList.toggle("busy",on);bar.setAttribute("aria-busy",on)}
+}
+async function evAct(action,record){
+  const s=state.ev,d=s.detail,id=s.sel;
+  if(!d||d.record.id!==id||s.busy)return;
+  evBusy(true);
+  let r;
+  try{r=await evPost("/api/eval/questions/"+encodeURIComponent(id),record?{action,record}:{action})}
+  catch(e){
+    toast(`${id}: ${e.message}`,1);
+    const box=$("#ev-err");if(box)box.innerHTML=`<b>Not saved.</b> ${esc(e.message)}`;
+    evBusy(false);return;                            // nothing changed on disk; the form and the question stay as they were
+  }
+  try{                                               // saved: what follows is bookkeeping
+    const rec=r.record,i=s.rows.findIndex(x=>x.id===id);
+    if(i>=0)Object.assign(s.rows[i],{tier:rec.tier,split:rec.split,status:rec.provenance.status,
+      author:rec.provenance.author,question:rec.question});
+    d.record=rec;s.editing=false;s.dirty=false;s.check=null;
+    evRenderList();evLoadProgress();
+    toast(`${id} ${rec.provenance.status}`);
+    const next=i>=0?s.rows[i+1]:null;
+    if(next)await evSelect(next.id);
+    else{evRenderDetail();if(i>=0)toast("end of list")}
+  }catch(e){toast(`${id} was saved, but the page could not refresh: ${e.message}`,1)}
+  finally{evBusy(false)}
+}
+function evEdit(){
+  const s=state.ev,d=s.detail;
+  if(!d||d.record.id!==s.sel||s.busy)return;
+  s.editing=true;s.dirty=false;evRenderDetail();
+  const q=$("#ev-e-question");if(q){q.focus();q.setSelectionRange(q.value.length,q.value.length)}
+}
+function evCancel(){
+  if(state.ev.dirty&&!confirm("Discard your unsaved edits?"))return;
+  state.ev.editing=false;state.ev.dirty=false;evRenderDetail();
+}
+/* The record to POST: the STORED record, with only what the reviewer changed
+   overwritten. Anything the form does not render (a gold entry's `alternatives`,
+   a field a later schema adds) rides along untouched, and so does a field that was
+   shown but left alone: nothing is trimmed, normalised or dropped behind their back. */
+function evReadForm(){
+  const box=$("#ev-form"),v=n=>box.querySelector(`[name="${n}"]`),stored=state.ev.detail.record;
+  const rec=JSON.parse(JSON.stringify(stored));
+  const edited=el=>el.value!==el.defaultValue;      // defaultValue = what the form was rendered with
+  if(edited(v("question")))rec.question=v("question").value.trim();
+  if(!v("tier").selectedOptions[0].defaultSelected)rec.tier=v("tier").value;
+  if(v("answerable").checked!==v("answerable").defaultChecked)rec.answerable=v("answerable").checked;
+  if(edited(v("nuggets")))rec.nuggets=v("nuggets").value.split("\n").map(x=>x.trim()).filter(Boolean);
+  if(edited(v("expect_course")))rec.expect_course=v("expect_course").value.trim()||null;
+  if(edited(v("notes")))rec.notes=v("notes").value.trim();
+  if(v("rewrote").checked)rec.provenance.author="owner";
+  rec.gold=[];
+  box.querySelectorAll(".ev-gold-row").forEach((row,i)=>{
+    const f=n=>row.querySelector(`[name="${n}"]`),file=f("g-file"),pg=f("g-pages"),h=f("g-heading"),req=f("g-req");
+    // a row rendered from the stored record starts as a copy of that entry (alternatives and all);
+    // a row added in the form has no data-gi and starts empty
+    const orig=row.dataset.gi===undefined?null:stored.gold[+row.dataset.gi];
+    if(!orig&&!file.value.trim()&&!pg.value.trim()&&!h.value.trim())return;      // added and left blank
+    const g=orig?JSON.parse(JSON.stringify(orig)):{};
+    if(!orig||edited(file))g.file=file.value.trim();
+    if(!orig||edited(pg)){
+      const s=pg.value.trim();
+      if(!s)delete g.pages;
+      else{
+        const m=/^(\d+)\s*(?:[-–]\s*(\d+))?$/.exec(s);
+        if(!m)throw new Error(`gold source ${i+1}: pages must look like 12 or 12-14, not "${s}"`);
+        g.pages=m[2]?[+m[1],+m[2]]:+m[1];
+      }
+    }
+    if(!orig||edited(h)){const s=h.value.trim();if(s)g.heading=s;else delete g.heading}
+    // twins are the same passage as the OLD locator: a moved locator keeps none of them,
+    // or a chunk from the old place would still count as a hit
+    if(orig&&g.alternatives&&(edited(file)||edited(pg)||edited(h)))delete g.alternatives;
+    if(!orig||req.checked!==req.defaultChecked)g.required=req.checked;
+    rec.gold.push(g);
+  });
+  return rec;
+}
+async function evSave(){
+  let rec;
+  try{rec=evReadForm()}
+  catch(e){const box=$("#ev-err");if(box)box.innerHTML=`<b>Not saved.</b> ${esc(e.message)}`;return}
+  await evAct("edit",rec);
+}
+function evAddGold(){
+  $("#ev-gold-rows").insertAdjacentHTML("beforeend",evGoldRow({}));
+  state.ev.dirty=true;
+  const rows=$$("#ev-gold-rows .ev-gold-row");rows[rows.length-1].querySelector("input").focus();
+}
+function evRmGold(btn){btn.closest(".ev-gold-row").remove();state.ev.dirty=true}
+function evNav(dir){
+  const rows=state.ev.rows,i=rows.findIndex(r=>r.id===state.ev.sel),j=i+dir;
+  if(j<0||j>=rows.length)return toast(dir>0?"end of list":"start of list");
+  evSelect(rows[j].id);
+}
+function evCheckHtml(j){
+  const rows=j.results||[],rt=j.retrieval||{};
+  const echo=[`top ${rows.length} from the query API`,"hyde off",rt.rerank_mode?`rerank ${rt.rerank_mode}`:"",rt.reranker_model||""].filter(Boolean).join(" · ");
+  return `<p class="ev-note" style="margin:0 0 6px">${esc(echo)}. Scores are on the active reranker's own scale.</p>`
+    +(rows.length?rows.map(s=>`<div class="src"><span class="lab">[${esc(s.n??"")}] ${esc(s.label||"")}</span>
+      <span class="pill">${s.score!=null?(+s.score).toFixed(3):"no score"}</span>${s.text?`<div class="txt">${esc(s.text)}</div>`:""}</div>`).join("")
+      :`<div class="empty">The search returned nothing.</div>`);
+}
+async function evCheck(){
+  const s=state.ev,d=s.detail;
+  if(!d||s.checking===d.record.id)return;
+  const id=d.record.id,out=$("#ev-check"),btn=$('#ev-detail [data-ev="check"]');
+  s.checking=id;if(btn)btn.disabled=true;
+  out.innerHTML=`<div class="skel"></div><div class="skel" style="width:75%"></div><div class="skel" style="width:60%"></div>`;
+  let html;
+  try{html=evCheckHtml(await ragCall("/search",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({q:d.record.question,...EV_CHECK})}))}
+  catch(e){html=`<div class="ev-err" role="alert"><b>Check retrieval failed.</b> ${esc(e.message)}<br>Is the query API up? Start it with <code>rag serve</code>, or use ⟳ restart :8051 in the header.</div>`}
+  if(s.checking===id)s.checking=null;
+  if(s.sel!==id||!s.detail||s.detail.record.id!==id)return;   // the reviewer moved on; a late answer is about another question
+  s.check={id,html};
+  const o=$("#ev-check");o.innerHTML=html;
+  const b=$('#ev-detail [data-ev="check"]');if(b)b.disabled=false;
+  o.scrollIntoView({block:"nearest"});
+}
+
+/* -- wiring -- */
+["#ev-f-suite","#ev-f-status","#ev-f-split"].forEach(s=>$(s).addEventListener("change",e=>{
+  e.target.blur();evLoadList()}));                  // a focused <select> would swallow the shortcuts
+$("#ev-refresh").onclick=evOpen;
+$("#ev-bars").addEventListener("click",e=>{if(e.target.closest('[data-ev="retry"]'))evLoadProgress()});
+$("#ev-list").addEventListener("click",e=>{
+  if(e.target.closest('[data-ev="retry"]'))return evLoadList();
+  const b=e.target.closest(".ev-row");if(b&&!state.ev.busy)evSelect(b.dataset.qid);
+});
+$("#ev-detail").addEventListener("click",e=>{
+  const b=e.target.closest("[data-ev]");if(!b||b.disabled||state.ev.busy)return;
+  const go={verify:()=>evAct("verify"),reject:()=>evAct("reject"),edit:evEdit,save:evSave,cancel:evCancel,
+    prev:()=>evNav(-1),next:()=>evNav(1),check:evCheck,addgold:evAddGold,rmgold:()=>evRmGold(b),
+    reload:()=>evSelect(state.ev.sel,true)}[b.dataset.ev];
+  if(go)go();
+});
+["input","change"].forEach(t=>$("#ev-detail").addEventListener(t,()=>{if(state.ev.editing)state.ev.dirty=true}));
+/* Shortcuts: V verify, R reject, E edit, J next, K previous. Never while a text
+   field has focus (a letter there is text), never with Ctrl/Meta/Alt (Ctrl+R
+   must still reload the page), never on key-repeat (a held V would verify the
+   whole queue), and never while an edit form is open or a write is in flight. */
+document.addEventListener("keydown",e=>{
+  if(!$("#tab-eval").classList.contains("on")||$("#modal").classList.contains("on"))return;
+  if(e.ctrlKey||e.metaKey||e.altKey||e.repeat||e.isComposing)return;
+  const t=e.target;
+  if(t.isContentEditable||(t.closest&&t.closest("input,textarea,select")))return;
+  if(state.ev.editing||state.ev.busy)return;
+  const act={v:()=>evAct("verify"),r:()=>evAct("reject"),e:evEdit,j:()=>evNav(1),k:()=>evNav(-1)}[(e.key||"").toLowerCase()];
+  if(act){e.preventDefault();act()}
+});
+
 /* ---------- boot ---------- */
 (async()=>{
-  try{const s=await api("/api/settings");state.ragApi=s.rag_api;state.jsonls=s.jsonl_files;state.vaultPath=s.vault_path}catch(e){}
+  /* The same boot call already being made carries the experimental flags, so
+     gating costs no extra request. It runs BEFORE maybeLoadCompareCatalog()
+     below because the Query tab is the default tab: the gate has to settle
+     before the user can look at it. */
+  try{const s=await api("/api/settings");state.ragApi=s.rag_api;state.jsonls=s.jsonl_files;state.vaultPath=s.vault_path;
+      applyExperimentalGates(s.experimental)}catch(e){}
   /* The comparison catalog is only fetched when its panel is actually open —
      booting straight into two :8051 calls made a stopped query API look like a
      broken console on every page load. */
