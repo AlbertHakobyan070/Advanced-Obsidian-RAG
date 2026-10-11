@@ -9,6 +9,9 @@ Build the corpus
     python main.py index --append FILE.jsonl   # add one more chunk file
     python main.py stamp                       # verify, then record, which embedder built
                                                # the collection (:8051 refuses a mismatch)
+    python main.py index --rebuild-into NAME [--embedding PROVIDER]
+                                               # re-embed into a NEW collection, resumably;
+                                               # the active one is never written
 
 Ingest lanes (each writes its own *_chunks.jsonl; then `index --append` it)
     ingest-pdfs | ingest-notebooks | ingest-code | ingest-canvas | ingest-md
@@ -58,9 +61,50 @@ def _bootstrap_logging(cfg):
     )
 
 
+def _cmd_rebuild_into(cfg, args):
+    from src.embeddings.embedder import Embedder
+    from src.embeddings.reembed import ReembedError, rebuild_into
+    from src.embeddings.registry import resolve_embedding_spec
+    from src.embeddings.sidecar import StampError
+
+    try:
+        spec = resolve_embedding_spec(cfg, args.embedding)
+        emb = Embedder.from_config(cfg, spec=spec)
+        print(f"Re-embedding {cfg.get('paths.collection_name')!r} into {args.rebuild_into!r} "
+              f"with {spec.label()} (doc_prefix {spec.doc_prefix!r}, max_seq_length "
+              f"{spec.max_seq_length})")
+        sidecar = rebuild_into(cfg, args.rebuild_into, emb, limit=args.limit)
+    except (ReembedError, StampError, ValueError) as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    build = sidecar["build"]
+    print(f"\n{'OK' if sidecar['status'] == 'complete' else 'PARTIAL'} {args.rebuild_into!r}: "
+          f"{sidecar['count']} of {sidecar['expected']} chunks, {sidecar['dimension']}-d, "
+          f"status {sidecar['status']} ({build['embedded']} embedded this run, "
+          f"{build['chunks_per_s']} chunks/s; sample cosine {sidecar['verified']['min_cosine']:.5f})")
+    if sidecar["status"] == "building":
+        print("   --limit run: left 'building' on purpose, :8051 will refuse to serve it. "
+              "Delete it when done.")
+        return
+    print("   HyPE: NOT re-embedded (deferred); keep retrieval.hype.enabled off if you activate it.")
+    print(f"   Score it:  python main.py bench run --collection {args.rebuild_into} ...")
+    print(f"   Activate:  paths.collection_name: {args.rebuild_into}  and  "
+          f"embedding.provider: {sidecar['provider']}, then restart :8051")
+
+
 def cmd_index(args):
     cfg = load_config(args.config)
     _bootstrap_logging(cfg)
+    rebuild_only = {"--embedding": args.embedding, "--limit": args.limit}
+    if args.rebuild_into and args.append:
+        print("ERROR: --rebuild-into and --append cannot be combined", file=sys.stderr)
+        sys.exit(2)
+    if not args.rebuild_into and any(v is not None for v in rebuild_only.values()):
+        print(f"ERROR: {' / '.join(rebuild_only)} only apply with --rebuild-into", file=sys.stderr)
+        sys.exit(2)
+    if args.rebuild_into:
+        return _cmd_rebuild_into(cfg, args)
     from src.embeddings.embedder import Embedder
 
     emb = Embedder.from_config(cfg)
@@ -459,6 +503,17 @@ def build_parser() -> argparse.ArgumentParser:
     idx.add_argument("--append", default=None, metavar="JSONL",
                      help="Append chunks from this file to the existing index "
                           "(e.g. data/pdf_chunks.jsonl) instead of rebuilding")
+    idx.add_argument("--rebuild-into", default=None, metavar="NAME",
+                     help="Re-embed the active collection's corpus into a NEW collection NAME "
+                          "(ids from the active collection, text from the chunk JSONLs). "
+                          "Resumable: run the same command again after an interruption. "
+                          "The active collection is never written")
+    idx.add_argument("--embedding", default=None, metavar="PROVIDER",
+                     help="With --rebuild-into: the embedder to build with, a name from "
+                          "embedding.providers (or local); default embedding.provider")
+    idx.add_argument("--limit", type=int, default=None, metavar="N",
+                     help="With --rebuild-into: embed only N ids, for a smoke test of a "
+                          "throwaway collection. The result stays 'building' (unservable)")
     idx.set_defaults(func=cmd_index)
 
     pdf = sub.add_parser("ingest-pdfs", help="Extract vault PDFs into data/pdf_chunks.jsonl")

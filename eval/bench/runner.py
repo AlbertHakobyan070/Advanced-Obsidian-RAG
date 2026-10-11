@@ -44,7 +44,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-from eval.bench.configs import LADDER
+from eval.bench.configs import BASELINES
 from eval.bench.fingerprint import config_digest, git_state, index_fingerprint
 from eval.bench.metrics import retrieval_metrics
 from eval.bench.questions import AUTHORS, SUITES, TIERS, question_to_dict
@@ -201,9 +201,10 @@ def _paired(rows_a: list[dict], rows_b: list[dict]) -> dict | None:
 def summarise(rows_by_config: dict[str, list[dict]]) -> dict:
     """Per configuration: overall / by_suite / by_author / by_tier metric CIs over
     answerable rows without an error, warm latency percentiles, cold_rows, errors;
-    and, for each pair of neighbouring ladder rungs that both ran, `paired` on the
-    later one. by_author keeps drafted questions (`draft`) apart from hand-written
-    ones (`owner`), so a gap between the two shows instead of averaging away."""
+    and, for each BASELINES pair (neighbouring ladder rungs, the routing variants
+    against F-full, H-on against H-off) that both ran, `paired` on the later one.
+    by_author keeps drafted questions (`draft`) apart from hand-written ones
+    (`owner`), so a gap between the two shows instead of averaging away."""
     summary = {}
     for name, rows in rows_by_config.items():
         scored = [r for r in rows if "metrics" in r]
@@ -214,7 +215,7 @@ def summarise(rows_by_config: dict[str, list[dict]]) -> dict:
             "cold_rows": sum(1 for r in rows if r["cold"]),
             "errors": sum(1 for r in rows if "error" in r),
         }
-    for (a, _), (b, _) in zip(LADDER, LADDER[1:]):
+    for b, a in BASELINES.items():
         if a in rows_by_config and b in rows_by_config:
             paired = _paired(rows_by_config[a], rows_by_config[b])
             if paired:

@@ -223,6 +223,9 @@ class QueryIn(BaseModel):
     lanes: list[str] | None = None
     # Force the course/domain/tag metadata boost on or off for this call.
     metadata_boost: bool | None = None
+    # Force the scope lanes (dense_scope / sparse_scope) on or off for this
+    # call; the scope is still detected and echoed. Unset = retrieval.scope_lanes.
+    scope_lanes: bool | None = None
     # Post-rerank relevance gate for this call: chunks scoring below
     # gate_threshold are dropped BEFORE generation (and before parent/neighbor
     # expansion), and when none survive the answer is the fixed "nothing
@@ -301,6 +304,9 @@ class SearchIn(BaseModel):
     lanes: list[str] | None = None
     # Force the course/domain/tag metadata boost on or off for this call.
     metadata_boost: bool | None = None
+    # Force the scope lanes (dense_scope / sparse_scope) on or off for this
+    # call; the scope is still detected and echoed. Unset = retrieval.scope_lanes.
+    scope_lanes: bool | None = None
     # Post-rerank relevance gate, as on /query: drops chunks scoring below
     # gate_threshold before they are returned (and before parent/neighbor
     # expansion). Unset = retrieval.relevance_gate.enabled. The default scorer
@@ -368,6 +374,7 @@ class CompareBranchIn(BaseModel):
     lane_weights: dict[str, float] | None = None
     lanes: list[str] | None = None
     metadata_boost: bool | None = None
+    scope_lanes: bool | None = None
     # The relevance gate (see QueryIn). Part of the retrieval key, so branches
     # that differ only by gate do not share one evidence set.
     gate: bool | None = None
@@ -532,7 +539,7 @@ _RETRIEVAL_FIELDS = (
     "preset", "auto_preset", "top_k", "dense_top_k", "sparse_top_k",
     "hyde", "omnisearch", "parent_context", "neighbor_context", "hype",
     "rerank", "rerank_instruction", "lane_weights", "lanes", "metadata_boost",
-    "gate", "gate_threshold", "gate_scorer",
+    "scope_lanes", "gate", "gate_threshold", "gate_scorer",
 )
 
 
@@ -1560,6 +1567,9 @@ def schema() -> dict:
         "metadata_boost": "bool? (force the course/domain/tag metadata boost "
                           "on or off for this call; unset follows "
                           "retrieval.metadata_boost)",
+        "scope_lanes": "bool? (force the dense_scope/sparse_scope lanes on or "
+                       "off for this call; the scope is still detected and "
+                       "echoed. Unset follows retrieval.scope_lanes)",
         "gate": "bool? (force the post-rerank relevance gate on or off for this "
                 "call; unset follows retrieval.relevance_gate.enabled. Chunks "
                 "scoring below gate_threshold are dropped before generation, "

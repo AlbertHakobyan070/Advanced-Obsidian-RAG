@@ -125,6 +125,6 @@ def test_index_fingerprint_shape_and_bm25_sidecar(tmp_path):
     assert index_fingerprint(cfg, rag)["bm25"] is None                # no sidecar written yet
     (tmp_path / "bm25.pkl.meta.json").write_text('{"count": 5, "built_at": "t"}', encoding="utf-8")
     assert index_fingerprint(cfg, rag) == {
-        "dense_count": 7, "bm25": {"count": 5, "built_at": "t"},
+        "dense_count": 7, "collection": "obsidian_vault", "bm25": {"count": 5, "built_at": "t"},
         "embedding": {"provider": "local", "model": "emb-m"}, "reranker": "rr-m",
         "chunk_files": chunk_files_digest(tmp_path)}

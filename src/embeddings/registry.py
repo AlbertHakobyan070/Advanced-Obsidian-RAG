@@ -39,6 +39,7 @@ DEVICE_PATTERN = re.compile(r"^(auto|cpu|mps|cuda(:\d+)?)$")
 ENTRY_KEYS = frozenset({
     "kind", "base_url", "model", "api_key_env", "api_key_optional",
     "dimensions", "query_prefix", "doc_prefix", "label", "description",
+    "max_seq_length",
 })
 
 
@@ -58,6 +59,10 @@ class EmbeddingSpec:
     device: str = "auto"
     query_prefix: str = ""
     doc_prefix: str = ""
+    # Token cap the endpoint truncates at (a providers: entry's `max_seq_length`).
+    # It changes the vectors of every chunk longer than the cap, so it is part of
+    # the identity; None = not declared (local models, endpoints with no cap).
+    max_seq_length: int | None = None
 
     @property
     def normalize(self) -> bool:
@@ -70,13 +75,16 @@ class EmbeddingSpec:
         """What must match between the configured embedder and a collection's
         vectors. Not in it: the provider NAME, base_url, device and batch size,
         none of which changes the vector space."""
-        return {
+        ident = {
             "kind": self.kind,
             "model": self.model,
             "normalize": self.normalize,
             "query_prefix": self.query_prefix,
             "doc_prefix": self.doc_prefix,
         }
+        if self.max_seq_length is not None:
+            ident["max_seq_length"] = self.max_seq_length
+        return ident
 
     def label(self) -> str:
         return f"{self.provider} · {self.model}"
@@ -184,6 +192,11 @@ def _spec_from_entry(name: str, entry: Any) -> EmbeddingSpec:
     if dimensions is not None and (
             isinstance(dimensions, bool) or not isinstance(dimensions, int) or dimensions < 1):
         raise ValueError(f"{where}.dimensions = {dimensions!r} must be a positive integer or null")
+    max_seq_length = entry.get("max_seq_length")
+    if max_seq_length is not None and (
+            isinstance(max_seq_length, bool) or not isinstance(max_seq_length, int)
+            or max_seq_length < 1):
+        raise ValueError(f"{where}.max_seq_length = {max_seq_length!r} must be a positive integer or null")
     base_url = entry.get("base_url")
     if base_url is not None and not isinstance(base_url, str):
         raise ValueError(f"{where}.base_url = {base_url!r} must be a string or null")
@@ -207,6 +220,7 @@ def _spec_from_entry(name: str, entry: Any) -> EmbeddingSpec:
         dimensions=dimensions,
         query_prefix=check_prefix(entry.get("query_prefix"), f"{where}.query_prefix"),
         doc_prefix=check_prefix(entry.get("doc_prefix"), f"{where}.doc_prefix"),
+        max_seq_length=max_seq_length,
     )
 
 

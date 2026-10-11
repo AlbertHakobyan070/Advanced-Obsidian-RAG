@@ -2257,6 +2257,19 @@ EDITABLE_SETTINGS: dict[str, dict] = {
     "retrieval.rerank_instruction_format": {"kind": "enum", "restart": ":8051",
                                      "values": ["prefix", "instruct"],
                                      "label": "Rerank instruction format"},
+    # Two independent halves of query routing. `desc` is the one-line
+    # explanation the Settings grid prints under the control.
+    "retrieval.scope_lanes":        {"kind": "enum", "restart": ":8051",
+                                     "values": ["true", "false"],
+                                     "label": "Scope lanes",
+                                     "desc": "Add domain/content-filtered dense and sparse lanes "
+                                             "to the fusion when the query names a domain or course "
+                                             "(detection itself stays on)."},
+    "retrieval.metadata_boost":     {"kind": "enum", "restart": ":8051",
+                                     "values": ["true", "false"],
+                                     "label": "Metadata boost",
+                                     "desc": "Nudge up chunks whose course, domain or tag is "
+                                             "named in the query, after fusion."},
     "pdf.ocr_engine":               {"kind": "enum", "restart": "none (read per job)",
                                      "values": ["auto", "tesseract", "paddle", "vlm", "none"],
                                      "label": "OCR engine for scanned pages"},
@@ -3884,6 +3897,86 @@ def eval_review(qid: str, body: EvalReviewIn) -> dict:
     return {"ok": True, "record": question_to_dict(new)}
 
 
+# The config keys the Info tab's pipeline diagrams display and judge "is this
+# stage on" from. /api/settings only reports its EDITABLE_SETTINGS whitelist,
+# which leaves out most pipeline flags (use_hyde, hype.enabled, the gate, ...), so
+# the diagrams read this explicit list instead. An allowlist rather than "any
+# key": the diagrams need no secret, and an endpoint that echoed arbitrary
+# config would grow into one. tests/test_info_tab_markup.py asserts every key the
+# page names is in this tuple and in the shipped config.
+PIPELINE_STATE_KEYS: tuple[str, ...] = (
+    # query side
+    "retrieval.presets", "retrieval.hyde_skip_signals",
+    "retrieval.use_hyde", "retrieval.hyde_cache.enabled", "retrieval.hyde_cache.path",
+    "embedding.provider", "embedding.local_model", "paths.collection_name",
+    "retrieval.dense_top_k", "retrieval.sparse_top_k",
+    "retrieval.code_file_types",
+    "retrieval.scope_lanes", "retrieval.domain_signals", "retrieval.content_signals",
+    "retrieval.hype.enabled", "retrieval.hype.collection", "retrieval.hype.top_k",
+    "retrieval.omnisearch.enabled", "retrieval.omnisearch.base_url",
+    "retrieval.omnisearch.top_k",
+    "retrieval.lane_weights", "retrieval.rrf_k", "retrieval.metadata_boost",
+    "retrieval.rerank_mode", "retrieval.rerank_top_k", "retrieval.cross_encoder_model",
+    "retrieval.cross_encoder_device", "retrieval.rerank_instruction",
+    "retrieval.rerank_http.base_url",
+    "retrieval.laya.enabled", "retrieval.laya.model_dir", "retrieval.laya.device",
+    "retrieval.relevance_gate.enabled", "retrieval.relevance_gate.scorer",
+    "retrieval.relevance_gate.threshold",
+    "retrieval.parent_context", "retrieval.neighbor_context", "retrieval.parents_file",
+    "retrieval.neighbor_max_per_doc", "retrieval.neighbor_max_total",
+    "generation.provider", "generation.model", "generation.max_tokens",
+    "generation.temperature", "generation.verify_citations",
+    "graph.enabled", "graph.file_type", "graph.max_depth", "graph.max_per_hop",
+    "graph.max_total", "graph.seed_top_k",
+    # ingestion side
+    "parser.vault_path", "parser.skip_dirs", "webui.inbox_dir",
+    "webui.auto_restart_rag",
+    "parser.chunking", "parser.max_chunk_size", "parser.min_chunk_size",
+    "parser.overlap_size", "paths.chunks_file",
+    "pdf.output_file", "pdf.max_chunk_size", "pdf.skip_scanned_threshold",
+    "pdf.extract_images", "pdf.ocr_enabled", "pdf.ocr_engine", "pdf.ocr_language",
+    "pdf.only_book_folders", "pdf.skip_folders", "pdf.skip_list_file",
+    "pdf.max_pages_per_pdf",
+    "pdf.paddle_ocr.base_url", "pdf.paddle_ocr.pipeline", "pdf.paddle_ocr.dpi",
+    "pdf.vlm_ocr.preset", "pdf.vlm_ocr.base_url", "pdf.vlm_ocr.dpi",
+    "notebooks.output_file", "notebooks.extensions", "notebooks.include_outputs",
+    "notebooks.save_figures",
+    "code.output_file", "code.extensions", "code.skip_roots", "code.max_file_bytes",
+    "canvas.output_file", "canvas.chunking", "canvas.max_chunk_size",
+    "canvas.context_depth", "canvas.context_chars",
+    "paths.chroma_dir", "paths.bm25_index",
+    "embedding.query_prefix", "embedding.doc_prefix", "embedding.batch_size",
+    "embedding.verify.sample_size", "embedding.verify.min_cosine",
+)
+
+
+@app.get("/api/pipeline-state")
+def pipeline_state() -> dict:
+    """What the Info tab's diagrams need to say which stages are on: the value of
+    each PIPELINE_STATE_KEYS entry as it stands in config.yaml ON DISK (the same
+    fresh read /api/settings does), plus the experimental-feature registry's ids
+    so the page can mark those stages. A key absent from the file is listed under
+    `unset`, not reported as null: YAML null is a real value (pdf.paddle_ocr.
+    pipeline: null) and the two mean different things."""
+    from src.utils.config_loader import load_config as _load
+    disk_cfg = _load()
+    missing = object()
+    values, unset = {}, []
+    for key in PIPELINE_STATE_KEYS:
+        got = disk_cfg.get(key, missing)
+        if got is missing:
+            unset.append(key)
+        else:
+            values[key] = got
+    return {
+        "values": values,
+        "unset": unset,
+        "experimental": [{"id": f["id"], "key": f["key"], "label": f["label"],
+                          "on": bool(disk_cfg.get(f["key"]))}
+                         for f in EXPERIMENTAL_FEATURES],
+    }
+
+
 @app.get("/api/schema")
 def api_schema() -> dict:
     """
@@ -4087,6 +4180,13 @@ def api_schema() -> dict:
                            "`experimental`: the features that are built but "
                            "not part of the default workflow, each with its "
                            "config flag and whether it is on"},
+            "GET /api/pipeline-state": {
+                "permission": "read",
+                "purpose": "the config.yaml values (read fresh from disk) that "
+                           "say which pipeline stages are on, for the Info "
+                           "tab's diagrams: `values` per key, `unset` for keys "
+                           "absent from the file, and the experimental "
+                           "registry with each flag's state"},
             "POST /api/settings": {
                 "permission": "mutating",
                 "purpose": "persist whitelisted config values into config.yaml "

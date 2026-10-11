@@ -179,6 +179,8 @@ configurations:
 | `ladder` (default) | One rung per added component, cumulative: BM25 alone (`R0-bm25`) and dense alone (`R1-dense`), then hybrid (`R2-hybrid`), then + scope routing and the metadata boost (`R3-routing`), + the code lanes and code preset (`R4-code`), + the cross-encoder (`R5-rerank`), + HyDE (`R6-hyde`, the shipped default). |
 | `loo` | **Leave-one-out.** The full pipeline (`full`), then the full pipeline minus each factor in turn (`-sparse`, `-dense`, `-routing`, `-code`, `-rerank`, `-hyde`). |
 | `factorial` | **Every subset** of the factors, named `F:<factors joined by +>` (`F:none` is the empty set). A subset with neither dense nor sparse has no lane to search and scores 0 without searching. |
+| `routing` | **Routing split.** `routing` is two mechanisms, so this separates them at the R5 level (HyDE off): `F-full` (scope lanes + metadata boost), `F-noscope` (boost only), `F-noboost` (scope lanes only), `F-none` (neither). Each variant is paired against `F-full` in the report. Switched by the per-call `scope_lanes` and `metadata_boost` keys. |
+| `hyde` | `H-off` (the R5 pipeline) and `H-on` (R5 plus HyDE), paired. |
 | `name[,name…]` | Hand-written configurations from `eval/configs.yaml`. |
 
 The generated sets are built from the same binary factors (`FACTORS` in

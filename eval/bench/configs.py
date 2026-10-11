@@ -71,6 +71,33 @@ LADDER: list[tuple[str, frozenset[str]]] = [
 ]
 
 
+R5 = frozenset({"dense", "sparse", "routing", "code", "rerank"})      # the R5-rerank rung
+
+
+def routing_ablation() -> list[tuple[str, dict]]:
+    """`routing` is two mechanisms, so split them: the scope lanes and the metadata
+    boost, each switched through its own per-call key. All four sit at R5 with HyDE
+    off. `lanes` keeps the scope lanes in all four; `scope_lanes` is what turns them
+    off, so the key itself is what is measured."""
+    base = factor_config(R5)
+    return [(name, {**base, "scope_lanes": scope, "metadata_boost": boost})
+            for name, scope, boost in (("F-full", True, True), ("F-noscope", False, True),
+                                       ("F-noboost", True, False), ("F-none", False, False))]
+
+
+def hyde_ablation() -> list[tuple[str, dict]]:
+    """HyDE off and on over the same R5 pipeline."""
+    return [("H-off", factor_config(R5)), ("H-on", factor_config(R5 | {"hyde"}))]
+
+
+# config -> the config the report pairs it with (B minus A): each ladder rung against
+# the rung before it, each routing variant and H-on against their reference.
+BASELINES: dict[str, str] = {
+    **{b: a for (a, _), (b, _) in zip(LADDER, LADDER[1:])},
+    "F-noscope": "F-full", "F-noboost": "F-full", "F-none": "F-full", "H-on": "H-off",
+}
+
+
 def ladder() -> list[tuple[str, dict]]:
     return [(name, factor_config(s)) for name, s in LADDER]
 
@@ -110,19 +137,24 @@ def load_named(path) -> dict[str, dict]:
 
 
 def resolve(spec: str, path) -> list[tuple[str, dict]]:
-    """A `--configs` value to [(name, overrides)]: `ladder`, `loo` or `factorial`
-    (generated; `path` is not read), or comma-separated names from `path`."""
+    """A `--configs` value to [(name, overrides)]: `ladder`, `loo`, `factorial`,
+    `routing` or `hyde` (generated; `path` is not read), or comma-separated names
+    from `path`."""
     if spec == "ladder":
         return ladder()
     if spec == "loo":
         return leave_one_out()
     if spec == "factorial":
         return [(name, overrides) for name, overrides, _ in factorial()]
+    if spec == "routing":
+        return routing_ablation()
+    if spec == "hyde":
+        return hyde_ablation()
     named = load_named(path)
     out = []
     for name in (n.strip() for n in spec.split(",")):
         if name not in named:
             raise KeyError(f"unknown config {name!r}; known: {', '.join(sorted(named)) or '(none)'} "
-                           f"(or one of ladder, loo, factorial)")
+                           f"(or one of ladder, loo, factorial, routing, hyde)")
         out.append((name, named[name]))
     return out

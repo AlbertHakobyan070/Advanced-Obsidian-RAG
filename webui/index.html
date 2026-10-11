@@ -240,8 +240,45 @@ pre.log{background:var(--log-bg);border:1px solid var(--line);border-radius:var(
 @media(max-width:1120px){.infocard,.infocard:nth-child(n+5){grid-column:span 6}}
 @media(max-width:680px){.infocard,.infocard:nth-child(n+5){grid-column:span 12}.info-section-head{display:block}.info-section-head .hint{text-align:left;margin-top:4px}}
 .infocard code,#tab-info td code{font:11px var(--mono);background:var(--panel);border:1px solid var(--line);border-radius:3px;padding:0 4px;color:var(--ink)}
-#tab-info .formula{text-align:center;margin:16px 0;color:var(--ink)}
-#tab-info .katex{font-size:1.05em}
+/* Interactive pipeline diagrams: every stage is a focusable <g class="stg">; the card beside
+   the diagram shows the hovered / focused / pinned one. Theme tokens only. */
+.dg-live{margin-left:auto;font:11px var(--mono);color:var(--ink-faint)}
+.dg-live.err{color:var(--red)}
+.dg-live button{margin-left:8px;padding:2px 8px;font-size:11px}
+.dg-stage{display:grid;grid-template-columns:minmax(0,1fr) 330px;gap:16px;align-items:start}
+.dg-stage .diagram{margin-top:0}
+.dg-stage .diagram svg{min-width:640px}
+.stg{cursor:pointer;outline:none}
+.stg .bx{transition:stroke .15s ease,stroke-width .15s ease}
+.stg:hover .bx,.stg:focus-visible .bx{stroke:var(--amber);stroke-width:2.6}
+.stg.sel .bx{stroke:var(--amber);stroke-width:3.2}
+.stg:hover .bx.fin,.stg:focus-visible .bx.fin,.stg.sel .bx.fin{stroke:var(--ink)}
+.stg:focus-visible{outline:2px solid var(--amber);outline-offset:3px;border-radius:6px}
+.dg-led{stroke-width:1.6;pointer-events:none}
+.dg-led.on{fill:var(--green);stroke:var(--green)}
+.dg-led.off{fill:var(--panel);stroke:var(--ink-faint)}
+.dg-card{position:sticky;top:12px;background:var(--panel-2);border:1px solid var(--line);
+  border-left:3px solid var(--amber-dim);border-radius:var(--r);padding:14px 15px;min-height:180px;
+  font-size:12.5px;line-height:1.55;color:var(--ink-dim);overflow-wrap:anywhere;
+  max-height:calc(100vh - 28px);overflow:auto}
+.dg-card h3{margin:6px 0 8px;font:600 15px var(--disp);color:var(--ink);padding:0;border:0}
+.dg-card h4{margin:12px 0 5px;font:600 9.5px var(--mono);text-transform:uppercase;letter-spacing:.11em;color:var(--ink-faint)}
+.dg-card p{margin:0 0 6px}
+.dg-chips{display:flex;flex-wrap:wrap;gap:6px}
+.dg-chip{font:600 9.5px var(--mono);text-transform:uppercase;letter-spacing:.09em;border:1px solid var(--line);
+  border-radius:999px;padding:3px 8px;color:var(--ink-dim);background:var(--panel);white-space:nowrap}
+.dg-chip.on{color:var(--green);border-color:var(--green)}
+.dg-chip.off{color:var(--ink-dim);border-color:var(--ink-faint)}
+.dg-chip.mode,.dg-chip.core,.dg-chip.auto{color:var(--blue);border-color:var(--blue)}
+.dg-chip.unk{color:var(--red);border-color:var(--red)}
+.dg-chip.xp{color:var(--red);border-color:var(--red)}
+.dg-keys{margin:0;font:11px var(--mono)}
+.dg-keys dt{margin-top:6px;color:var(--amber);overflow-wrap:anywhere}
+.dg-keys dd{margin:1px 0 0 10px;color:var(--ink);overflow-wrap:anywhere}
+.dg-keys dd.unset{color:var(--red)}
+.dg-foot{margin-top:12px;padding-top:8px;border-top:1px solid var(--line);font-size:11px;color:var(--ink-faint)}
+@media(max-width:1180px){.dg-stage{grid-template-columns:1fr}.dg-card{position:static;order:-1;max-height:none}}
+@media(prefers-reduced-motion:reduce){.stg .bx{transition:none}}
 #tab-info td:first-child{white-space:nowrap;color:var(--amber);font-family:var(--mono);font-size:12px}
 .wordmark .mark{fill:var(--amber);vertical-align:-2px;margin-right:7px}
 #theme-toggle{padding:4px 10px;font-size:12px;white-space:nowrap}
@@ -1278,14 +1315,17 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
 <section id="tab-info">
   <div class="panel">
     <h2>How this RAG works</h2>
-    <p class="hint">A hybrid-retrieval RAG over your own documents. Its <b>core</b> is two search lanes — <b>Dense</b> (semantic / vectors) and <b>Sparse</b> (keyword / BM25) — run together and <b>fused</b> with Reciprocal Rank Fusion; optional branches can widen or reshape the query and add extra lanes. The fused pool is <b>re-ranked</b> by a cross-encoder, then a cited answer is <b>grounded</b> in your own materials. Everything up to generation is local; only the final answer needs the LLM.</p>
+    <p class="hint">A hybrid-retrieval RAG over your own documents. Several lanes search in parallel — <b>dense</b> (vectors) and <b>sparse</b> (keywords) always, others when enabled or triggered — and their ranked lists are <b>fused</b> into one candidate pool. A <b>reranker</b> reorders it, an optional <b>relevance gate</b> can discard weak chunks, an optional <b>expansion</b> step widens what is left to its parent section or neighbouring pages, and a <b>cited answer</b> is generated from those chunks. Retrieval and reranking run locally by default; the LLM writes the answer, and also drafts HyDE text, HyPE questions and citation checks when those are on. <b>Hover, focus or click any stage</b> to see what it does, which <code>config.yaml</code> keys control it, and whether it is on in the live config right now.</p>
     <div class="row" style="margin:0 0 12px">
       <button class="btn dgbtn on" data-dg="query">Query pipeline</button>
       <button class="btn dgbtn" data-dg="ingest">Ingestion pipeline</button>
+      <span class="dg-live" id="dg-live" role="status">reading the live config…</span>
     </div>
-    <div id="dg-query">
+
+    <div id="dg-query" class="dg-wrap">
+    <div class="dg-stage">
     <div class="diagram">
-      <svg viewBox="0 0 960 752" width="960" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Query pipeline diagram">
+      <svg viewBox="0 0 1040 860" width="1040" xmlns="http://www.w3.org/2000/svg" role="group" aria-label="Query pipeline diagram. Every stage is a button that shows its details.">
         <style>
           .t{fill:var(--ink);font:600 12.5px var(--body,sans-serif);text-anchor:middle}
           .t2{fill:var(--ink);font:600 11px var(--body,sans-serif);text-anchor:middle}
@@ -1293,17 +1333,15 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
           .ts{fill:var(--ink-dim);font:10px var(--mono,monospace);text-anchor:middle}
           .to{fill:var(--ink-dim);font:9.5px var(--mono,monospace);text-anchor:middle}
           .tol{fill:var(--ink-dim);font:9.5px var(--mono,monospace)}
-          .tor{fill:var(--amber);font:600 9.5px var(--mono,monospace);text-anchor:end}
           .tk{fill:var(--amber);font:600 9.5px var(--mono,monospace);text-anchor:middle}
           .tt{fill:var(--amber);font:600 10.5px var(--mono,monospace);text-anchor:middle;letter-spacing:.14em}
-          .num{fill:var(--amber);font:600 10px var(--mono,monospace);text-anchor:middle}
           .main{fill:var(--panel-2);stroke:var(--amber-dim);stroke-width:1.4}
           .core{fill:var(--panel-2);stroke:var(--amber);stroke-width:2}
           .opt{fill:var(--panel);stroke:var(--ink-faint);stroke-width:1.2;stroke-dasharray:5 4}
-          .major{fill:var(--panel-2);stroke:var(--blue);stroke-width:1.5}
+          .optb{fill:var(--panel-2);stroke:var(--blue);stroke-width:1.5;stroke-dasharray:6 4}
+          .xp{fill:var(--panel);stroke:var(--red);stroke-width:1.3;stroke-dasharray:2 3}
           .fin{fill:var(--amber);stroke:var(--amber);stroke-width:1.3}
           .chip{fill:var(--panel-2);stroke:var(--amber-dim);stroke-width:1}
-          .nc{fill:var(--panel-2);stroke:var(--amber-dim);stroke-width:1.2}
           .w{stroke:var(--ink-faint);stroke-width:1.7;fill:none;marker-end:url(#ah)}
           .wl{stroke:var(--ink-faint);stroke-width:1.7;fill:none}
           .ow{stroke:var(--ink-faint);stroke-width:1.3;fill:none;stroke-dasharray:5 4;marker-end:url(#ah)}
@@ -1315,140 +1353,188 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
           <marker id="ahb" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--blue)"/></marker>
         </defs>
 
-        <!-- ===== wires first, boxes drawn on top ===== -->
-        <!-- question -> lane split -->
-        <path class="wl" d="M480 52 V72"/>
-        <path class="wl" d="M407 72 H553"/>
-        <path class="w" d="M407 72 V114"/><path class="w" d="M553 72 V114"/>
-        <!-- lanes -> fusion funnel -->
-        <path class="w" d="M407 207 V247"/><path class="w" d="M553 207 V247"/>
-        <!-- boost tray -> rerank -> expansion -> generation -> answer -->
-        <path class="w" d="M480 350 V379"/>
-        <path class="w" d="M480 459 V477"/>
-        <path class="w" d="M480 544 V563"/>
-        <path class="w" d="M480 643 V655"/>
+        <!-- ===== wires first, stages drawn on top ===== -->
+        <path class="wl" d="M520 52 V72"/>
+        <path class="wl" d="M447 72 H593"/>
+        <path class="w" d="M447 72 V114"/><path class="w" d="M593 72 V114"/>
+        <path class="w" d="M447 207 V247"/><path class="w" d="M593 207 V247"/>
+        <path class="w" d="M520 350 V379"/>
+        <path class="w" d="M520 458 V476"/>
+        <path class="w" d="M520 540 V564"/>
+        <path class="w" d="M520 630 V652"/>
+        <path class="w" d="M520 732 V764"/>
         <!-- the ORIGINAL question bypass: rerank + generation never see HyDE text -->
-        <path class="byp" d="M558 44 H948 V600 H596"/>
-        <path class="byp" d="M948 416 H624"/>
-        <text class="to" transform="rotate(90 934 300)" x="934" y="300" style="opacity:.85">original question — bypasses HyDE</text>
-        <!-- HyDE joins the spine ABOVE the split: expanded text feeds BOTH lanes -->
-        <path class="ow" d="M254 96 C330 92, 420 78, 472 64"/>
-        <text class="to" x="360" y="76">expanded search text</text>
-        <!-- extra optional lanes pour into the funnel -->
-        <path class="ow" d="M266 300 C318 298, 348 286, 384 268"/>
+        <path class="byp" d="M600 46 H1030 V666 H644"/>
+        <path class="byp" d="M1030 392 H664"/>
+        <text class="to" transform="rotate(90 1022 250)" x="1022" y="250" style="opacity:.85">original question — bypasses HyDE</text>
+        <!-- HyDE joins the spine ABOVE the split: expanded text feeds every lane -->
+        <path class="ow" d="M260 96 C340 92, 440 78, 514 64"/>
+        <text class="to" x="356" y="68">expanded search text</text>
+        <!-- optional lanes pour into the fusion funnel -->
+        <path class="ow" d="M260 245 C340 245, 385 258, 419 264"/>
+        <path class="ow" d="M260 313 C345 313, 395 292, 438 287"/>
+        <path class="ow" d="M260 381 C370 381, 405 322, 451 304"/>
         <!-- scope router: raw question in, filtered lanes out -->
-        <path class="bw" d="M558 28 C640 30, 690 52, 738 92"/>
-        <path class="bw" d="M790 202 V282 H564"/>
+        <path class="bw" d="M600 30 C720 30, 850 52, 890 96"/>
+        <path class="bw" d="M890 200 V282 H612"/>
+        <!-- Laya: a rerank mode, and a gate scorer -->
+        <path class="ow" d="M780 436 H664"/>
+        <path class="ow" d="M895 474 V510 H634"/>
+        <!-- generation -> optional citation check -->
+        <path class="ow" d="M640 716 H776"/>
 
-        <!-- ===== center spine ===== -->
-        <rect class="main" x="402" y="16" width="156" height="36" rx="8" style="stroke:var(--amber);stroke-width:1.6"/>
-        <text class="t" x="480" y="38">Your question</text>
-        <rect class="chip" x="392" y="44" width="64" height="17" rx="8.5"/><text class="tk" x="424" y="56">preset</text>
 
-        <!-- 1 · the always-on hybrid core -->
-        <rect x="328" y="104" width="304" height="104" rx="12" fill="var(--amber)" opacity="0.08"/>
-        <text class="tt" x="480" y="96">HYBRID RETRIEVAL · ALWAYS-ON CORE</text>
-        <rect class="core" x="344" y="118" width="126" height="78" rx="7"/>
-        <text class="t" x="407" y="140">Dense</text>
-        <text class="ts" x="407" y="156">semantic · bge-small</text>
-        <text class="ts" x="407" y="170">ChromaDB vectors</text>
-        <rect class="core" x="490" y="118" width="126" height="78" rx="7"/>
-        <text class="t" x="553" y="140">Sparse</text>
-        <text class="ts" x="553" y="156">keyword · BM25</text>
-        <text class="ts" x="553" y="170">bm25s index</text>
-        <rect class="chip" x="361" y="188" width="92" height="17" rx="8.5"/><text class="tk" x="407" y="200">dense_top_k</text>
-        <rect class="chip" x="505" y="188" width="96" height="17" rx="8.5"/><text class="tk" x="553" y="200">sparse_top_k</text>
+        <rect x="368" y="104" width="304" height="104" rx="12" fill="var(--amber)" opacity="0.08"/>
+        <text class="tt" x="520" y="96">HYBRID RETRIEVAL · CORE</text>
 
-        <!-- 2 · RRF funnel + metadata-boost tray -->
-        <polygon class="main" points="374,252 586,252 544,316 416,316" style="stroke-linejoin:round"/>
-        <text class="t" x="480" y="274">RRF fusion</text>
-        <text class="ts" x="480" y="291" style="fill:var(--amber)">score += 1 / (60 + rank)</text>
-        <text class="to" x="480" y="306">summed over all lanes</text>
-        <rect class="main" x="390" y="316" width="180" height="34" rx="7"/>
-        <text x="480" y="330" style="fill:var(--ink);font:600 10.5px var(--body,sans-serif);text-anchor:middle">+ metadata boost</text>
-        <text class="to" x="480" y="343">course · #tag · code nudges</text>
 
-        <!-- 3 · cross-encoder -->
-        <rect class="main" x="340" y="384" width="280" height="64" rx="8"/>
-        <text class="t" x="480" y="406">Cross-encoder rerank</text>
-        <text class="ts" x="480" y="422">reads (question, chunk) pairs together</text>
-        <text class="ts" x="480" y="436">far sharper than vector similarity</text>
-        <rect class="chip" x="430" y="440" width="100" height="17" rx="8.5"/><text class="tk" x="480" y="452">rerank_top_k</text>
 
-        <!-- 4 · E2 small-to-big (optional) -->
-        <rect class="opt" x="345" y="482" width="270" height="62" rx="8"/>
-        <text class="t2" x="480" y="502">Small-to-big expansion · optional</text>
-        <text class="to" x="480" y="518">swap chunks for their parent section</text>
-        <text class="to" x="480" y="532">on in the synthesis preset · per-call toggle</text>
 
-        <!-- 5 · generation -->
-        <rect class="main" x="368" y="568" width="224" height="64" rx="8"/>
-        <text class="t" x="480" y="588">Grounded generation</text>
-        <text class="ts" x="480" y="604">answers only from retrieved chunks</text>
-        <text class="ts" x="480" y="618">inline [chunk N] citations</text>
-        <rect class="chip" x="436" y="624" width="88" height="17" rx="8.5"/><text class="tk" x="480" y="636">max_tokens</text>
 
-        <!-- answer -->
-        <rect class="fin" x="400" y="660" width="160" height="38" rx="8"/>
-        <text x="480" y="684" style="fill:var(--btn-primary-ink);font:600 13px var(--body,sans-serif);text-anchor:middle">Cited answer</text>
-        <text class="to" x="480" y="714">confidence pill · sources · retrieval echo</text>
 
-        <!-- ===== left column ===== -->
-        <rect class="opt" x="30" y="56" width="224" height="92" rx="8"/>
-        <text class="t2" x="142" y="76">HyDE · optional</text>
-        <text class="to" x="142" y="94">rewrites the question into a</text>
-        <text class="to" x="142" y="108">hypothetical answer, so retrieval</text>
-        <text class="to" x="142" y="122">matches prose against prose</text>
-        <text class="tk" x="142" y="138">auto-skipped for code intent</text>
 
-        <rect class="opt" x="30" y="252" width="234" height="100" rx="8"/>
-        <text class="t2" x="147" y="272">Extra lanes · optional</text>
-        <circle cx="42" cy="290.5" r="2.5" fill="var(--amber)"/>
-        <text class="tol" x="50" y="294">HyPE · pre-asked questions</text>
-        <text class="tor" x="252" y="294">toggle</text>
-        <circle cx="42" cy="310.5" r="2.5" fill="var(--amber)"/>
-        <text class="tol" x="50" y="314">Code · own scripts &amp; notebooks</text>
-        <text class="tor" x="252" y="314">auto</text>
-        <circle cx="42" cy="330.5" r="2.5" fill="var(--amber)"/>
-        <text class="tol" x="50" y="334">Live vault · unindexed edits</text>
-        <text class="tor" x="252" y="334">toggle</text>
 
-        <!-- ===== right column ===== -->
-        <rect class="major" x="706" y="96" width="224" height="104" rx="8"/>
-        <text class="tb" x="818" y="118">Scope routing · automatic</text>
-        <text class="to" x="818" y="136">detects domain &amp; file-type wording</text>
-        <text class="to" x="818" y="150">in the RAW question (before HyDE)</text>
-        <text class="to" x="818" y="164">then opens filtered dense + sparse</text>
-        <text class="to" x="818" y="178">lanes — guaranteed candidate seats</text>
 
-        <!-- stage number coins -->
-        <circle class="nc" cx="328" cy="104" r="9"/><text class="num" x="328" y="107.5">1</text>
-        <circle class="nc" cx="374" cy="252" r="9"/><text class="num" x="374" y="255.5">2</text>
-        <circle class="nc" cx="340" cy="384" r="9"/><text class="num" x="340" y="387.5">3</text>
-        <circle class="nc" cx="345" cy="482" r="9"/><text class="num" x="345" y="485.5">4</text>
-        <circle class="nc" cx="368" cy="568" r="9"/><text class="num" x="368" y="571.5">5</text>
+        <!-- stages, in reading order (this is also the Tab order) -->
+        <g class="stg" data-stage="q-question" tabindex="0" role="button" aria-pressed="false" aria-label="Your question">
+          <rect class="main bx" x="440" y="16" width="160" height="36" rx="8" style="stroke:var(--amber);stroke-width:1.6"/>
+          <text class="t" x="520" y="38">Your question</text>
+          <rect class="chip" x="432" y="44" width="64" height="17" rx="8.5"/><text class="tk" x="464" y="56">preset</text>
+        </g>
+        <g class="stg" data-stage="q-hyde" tabindex="0" role="button" aria-pressed="false" aria-label="HyDE">
+          <rect class="opt bx" x="20" y="56" width="240" height="92" rx="8"/>
+          <text class="t2" x="140" y="76">HyDE · optional</text>
+          <text class="to" x="140" y="94">writes a hypothetical answer so</text>
+          <text class="to" x="140" y="108">retrieval matches prose to prose</text>
+          <text class="to" x="140" y="122">cached on disk</text>
+          <text class="tk" x="140" y="138">skipped for code-intent questions</text>
+        </g>
+        <g class="stg" data-stage="q-dense" tabindex="0" role="button" aria-pressed="false" aria-label="Dense lane">
+          <rect class="core bx" x="384" y="118" width="126" height="78" rx="7"/>
+          <text class="t" x="447" y="140">Dense</text>
+          <text class="ts" x="447" y="156">semantic vectors</text>
+          <text class="ts" x="447" y="170">ChromaDB</text>
+          <rect class="chip" x="401" y="188" width="92" height="17" rx="8.5"/><text class="tk" x="447" y="200">dense_top_k</text>
+        </g>
+        <g class="stg" data-stage="q-sparse" tabindex="0" role="button" aria-pressed="false" aria-label="Sparse lane">
+          <rect class="core bx" x="530" y="118" width="126" height="78" rx="7"/>
+          <text class="t" x="593" y="140">Sparse</text>
+          <text class="ts" x="593" y="156">keyword · BM25</text>
+          <text class="ts" x="593" y="170">bm25s index</text>
+          <rect class="chip" x="545" y="188" width="96" height="17" rx="8.5"/><text class="tk" x="593" y="200">sparse_top_k</text>
+        </g>
+        <g class="stg" data-stage="q-hype" tabindex="0" role="button" aria-pressed="false" aria-label="HyPE lane">
+          <rect class="opt bx" x="20" y="216" width="240" height="58" rx="8"/>
+          <text class="t2" x="140" y="236">HyPE lane · optional</text>
+          <text class="to" x="140" y="252">question-to-question matching</text>
+          <text class="to" x="140" y="265">built ahead with build_hype.py</text>
+        </g>
+        <g class="stg" data-stage="q-code" tabindex="0" role="button" aria-pressed="false" aria-label="Code lane">
+          <rect class="optb bx" x="20" y="284" width="240" height="58" rx="8"/>
+          <text class="tb" x="140" y="304">Code lane · automatic</text>
+          <text class="to" x="140" y="320">scripts &amp; notebooks get seats</text>
+          <text class="to" x="140" y="333">opens on code-intent questions</text>
+        </g>
+        <g class="stg" data-stage="q-omni" tabindex="0" role="button" aria-pressed="false" aria-label="Live vault lane">
+          <rect class="opt bx" x="20" y="352" width="240" height="58" rx="8"/>
+          <text class="t2" x="140" y="372">Live vault lane · optional</text>
+          <text class="to" x="140" y="388">Omnisearch: notes edited since</text>
+          <text class="to" x="140" y="401">the last ingest · needs Obsidian</text>
+        </g>
+        <g class="stg" data-stage="q-scope" tabindex="0" role="button" aria-pressed="false" aria-label="Scope lanes">
+          <rect class="optb bx" x="780" y="96" width="230" height="104" rx="8"/>
+          <text class="tb" x="895" y="118">Scope lanes · optional</text>
+          <text class="to" x="895" y="136">detects domain &amp; file-type wording</text>
+          <text class="to" x="895" y="150">in the RAW question (before HyDE)</text>
+          <text class="to" x="895" y="164">then opens filtered dense + sparse</text>
+          <text class="to" x="895" y="178">lanes: guaranteed candidate seats</text>
+        </g>
+        <g class="stg" data-stage="q-fusion" tabindex="0" role="button" aria-pressed="false" aria-label="Fusion">
+          <polygon class="main bx" points="414,252 626,252 584,316 456,316" style="stroke-linejoin:round"/>
+          <text class="t" x="520" y="274">Fusion</text>
+          <text class="ts" x="520" y="291" style="fill:var(--amber)">ranked lists → one pool</text>
+          <text class="to" x="520" y="306">per-lane weights</text>
+        </g>
+        <g class="stg" data-stage="q-boost" tabindex="0" role="button" aria-pressed="false" aria-label="Metadata boost">
+          <rect class="main bx" x="430" y="316" width="180" height="34" rx="7"/>
+          <text x="520" y="330" style="fill:var(--ink);font:600 10.5px var(--body,sans-serif);text-anchor:middle">+ metadata boost</text>
+          <text class="to" x="520" y="343">course · domain · #tag nudge</text>
+        </g>
+        <g class="stg" data-stage="q-rerank" tabindex="0" role="button" aria-pressed="false" aria-label="Rerank">
+          <rect class="main bx" x="380" y="384" width="280" height="64" rx="8"/>
+          <text class="t" x="520" y="406">Rerank</text>
+          <text class="ts" x="520" y="422">reads (question, chunk) pairs together</text>
+          <text class="ts" x="520" y="436">cross_encoder · http · lexical · none</text>
+          <rect class="chip" x="470" y="440" width="100" height="17" rx="8.5"/><text class="tk" x="520" y="452">rerank_top_k</text>
+        </g>
+        <g class="stg" data-stage="q-laya" tabindex="0" role="button" aria-pressed="false" aria-label="Laya reranker">
+          <rect class="xp bx" x="780" y="404" width="230" height="70" rx="8"/>
+          <text class="t2" x="895" y="424">Laya reranker · experimental</text>
+          <text class="to" x="895" y="441">fine-tuned relevance scorer</text>
+          <text class="to" x="895" y="455">also a gate scorer option</text>
+        </g>
+        <g class="stg" data-stage="q-gate" tabindex="0" role="button" aria-pressed="false" aria-label="Relevance gate">
+          <rect class="opt bx" x="410" y="480" width="220" height="60" rx="8"/>
+          <text class="t2" x="520" y="500">Relevance gate · optional</text>
+          <text class="to" x="520" y="516">drops chunks below a score cutoff</text>
+          <text class="to" x="520" y="530">none left: abstain, no LLM call</text>
+        </g>
+        <g class="stg" data-stage="q-expand" tabindex="0" role="button" aria-pressed="false" aria-label="Parent / neighbour expansion">
+          <rect class="opt bx" x="390" y="568" width="260" height="62" rx="8"/>
+          <text class="t2" x="520" y="588">Parent / neighbour expansion · optional</text>
+          <text class="to" x="520" y="604">note chunk → its whole section</text>
+          <text class="to" x="520" y="618">PDF hit → adjacent pages</text>
+        </g>
+        <g class="stg" data-stage="q-gen" tabindex="0" role="button" aria-pressed="false" aria-label="Grounded generation">
+          <rect class="main bx" x="400" y="656" width="240" height="72" rx="8"/>
+          <text class="t" x="520" y="678">Grounded generation</text>
+          <text class="ts" x="520" y="694">answers only from retrieved chunks</text>
+          <text class="ts" x="520" y="708">inline [n] citations + confidence</text>
+          <rect class="chip" x="476" y="714" width="88" height="17" rx="8.5"/><text class="tk" x="520" y="726">max_tokens</text>
+        </g>
+        <g class="stg" data-stage="q-verify" tabindex="0" role="button" aria-pressed="false" aria-label="Citation check">
+          <rect class="opt bx" x="780" y="690" width="230" height="56" rx="8"/>
+          <text class="t2" x="895" y="710">Citation check · optional</text>
+          <text class="to" x="895" y="726">second LLM pass: is each [n]</text>
+          <text class="to" x="895" y="738">supported by its source?</text>
+        </g>
+        <g class="stg" data-stage="q-answer" tabindex="0" role="button" aria-pressed="false" aria-label="Cited answer">
+          <rect class="fin bx" x="440" y="764" width="160" height="38" rx="8"/>
+          <text x="520" y="788" style="fill:var(--btn-primary-ink);font:600 13px var(--body,sans-serif);text-anchor:middle">Cited answer</text>
+          <text class="to" x="520" y="822">confidence pill · sources · retrieval echo</text>
+        </g>
+        <g class="stg" data-stage="q-graph" tabindex="0" role="button" aria-pressed="false" aria-label="Graph RAG mode">
+          <rect class="xp bx" x="780" y="530" width="230" height="100" rx="8"/>
+          <text class="t2" x="895" y="552">Graph RAG · experimental</text>
+          <text class="to" x="895" y="570">separate mode, not on this path:</text>
+          <text class="to" x="895" y="584">walks hand-drawn canvas edges,</text>
+          <text class="to" x="895" y="598">then a human picks merge /</text>
+          <text class="to" x="895" y="612">graph-only / raw nodes</text>
+        </g>
 
         <!-- legend -->
-        <rect class="main" x="24" y="726" width="28" height="11" rx="3"/><text class="tol" x="60" y="735">always-on stage</text>
-        <rect class="opt" x="170" y="726" width="28" height="11" rx="3"/><text class="tol" x="206" y="735">optional · toggle / preset</text>
-        <rect class="major" x="370" y="726" width="28" height="11" rx="3"/><text class="tol" x="406" y="735">automatic router</text>
-        <path class="byp" d="M530 731 H558" style="marker-end:none"/><text class="tol" x="566" y="735">the original question</text>
+        <rect class="main" x="24" y="840" width="28" height="11" rx="3"/><text class="tol" x="60" y="849">always-on stage</text>
+        <rect class="opt" x="190" y="840" width="28" height="11" rx="3"/><text class="tol" x="226" y="849">optional · toggle / preset</text>
+        <rect class="optb" x="410" y="840" width="28" height="11" rx="3"/><text class="tol" x="446" y="849">optional · opens when the question triggers it</text>
+        <rect class="xp" x="740" y="840" width="28" height="11" rx="3"/><text class="tol" x="776" y="849">experimental</text>
+        <path class="byp" d="M890 846 H918" style="marker-end:none"/><text class="tol" x="926" y="849">original question</text>
       </svg>
     </div>
+    <aside class="dg-card" aria-live="polite" aria-label="Stage details"></aside>
+    </div><!-- /dg-stage -->
     <div class="diagram-cap">
-      <span style="color:var(--ink)">Solid = always-on; dashed = optional (toggle, preset, or automatic); blue = the automatic scope router; dotted = the untouched original question.</span>
-      Every retrieval lane — the two core lanes, scope-filtered lanes, <b>HyPE</b> / <b>Code</b> / <b>Live-vault</b> —
-      lands in the <i>same</i> RRF pool, so adding a lane can only add candidates, never hide any.
-      <b>HyDE</b> reshapes what retrieval <i>searches for</i>, but the cross-encoder scores — and the generator
-      answers — your <b>original question</b>. <b>dense_top_k</b> / <b>sparse_top_k</b> size the candidate pool,
-      <b>rerank_top_k</b> decides how many chunks reach the LLM, <b>max_tokens</b> caps the answer.
-      <br><span style="color:var(--ink-faint)">The whole ingest side has its own diagram — flip the toggle above.</span>
+      <span style="color:var(--ink)">Solid = always on; dashed = optional; blue dashed = optional and opened by the question itself; dotted red = experimental; dotted grey = the untouched original question.</span>
+      A <b>filled dot</b> on a stage means it is on in the live <code>config.yaml</code>, a <b>hollow dot</b> that it is off. Every retrieval lane lands in the <i>same</i> candidate pool, so adding a lane can only add candidates, never hide any.
+      <b>HyDE</b> reshapes what retrieval <i>searches for</i>, but the reranker, the gate and the generator all work from your <b>original question</b>.
+      The dot shows the config default; a preset or a per-call toggle can change a stage for one query, and the retrieval echo under each answer shows what really ran.
+      <br><span style="color:var(--ink-faint)">The ingest side has its own diagram — flip the toggle above.</span>
     </div>
     </div><!-- /dg-query -->
 
-    <div id="dg-ingest" style="display:none">
+    <div id="dg-ingest" class="dg-wrap" style="display:none">
+    <div class="dg-stage">
     <div class="diagram">
-      <svg viewBox="0 0 960 780" width="960" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Ingestion pipeline diagram">
+      <svg viewBox="0 0 1120 840" width="1120" xmlns="http://www.w3.org/2000/svg" role="group" aria-label="Ingestion pipeline diagram. Every stage is a button that shows its details.">
         <style>
           .t{fill:var(--ink);font:600 12.5px var(--body,sans-serif);text-anchor:middle}
           .t2{fill:var(--ink);font:600 11px var(--body,sans-serif);text-anchor:middle}
@@ -1459,14 +1545,12 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
           .tk{fill:var(--amber);font:600 9.5px var(--mono,monospace);text-anchor:middle}
           .tm{fill:var(--ink);font:600 12.5px var(--mono,monospace);text-anchor:middle}
           .tt{fill:var(--amber);font:600 10.5px var(--mono,monospace);text-anchor:middle;letter-spacing:.14em}
-          .num{fill:var(--amber);font:600 10px var(--mono,monospace);text-anchor:middle}
           .main{fill:var(--panel-2);stroke:var(--amber-dim);stroke-width:1.4}
           .core{fill:var(--panel-2);stroke:var(--amber);stroke-width:2}
           .opt{fill:var(--panel);stroke:var(--ink-faint);stroke-width:1.2;stroke-dasharray:5 4}
           .major{fill:var(--panel-2);stroke:var(--blue);stroke-width:1.5}
           .fin{fill:var(--amber);stroke:var(--amber);stroke-width:1.3}
           .chip{fill:var(--panel-2);stroke:var(--amber-dim);stroke-width:1}
-          .nc{fill:var(--panel-2);stroke:var(--amber-dim);stroke-width:1.2}
           .w{stroke:var(--ink-faint);stroke-width:1.7;fill:none;marker-end:url(#iah)}
           .wl{stroke:var(--ink-faint);stroke-width:1.7;fill:none}
           .ow{stroke:var(--ink-faint);stroke-width:1.3;fill:none;stroke-dasharray:5 4;marker-end:url(#iah)}
@@ -1478,164 +1562,200 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
         </defs>
 
         <!-- ===== wires first ===== -->
-        <!-- files -> loader split rail -->
-        <path class="wl" d="M480 50 V134"/>
-        <path class="wl" d="M231 134 H729"/>
-        <path class="w" d="M231 134 V164"/><path class="w" d="M397 134 V164"/>
-        <path class="w" d="M563 134 V164"/><path class="w" d="M729 134 V164"/>
+        <path class="wl" d="M560 50 V120"/>
+        <path class="wl" d="M310 120 H810"/>
+        <path class="w" d="M310 120 V164"/><path class="w" d="M435 120 V164"/>
+        <path class="w" d="M560 120 V164"/><path class="w" d="M685 120 V164"/>
+        <path class="w" d="M810 120 V164"/>
         <!-- loaders -> JSONL -->
-        <path class="wl" d="M231 297 V318"/><path class="wl" d="M397 297 V318"/>
-        <path class="wl" d="M563 297 V318"/><path class="wl" d="M729 297 V318"/>
-        <path class="wl" d="M231 318 H729"/>
-        <path class="w" d="M480 318 V338"/>
+        <path class="wl" d="M310 302 V338"/><path class="wl" d="M435 302 V338"/>
+        <path class="wl" d="M560 302 V338"/><path class="wl" d="M685 302 V338"/>
+        <path class="wl" d="M810 302 V338"/><path class="wl" d="M310 338 H810"/>
+        <path class="w" d="M560 338 V356"/>
         <!-- JSONL -> append -> derived split -> restart -->
-        <path class="w" d="M480 426 V446"/>
-        <path class="wl" d="M480 526 V534"/>
-        <path class="wl" d="M408 534 H552"/>
-        <path class="w" d="M408 534 V564"/><path class="w" d="M552 534 V564"/>
-        <path class="wl" d="M408 642 V668"/><path class="wl" d="M552 642 V668"/>
-        <path class="wl" d="M408 668 H552"/>
-        <path class="w" d="M480 668 V686"/>
-        <!-- discovery guards feed the split -->
-        <path class="ow" d="M706 80 C620 78, 560 70, 488 66"/>
-        <!-- OCR branch into the PDF loader -->
-        <path class="bw" d="M142 138 C146 190, 240 230, 318 226"/>
-        <!-- inbox auto-pipeline queues the same jobs -->
-        <path class="bw" d="M264 420 C296 432, 318 462, 336 486"/>
-        <!-- post-ingest ops act on the corpus -->
-        <path class="ow" d="M706 408 H668 V602 H624"/>
+        <path class="w" d="M560 444 V470"/>
+        <path class="wl" d="M560 554 V566"/><path class="wl" d="M482 566 H638"/>
+        <path class="w" d="M482 566 V598"/><path class="w" d="M638 566 V598"/>
+        <path class="wl" d="M482 680 V702"/><path class="wl" d="M638 680 V702"/>
+        <path class="wl" d="M482 702 H638"/><path class="w" d="M560 702 V726"/>
+        <!-- discovery guards feed the split; the inbox feeds the vault -->
+        <path class="ow" d="M884 82 C800 80, 680 68, 564 60"/>
+        <path class="bw" d="M226 60 C330 60, 410 40, 472 34"/>
+        <!-- OCR engines return text to the PDF loader -->
+        <path class="wl" d="M226 185 H239"/><path class="wl" d="M226 235 H239"/><path class="wl" d="M226 285 H239"/>
+        <path class="wl" d="M239 185 V285"/><path class="bw" d="M239 235 H249"/>
+        <!-- maintenance acts on the corpus; HyPE builds beside the indexes -->
+        <path class="ow" d="M884 420 H744"/>
+        <path class="ow" d="M884 610 H726"/>
 
-        <!-- ===== spine ===== -->
-        <rect class="main" x="396" y="14" width="168" height="36" rx="8" style="stroke:var(--amber);stroke-width:1.6"/>
-        <text class="t" x="480" y="36">Your vault files</text>
-        <text class="tol" x="572" y="32">vault = read-only;</text>
-        <text class="tol" x="572" y="45">inbox = the only write</text>
 
-        <!-- 1 · loaders, one per format -->
-        <rect x="148" y="154" width="664" height="154" rx="12" fill="var(--amber)" opacity="0.08"/>
-        <text class="tt" x="480" y="148">LOADERS · ONE PER FORMAT</text>
-        <rect class="core" x="156" y="168" width="150" height="118" rx="7"/>
-        <text class="t" x="231" y="190">Markdown</text>
-        <text class="to" x="231" y="208">.md notes · daily notes</text>
-        <text class="to" x="231" y="222">heading tree → context</text>
-        <text class="to" x="231" y="236">headers · E2 parents</text>
-        <rect class="chip" x="200" y="278" width="62" height="17" rx="8.5"/><text class="tk" x="231" y="290">chunking</text>
-        <rect class="core" x="322" y="168" width="150" height="118" rx="7"/>
-        <text class="t" x="397" y="190">PDF</text>
-        <text class="to" x="397" y="208">PyMuPDF text · figures</text>
-        <text class="to" x="397" y="222">born-digital or scanned</text>
-        <text class="to" x="397" y="236">scanned pages → OCR</text>
-        <rect class="chip" x="338" y="278" width="118" height="17" rx="8.5"/><text class="tk" x="397" y="290">--pages · chunking</text>
-        <rect class="core" x="488" y="168" width="150" height="118" rx="7"/>
-        <text class="t" x="563" y="190">Notebooks</text>
-        <text class="to" x="563" y="208">.ipynb .py .R .Rmd</text>
-        <text class="to" x="563" y="222">md + code cells</text>
-        <text class="to" x="563" y="236">outputs &amp; figures opt.</text>
-        <rect class="chip" x="515" y="278" width="96" height="17" rx="8.5"/><text class="tk" x="563" y="290">--save-figures</text>
-        <rect class="core" x="654" y="168" width="150" height="118" rx="7"/>
-        <text class="t" x="729" y="190">Code</text>
-        <text class="to" x="729" y="208">.js .ts .sql .go .rs …</text>
-        <text class="to" x="729" y="222">structure-aware split</text>
-        <text class="to" x="729" y="236">agent-root guards</text>
-        <rect class="chip" x="704" y="278" width="50" height="17" rx="8.5"/><text class="tk" x="729" y="290">--exts</text>
+        <text class="tt" x="372" y="148">LOADERS</text>
+        <rect x="244" y="154" width="632" height="160" rx="12" fill="var(--amber)" opacity="0.08"/>
 
-        <!-- 2 · the source of truth -->
-        <rect class="core" x="300" y="342" width="360" height="84" rx="9"/>
-        <text class="tm" x="480" y="366">data\*_chunks.jsonl</text>
-        <text class="ts" x="480" y="383" style="fill:var(--amber)">the source of truth — indexes derive from it</text>
-        <text class="to" x="480" y="398">doc_id = sha256(source_file :: text[:500])[:16]</text>
-        <text class="to" x="480" y="412">course · domain · #tags · pages · language · has_code</text>
 
-        <!-- 3 · append -->
-        <rect class="main" x="340" y="450" width="280" height="76" rx="8"/>
-        <text class="t" x="480" y="470">index --append · idempotent</text>
-        <text class="ts" x="480" y="486">embeds only NEW doc_ids (bge-small · CPU)</text>
-        <text class="ts" x="480" y="500">then auto-rebuilds the sparse index</text>
-        <text class="to" x="480" y="515">MemoryError? rebuild_bm25.py = low-RAM recovery</text>
 
-        <!-- 4 · derived indexes -->
-        <rect x="328" y="554" width="304" height="100" rx="12" fill="var(--amber)" opacity="0.08"/>
-        <text class="tt" x="480" y="548">DERIVED INDEXES · REBUILDABLE</text>
-        <rect class="main" x="342" y="568" width="132" height="74" rx="7"/>
-        <text class="t" x="408" y="590">ChromaDB</text>
-        <text class="ts" x="408" y="606">dense vectors</text>
-        <text class="ts" x="408" y="620">chroma_db on G:</text>
-        <rect class="main" x="486" y="568" width="132" height="74" rx="7"/>
-        <text class="t" x="552" y="590">bm25s</text>
-        <text class="ts" x="552" y="606">sparse keywords</text>
-        <text class="ts" x="552" y="620">bm25_index.pkl</text>
+        <text class="tt" x="560" y="578">DERIVED INDEXES</text>
+        <rect x="398" y="584" width="324" height="108" rx="12" fill="var(--amber)" opacity="0.08"/>
 
-        <!-- 5 · restart -->
-        <rect class="fin" x="386" y="690" width="188" height="38" rx="8"/>
-        <text x="480" y="714" style="fill:var(--btn-primary-ink);font:600 13px var(--body,sans-serif);text-anchor:middle">Restart the query API</text>
-        <text class="to" x="480" y="746">:8051 loads indexes once and stays warm</text>
 
-        <!-- ===== left column ===== -->
-        <rect class="major" x="30" y="26" width="224" height="112" rx="8"/>
-        <text class="tb" x="142" y="46">Scanned-page OCR · auto</text>
-        <text class="to" x="142" y="64">page has no text layer? → OCR</text>
-        <text class="to" x="142" y="78">tesseract · CPU, fast</text>
-        <text class="to" x="142" y="92">VLM DeepSeek-OCR :8100 · GPU</text>
-        <text class="to" x="142" y="106">auto | tesseract | paddle | vlm | none</text>
+        <text class="tt" x="121" y="152">SCANNED-PAGE OCR</text>
 
-        <rect class="major" x="30" y="340" width="234" height="136" rx="8"/>
-        <text class="tb" x="147" y="360">Inbox auto-pipeline</text>
-        <text class="tol" x="44" y="380">1  drop PDFs → vault inbox</text>
-        <text class="tol" x="44" y="396">2  dup-check vs the manifest</text>
-        <text class="tol" x="44" y="412">3  ingest → archive to _ingested</text>
-        <text class="tol" x="44" y="428">4  append + sparse rebuild</text>
-        <text class="tol" x="44" y="444">5  restart :8051 (reminder)</text>
-        <text class="to" x="147" y="464">serial · idempotent · fails loud</text>
 
-        <!-- ===== right column ===== -->
-        <rect class="opt" x="706" y="26" width="224" height="112" rx="8"/>
-        <text class="t2" x="818" y="46">Discovery guards</text>
-        <text class="to" x="818" y="64">skip-roots: agent trees stay out</text>
-        <text class="to" x="818" y="78">Books folders: only / skip</text>
-        <text class="to" x="818" y="92">include / exclude path substrings</text>
-        <text class="to" x="818" y="106">--pages subsets · dedup skip-list</text>
-
-        <rect class="opt" x="706" y="340" width="224" height="130" rx="8"/>
-        <text class="t2" x="818" y="360">After ingest · optional</text>
-        <circle cx="718" cy="376.5" r="2.5" fill="var(--amber)"/>
-        <text class="tol" x="726" y="380">HyPE · 1 LLM call per chunk</text>
-        <circle cx="718" cy="394.5" r="2.5" fill="var(--amber)"/>
-        <text class="tol" x="726" y="398">retag · metadata-only, fast</text>
-        <circle cx="718" cy="412.5" r="2.5" fill="var(--amber)"/>
-        <text class="tol" x="726" y="416">delete · paged + JSONL edit</text>
-        <circle cx="718" cy="430.5" r="2.5" fill="var(--amber)"/>
-        <text class="tol" x="726" y="434">recalibrate · course metadata</text>
-        <text class="to" x="818" y="456">run from the console tabs</text>
-
-        <!-- stage number coins -->
-        <circle class="nc" cx="148" cy="154" r="9"/><text class="num" x="148" y="157.5">1</text>
-        <circle class="nc" cx="300" cy="342" r="9"/><text class="num" x="300" y="345.5">2</text>
-        <circle class="nc" cx="340" cy="450" r="9"/><text class="num" x="340" y="453.5">3</text>
-        <circle class="nc" cx="328" cy="554" r="9"/><text class="num" x="328" y="557.5">4</text>
-        <circle class="nc" cx="386" cy="690" r="9"/><text class="num" x="386" y="693.5">5</text>
+        <!-- stages, in reading order (this is also the Tab order) -->
+        <g class="stg" data-stage="i-files" tabindex="0" role="button" aria-pressed="false" aria-label="Your vault files">
+          <rect class="main bx" x="476" y="14" width="168" height="36" rx="8" style="stroke:var(--amber);stroke-width:1.6"/>
+          <text class="t" x="560" y="36">Your vault files</text>
+          <text class="tol" x="652" y="28">ingestion only reads;</text>
+          <text class="tol" x="652" y="41">the inbox is written to</text>
+        </g>
+        <g class="stg" data-stage="i-inbox" tabindex="0" role="button" aria-pressed="false" aria-label="Inbox and web import">
+          <rect class="major bx" x="16" y="14" width="210" height="112" rx="8"/>
+          <text class="tb" x="121" y="34">Inbox &amp; web import</text>
+          <text class="to" x="121" y="52">drop files · fetch web pages</text>
+          <text class="to" x="121" y="66">convert office files → .md</text>
+          <text class="to" x="121" y="80">dup-check, then queue the lane</text>
+          <text class="to" x="121" y="94">archive after ingest</text>
+          <text class="to" x="121" y="114">serial · idempotent · fails loud</text>
+        </g>
+        <g class="stg" data-stage="i-guards" tabindex="0" role="button" aria-pressed="false" aria-label="Discovery guards">
+          <rect class="major bx" x="884" y="14" width="220" height="112" rx="8"/>
+          <text class="tb" x="994" y="34">Discovery guards</text>
+          <text class="to" x="994" y="54">skip dirs · agent roots stay out</text>
+          <text class="to" x="994" y="68">book folders: only / skip</text>
+          <text class="to" x="994" y="82">dedup skip-list · path filters</text>
+          <text class="to" x="994" y="96">--pages subsets · page caps</text>
+        </g>
+        <g class="stg" data-stage="i-pdf" tabindex="0" role="button" aria-pressed="false" aria-label="PDF loader">
+          <rect class="core bx" x="252" y="164" width="116" height="132" rx="7"/>
+          <text class="t" x="310" y="186">PDF</text>
+          <text class="to" x="310" y="204">pymupdf4llm text</text>
+          <text class="to" x="310" y="218">figures extracted</text>
+          <text class="to" x="310" y="232">scanned pages → OCR</text>
+          <rect class="chip" x="277" y="284" width="66" height="17" rx="8.5"/><text class="tk" x="310" y="296">--pages</text>
+        </g>
+        <g class="stg" data-stage="i-ocr-tess" tabindex="0" role="button" aria-pressed="false" aria-label="Tesseract">
+          <rect class="main bx" x="16" y="164" width="210" height="42" rx="7"/>
+          <text class="t2" x="121" y="183">Tesseract · CPU</text>
+          <text class="to" x="121" y="198">default (auto) when installed</text>
+        </g>
+        <g class="stg" data-stage="i-ocr-paddle" tabindex="0" role="button" aria-pressed="false" aria-label="PaddleOCR sidecar">
+          <rect class="opt bx" x="16" y="214" width="210" height="42" rx="7"/>
+          <text class="t2" x="121" y="233">PaddleOCR sidecar</text>
+          <text class="to" x="121" y="248">own process · ocr or vl pipeline</text>
+        </g>
+        <g class="stg" data-stage="i-ocr-vlm" tabindex="0" role="button" aria-pressed="false" aria-label="VLM OCR">
+          <rect class="opt bx" x="16" y="264" width="210" height="42" rx="7"/>
+          <text class="t2" x="121" y="283">VLM OCR · vision model</text>
+          <text class="to" x="121" y="298">page → markdown, tables, formulas</text>
+        </g>
+        <g class="stg" data-stage="i-md" tabindex="0" role="button" aria-pressed="false" aria-label="Markdown loader">
+          <rect class="core bx" x="377" y="164" width="116" height="132" rx="7"/>
+          <text class="t" x="435" y="186">Markdown</text>
+          <text class="to" x="435" y="204">.md · daily notes</text>
+          <text class="to" x="435" y="218">heading tree → ctx</text>
+          <text class="to" x="435" y="232">parent sections</text>
+          <rect class="chip" x="400" y="284" width="70" height="17" rx="8.5"/><text class="tk" x="435" y="296">chunking</text>
+        </g>
+        <g class="stg" data-stage="i-nb" tabindex="0" role="button" aria-pressed="false" aria-label="Notebook loader">
+          <rect class="core bx" x="502" y="164" width="116" height="132" rx="7"/>
+          <text class="t" x="560" y="186">Notebooks</text>
+          <text class="to" x="560" y="204">ipynb · py · R · Rmd</text>
+          <text class="to" x="560" y="218">md + code cells</text>
+          <text class="to" x="560" y="232">text outputs opt.</text>
+          <rect class="chip" x="509" y="284" width="102" height="17" rx="8.5"/><text class="tk" x="560" y="296">--save-figures</text>
+        </g>
+        <g class="stg" data-stage="i-code" tabindex="0" role="button" aria-pressed="false" aria-label="Code loader">
+          <rect class="core bx" x="627" y="164" width="116" height="132" rx="7"/>
+          <text class="t" x="685" y="186">Code</text>
+          <text class="to" x="685" y="204">js ts sql go rs …</text>
+          <text class="to" x="685" y="218">split at top level</text>
+          <text class="to" x="685" y="232">skips agent roots</text>
+          <rect class="chip" x="660" y="284" width="50" height="17" rx="8.5"/><text class="tk" x="685" y="296">--exts</text>
+        </g>
+        <g class="stg" data-stage="i-canvas" tabindex="0" role="button" aria-pressed="false" aria-label="Canvas loader">
+          <rect class="core bx" x="752" y="164" width="116" height="132" rx="7"/>
+          <text class="t" x="810" y="186">Canvas</text>
+          <text class="to" x="810" y="204">.canvas text nodes</text>
+          <text class="to" x="810" y="218">graph → each chunk</text>
+          <text class="to" x="810" y="232">edges as metadata</text>
+          <rect class="chip" x="763" y="284" width="94" height="17" rx="8.5"/><text class="tk" x="810" y="296">context_depth</text>
+        </g>
+        <g class="stg" data-stage="i-jsonl" tabindex="0" role="button" aria-pressed="false" aria-label="Chunk JSONL files">
+          <rect class="core bx" x="380" y="360" width="360" height="84" rx="9"/>
+          <text class="tm" x="560" y="384">data\*_chunks.jsonl</text>
+          <text class="ts" x="560" y="401" style="fill:var(--amber)">the source of truth — indexes derive from it</text>
+          <text class="to" x="560" y="416">doc_id = sha256(source_file :: text[:500])[:16]</text>
+          <text class="to" x="560" y="430">course · domain · #tags · pages · language · has_code</text>
+        </g>
+        <g class="stg" data-stage="i-ops" tabindex="0" role="button" aria-pressed="false" aria-label="Maintenance">
+          <rect class="opt bx" x="884" y="360" width="220" height="122" rx="8"/>
+          <text class="t2" x="994" y="380">Maintenance · optional</text>
+          <circle cx="900" cy="396.5" r="2.5" fill="var(--amber)"/><text class="tol" x="908" y="400">retag · metadata only</text>
+          <circle cx="900" cy="414.5" r="2.5" fill="var(--amber)"/><text class="tol" x="908" y="418">delete · paged + JSONL edit</text>
+          <circle cx="900" cy="432.5" r="2.5" fill="var(--amber)"/><text class="tol" x="908" y="436">recalibrate · course labels</text>
+          <circle cx="900" cy="450.5" r="2.5" fill="var(--amber)"/><text class="tol" x="908" y="454">dedup · repeated chunks</text>
+          <text class="to" x="994" y="473">run from the console tabs</text>
+        </g>
+        <g class="stg" data-stage="i-append" tabindex="0" role="button" aria-pressed="false" aria-label="index --append">
+          <rect class="main bx" x="410" y="474" width="300" height="80" rx="8"/>
+          <text class="t" x="560" y="494">index --append · idempotent</text>
+          <text class="ts" x="560" y="510">embeds only NEW doc_ids</text>
+          <text class="ts" x="560" y="524">embedder from the embedding registry</text>
+          <text class="to" x="560" y="540">fingerprint guard stamps the collection</text>
+        </g>
+        <g class="stg" data-stage="i-dense" tabindex="0" role="button" aria-pressed="false" aria-label="ChromaDB (dense)">
+          <rect class="main bx" x="412" y="598" width="140" height="82" rx="7"/>
+          <text class="t" x="482" y="620">ChromaDB</text>
+          <text class="ts" x="482" y="636">dense vectors</text>
+          <text class="to" x="482" y="650">fingerprint sidecar</text>
+          <text class="to" x="482" y="664">rebuildable</text>
+        </g>
+        <g class="stg" data-stage="i-sparse" tabindex="0" role="button" aria-pressed="false" aria-label="bm25s (sparse)">
+          <rect class="main bx" x="568" y="598" width="140" height="82" rx="7"/>
+          <text class="t" x="638" y="620">bm25s</text>
+          <text class="ts" x="638" y="636">sparse keywords</text>
+          <text class="to" x="638" y="650">union of every JSONL</text>
+          <text class="to" x="638" y="664">rebuildable</text>
+        </g>
+        <g class="stg" data-stage="i-hype" tabindex="0" role="button" aria-pressed="false" aria-label="HyPE questions">
+          <rect class="opt bx" x="884" y="560" width="220" height="100" rx="8"/>
+          <text class="t2" x="994" y="580">HyPE questions · optional</text>
+          <text class="to" x="994" y="598">build_hype.py asks the LLM what</text>
+          <text class="to" x="994" y="612">each chunk answers (1 call per</text>
+          <text class="to" x="994" y="626">chunk), embeds them as their own</text>
+          <text class="to" x="994" y="640">collection with its own fingerprint</text>
+        </g>
+        <g class="stg" data-stage="i-restart" tabindex="0" role="button" aria-pressed="false" aria-label="Restart the query API">
+          <rect class="fin bx" x="470" y="730" width="180" height="38" rx="8"/>
+          <text x="560" y="754" style="fill:var(--btn-primary-ink);font:600 13px var(--body,sans-serif);text-anchor:middle">Restart the query API</text>
+          <text class="to" x="560" y="788">loads indexes once and stays warm</text>
+        </g>
 
         <!-- legend -->
-        <rect class="main" x="24" y="756" width="28" height="11" rx="3"/><text class="tol" x="60" y="765">always-on stage</text>
-        <rect class="opt" x="170" y="756" width="28" height="11" rx="3"/><text class="tol" x="206" y="765">optional · flags / toggles</text>
-        <rect class="major" x="370" y="756" width="28" height="11" rx="3"/><text class="tol" x="406" y="765">automatic</text>
+        <rect class="main" x="24" y="810" width="28" height="11" rx="3"/><text class="tol" x="60" y="819">always-on stage</text>
+        <rect class="opt" x="190" y="810" width="28" height="11" rx="3"/><text class="tol" x="226" y="819">optional · setting / flag</text>
+        <rect class="major" x="400" y="810" width="28" height="11" rx="3"/><text class="tol" x="436" y="819">automatic</text>
       </svg>
     </div>
+    <aside class="dg-card" aria-live="polite" aria-label="Stage details"></aside>
+    </div><!-- /dg-stage -->
     <div class="diagram-cap">
-      <span style="color:var(--ink)">Solid = always-on; dashed = optional flags; blue = automatic.</span>
-      Four loaders, <i>one JSONL contract</i>: whatever the format, every chunk lands in <b>data\*_chunks.jsonl</b>
-      with the same doc_id rule and metadata — that is the corpus. The indexes are <b>derived</b>: lose either and it
-      rebuilds from the JSONLs. <b>index --append</b> embeds only new doc_ids, so re-running anything is safe;
-      <b>text</b> edits mint new doc_ids (swap playbook), <b>metadata</b> edits go through retag with no re-embed.
-      The <b>chunking</b> picker (heading | fixed) only changes how oversized sections split — small sections are
-      identical either way. The query API keeps indexes warm — <b>restart :8051 after any index change</b>.
+      <span style="color:var(--ink)">Solid = always on; dashed = optional; blue = automatic.</span>
+      A <b>filled dot</b> on a stage means it is on (or selected) in the live <code>config.yaml</code>, a <b>hollow dot</b> that it is off.
+      The loaders differ per format, but they share <i>one JSONL contract</i>: every chunk lands in <b>data\*_chunks.jsonl</b> with the same doc_id rule and metadata, and that is the corpus. The indexes are <b>derived</b>: lose either and it rebuilds from the JSONL files.
+      <b>index --append</b> embeds only new doc_ids, so re-running anything is safe; a <b>text</b> edit mints new doc_ids, a <b>metadata</b> edit goes through retag with no re-embed.
+      The chunking picker only changes how oversized sections split; sections that fit are identical either way.
+      The query service keeps its indexes warm — <b>restart it after any index change</b>.
     </div>
     </div><!-- /dg-ingest -->
+
+    <script type="application/json" id="dg-stages">{"q-question":{"n":"Your question","k":"core","w":"The question as typed. Every later stage that judges relevance (rerank, gate, generation) judges this original text; HyDE only changes what retrieval searches for. A named preset bundles per-call overrides (pool sizes, HyDE, the code lane, expansion), and the code preset is applied automatically when the wording trips a code-intent signal.","keys":["retrieval.presets","retrieval.hyde_skip_signals"],"on":{"always":1},"p":"Query tab: preset · API: preset, auto_preset"},"q-hyde":{"n":"HyDE","k":"optional","w":"Asks the LLM to write a hypothetical answer and searches with the question plus that draft, so prose is matched against prose. The expanded text feeds every lane; scope detection, reranking and the answer still use the raw question. Drafts are cached on disk per question, prompt, model and temperature, so a repeated search is identical and skips the LLM call. Skipped for code-intent questions, and if the LLM is down retrieval falls back to the raw question.","keys":["retrieval.use_hyde","retrieval.hyde_cache.enabled","retrieval.hyde_cache.path","retrieval.hyde_skip_signals"],"on":{"flag":"retrieval.use_hyde"},"d":"on","p":"Query tab: HyDE · API: hyde"},"q-dense":{"n":"Dense lane","k":"core","w":"Embeds the search text and finds the nearest chunks in the ChromaDB collection. The embedder comes from the embedding registry (a local model, or any OpenAI-compatible embeddings endpoint). A fingerprint recorded next to the store says which embedder built it, and the query service refuses to start on a mismatch instead of ranking nonsense.","keys":["retrieval.dense_top_k","embedding.provider","embedding.local_model","paths.collection_name"],"on":{"always":1},"p":"Query tab: Dense top · API: dense_top_k"},"q-sparse":{"n":"Sparse lane","k":"core","w":"Keyword search over the bm25s index: exact terms, identifiers, names and error strings that vectors blur. It is built from the same JSONL chunks as the dense index and loaded when the query service starts, so a rebuilt index needs a service restart to be seen.","keys":["retrieval.sparse_top_k"],"on":{"always":1},"p":"Query tab: Sparse top · API: sparse_top_k"},"q-hype":{"n":"HyPE lane","k":"optional","w":"The index-side twin of HyDE: the question is matched against hypothetical questions that were generated for each chunk ahead of time (one LLM call per chunk), and hits map back to their chunks. It needs the question collection built first; if it is missing the lane is skipped. That collection has its own embedding fingerprint.","keys":["retrieval.hype.enabled","retrieval.hype.collection","retrieval.hype.top_k"],"on":{"flag":"retrieval.hype.enabled"},"d":"off","p":"Query tab: HyPE · API: hype"},"q-code":{"n":"Code lane","k":"auto","w":"Two extra filtered passes (dense and sparse) restricted to the code file types, so scripts and notebooks get guaranteed seats instead of being crowded out by lecture text that merely mentions the same words. It opens when the code preset applies: chosen explicitly, or applied automatically when the question trips a code-intent signal.","keys":["retrieval.code_file_types","retrieval.hyde_skip_signals","retrieval.presets"],"on":{"auto":"opens by itself on code-intent questions"},"p":"Query tab: preset code"},"q-omni":{"n":"Live vault lane","k":"optional","w":"Adds hits from the Obsidian Omnisearch HTTP server, for notes edited since the last ingest. It needs Obsidian open with that server running; otherwise the lane returns nothing, with no error.","keys":["retrieval.omnisearch.enabled","retrieval.omnisearch.base_url","retrieval.omnisearch.top_k"],"on":{"flag":"retrieval.omnisearch.enabled"},"d":"off","p":"Query tab: Omnisearch · API: omnisearch"},"q-scope":{"n":"Scope lanes","k":"optional","w":"Detects a domain or content type named in the raw question (a subject, homework, lectures, the books) and opens filtered dense and sparse lanes so matching chunks get guaranteed seats. It is soft routing: fusion and the reranker still decide, so a wrong guess cannot empty the results. Off by default for the same measured reason as the metadata boost. With the flag off the scope is still detected and echoed, but the lanes are neither run nor fused.","keys":["retrieval.scope_lanes","retrieval.domain_signals","retrieval.content_signals"],"on":{"flag":"retrieval.scope_lanes"},"d":"off","p":"API: scope_lanes"},"q-fusion":{"n":"Fusion","k":"core","w":"Merges the ranked lists from every lane that ran into one candidate pool, working from rank rather than raw score so lanes on different scales combine. A chunk found by several lanes rises. Each lane has a weight (all equal by default); a weight of 0 stops a lane influencing the order, but its candidates still reach the reranker. Adding a lane can only add candidates, never hide any.","keys":["retrieval.lane_weights","retrieval.rrf_k"],"on":{"always":1},"p":"API: lane_weights, lanes"},"q-boost":{"n":"Metadata boost","k":"optional","w":"Nudges up candidates whose course, domain or tag is named in the question. It acts on the fused pool before reranking. Off by default: on the dev eval it changed nothing once the reranker ran, and lowered nDCG@10 without it. The separate nudge for code chunks on code-intent questions does not depend on this flag.","keys":["retrieval.metadata_boost"],"on":{"flag":"retrieval.metadata_boost"},"d":"off","p":"API: metadata_boost"},"q-rerank":{"n":"Rerank","k":"core","w":"Reorders the fused pool by reading each (question, chunk) pair together, then keeps the top few. Modes: cross_encoder (in-process model), http (an external rerank service), lexical (model-free term coverage), none (keep the fusion order) and laya (experimental, below). An optional plain-language ranking instruction reframes what the cross-encoder or http reranker scores against. It always scores the original question, never the HyDE text.","keys":["retrieval.rerank_mode","retrieval.rerank_top_k","retrieval.cross_encoder_model","retrieval.cross_encoder_device","retrieval.rerank_instruction","retrieval.rerank_http.base_url"],"on":{"mode":"retrieval.rerank_mode"},"p":"Query tab: Reranker, Rerank top · API: rerank, rerank_instruction, top_k"},"q-laya":{"n":"Laya reranker","k":"exp","w":"A fine-tuned relevance model (trained off-machine on your own notes) that gives each passage a probability of answering the question. Pick it per call, or set it as the default rerank mode. It has never been scored on the eval sets, so it is off by default. While the flag is off, asking for it is refused with a readable error and is never answered by another reranker; nothing is loaded at startup.","keys":["retrieval.laya.enabled","retrieval.laya.model_dir","retrieval.laya.device","retrieval.rerank_mode"],"p":"API: rerank=laya","exp":"laya_rerank"},"q-gate":{"n":"Relevance gate","k":"optional","w":"After the rerank, drops chunks whose score is below a threshold, judged against the original question. If nothing survives, the answer is the fixed LOW-confidence \"nothing relevant\" reply and the LLM is not called. Scorers: rerank_score (the active reranker's own score, in that reranker's units, so a threshold fits one reranker only) or laya (the experimental scorer). Turning it on without a threshold is a startup error.","keys":["retrieval.relevance_gate.enabled","retrieval.relevance_gate.scorer","retrieval.relevance_gate.threshold"],"on":{"flag":"retrieval.relevance_gate.enabled"},"d":"off","p":"API: gate, gate_threshold, gate_scorer"},"q-expand":{"n":"Parent / neighbour expansion","k":"optional","w":"Small-to-big, applied after the rerank and the gate. Parent: a matched note chunk is swapped for its whole enclosing section (parents live in a sidecar file that is never embedded). Neighbour: for PDF hits, the adjacent pages of the same source are appended as marked supplementary sources, capped per document and in total. Citation labels do not change. The synthesis preset turns both on for a call.","keys":["retrieval.parent_context","retrieval.neighbor_context","retrieval.parents_file","retrieval.neighbor_max_per_doc","retrieval.neighbor_max_total"],"on":{"any":["retrieval.parent_context","retrieval.neighbor_context"]},"d":"off","p":"Query tab: Parent sections, Page neighbors · API: parent_context, neighbor_context"},"q-gen":{"n":"Grounded generation","k":"core","w":"The LLM answers from the retrieved sources only. They are numbered, the answer carries inline [n] citations, and it ends with a CONFIDENCE line (HIGH, MEDIUM or LOW). Provider and model come from the provider registry (OpenAI-compatible or Anthropic-compatible endpoints). If the endpoint is down, the failure is reported readably.","keys":["generation.provider","generation.model","generation.max_tokens","generation.temperature"],"on":{"always":1},"p":"Query tab: Answer tokens · API: max_tokens"},"q-verify":{"n":"Citation check","k":"optional","w":"An optional second LLM pass that checks each [n] citation in the answer against the source it points at, and reports which are supported.","keys":["generation.verify_citations"],"on":{"flag":"generation.verify_citations"},"d":"off"},"q-answer":{"n":"Cited answer","k":"core","w":"The answer text with its citations resolved to sources, a confidence pill, the source list and a retrieval echo: the preset, lanes, pool sizes, rerank mode, gate outcome and per-stage timings that actually ran. Read the echo to check what a toggle really did.","keys":[],"on":{"always":1}},"q-graph":{"n":"Graph RAG mode","k":"exp","w":"A separate query mode that is not part of the ordinary ask or search path: it seeds from a search over the canvas lane, walks the edges you drew between canvas nodes, then stops and asks a human what the retrieved nodes are for: merge them into the previous result, answer from the graph alone, or take the raw nodes with no LLM. Off by default because its retrieval benefit has never been measured.","keys":["graph.enabled","graph.file_type","graph.max_depth","graph.max_per_hop","graph.max_total","graph.seed_top_k"],"p":"API: POST /graph/expand","exp":"graph_rag"},"i-files":{"n":"Your vault files","k":"core","w":"Ingestion only reads the vault. The console writes into the inbox folder (uploads, fetched pages, converted files); if you pick a destination folder, a file is moved there before it is ingested, so the path stored in its chunks is its final one.","keys":["parser.vault_path","webui.inbox_dir"],"on":{"always":1}},"i-inbox":{"n":"Inbox & web import","k":"auto","w":"Files dropped in the inbox, web pages fetched to markdown or PDF, and office files converted to markdown all land here. The console then queues the matching loader per kind, skips files that look already indexed unless you force it, and archives ingested files. Jobs run one at a time and fail loudly.","keys":["webui.inbox_dir"],"on":{"auto":"used whenever you ingest from the console"}},"i-guards":{"n":"Discovery guards","k":"auto","w":"Decide which files a loader looks at: folders to skip (.obsidian, .trash, .git ...), agent project roots left out of the code lane, book-folder-only mode for PDFs, a dedup skip-list, and per-run include and exclude path filters, page subsets and page caps.","keys":["parser.skip_dirs","pdf.only_book_folders","pdf.skip_folders","pdf.skip_list_file","pdf.max_pages_per_pdf","code.skip_roots"],"on":{"auto":"always applied during discovery"}},"i-pdf":{"n":"PDF loader","k":"core","w":"Extracts text and figures from each PDF. A page with fewer characters than the scanned-page threshold counts as scanned and is sent to the selected OCR engine; born-digital pages never touch OCR. Chunks use the same chunking strategies as markdown. The console can first report which pages of a book need OCR.","keys":["pdf.output_file","pdf.max_chunk_size","pdf.skip_scanned_threshold","pdf.extract_images","pdf.ocr_enabled","pdf.ocr_engine"],"on":{"always":1},"p":"CLI: --pages, --ocr-engine"},"i-ocr-tess":{"n":"Tesseract","k":"optional","w":"Classic OCR in this process, on CPU. It is what the default auto setting uses when the language data is installed. Quick to start, and the weakest on multi-column scans, tables and formulas.","keys":["pdf.ocr_engine","pdf.ocr_language","pdf.ocr_enabled"],"on":{"pick":{"key":"pdf.ocr_engine","hit":["auto","tesseract"],"on":"SELECTED","off":"NOT SELECTED","req":"pdf.ocr_enabled"}},"p":"CLI: --ocr-engine tesseract"},"i-ocr-paddle":{"n":"PaddleOCR sidecar","k":"optional","w":"Real text detection plus recognition, better than Tesseract on skewed, multi-column and non-Latin scans. It runs in its own container or process (a CPU or GPU build behind the same address), so its dependencies never enter this environment and you can stop it to free RAM. Two pipelines: ocr (plain text lines, the default) and vl (markdown with LaTeX formulas and real tables, much slower).","keys":["pdf.ocr_enabled","pdf.ocr_engine","pdf.paddle_ocr.base_url","pdf.paddle_ocr.pipeline","pdf.paddle_ocr.dpi"],"on":{"pick":{"key":"pdf.ocr_engine","hit":["paddle"],"on":"SELECTED","off":"NOT SELECTED","req":"pdf.ocr_enabled"}},"p":"CLI: --ocr-engine paddle"},"i-ocr-vlm":{"n":"VLM OCR","k":"optional","w":"Renders each scanned page and asks a vision-language document model for markdown (headings, tables, formulas) over any OpenAI-compatible endpoint, such as llama.cpp or a hosted vision model. Named presets bundle each model's prompt and resolution. If the endpoint is unreachable the page stays sparse; the ingest is not lost.","keys":["pdf.ocr_enabled","pdf.ocr_engine","pdf.vlm_ocr.preset","pdf.vlm_ocr.base_url","pdf.vlm_ocr.dpi"],"on":{"pick":{"key":"pdf.ocr_engine","hit":["vlm"],"on":"SELECTED","off":"NOT SELECTED","req":"pdf.ocr_enabled"}},"p":"CLI: --ocr-engine vlm"},"i-md":{"n":"Markdown loader","k":"core","w":"Parses notes by their heading tree; every chunk carries a context header with its heading path. Sections too large for one chunk are split by the chunking strategy (heading, fixed, document or none); sections that fit are identical under every strategy. Course, domain and tags come from the folder taxonomy. Parent sections are written to a sidecar that is never embedded, for small-to-big expansion at query time.","keys":["parser.chunking","parser.max_chunk_size","parser.min_chunk_size","parser.overlap_size","paths.chunks_file"],"on":{"always":1},"p":"CLI and Ingest tab: --chunking"},"i-nb":{"n":"Notebook loader","k":"core","w":"Reads .ipynb, .py, .R and .Rmd natively: markdown cells verbatim, code fenced with its language, text outputs optionally appended up to a cap, and optional extraction of figure outputs. Python is split along cell markers and the syntax tree.","keys":["notebooks.output_file","notebooks.extensions","notebooks.include_outputs","notebooks.save_figures"],"on":{"always":1},"p":"CLI: --save-figures"},"i-code":{"n":"Code loader","k":"core","w":"Every language the notebook loader does not cover (js, ts, sql, go, rs, sh, and more; the extension list is configurable). A file that fits is one fenced chunk; a larger file is split at top-level declarations. Agent project roots are skipped by default. Chunks carry the code file type with the language in metadata, which is what the code lane filters on.","keys":["code.output_file","code.extensions","code.skip_roots","code.max_file_bytes"],"on":{"always":1},"p":"CLI: --exts"},"i-canvas":{"n":"Canvas loader","k":"core","w":"Reads Obsidian .canvas files. Only text nodes become chunks, and the graph is flattened into each chunk at ingest time: a Connections footer plus edge metadata (neighbours, labelled edges, file references, degree). Ordinary retrieval therefore sees the graph with no graph code. Long node bodies can optionally be split and neighbour text inlined. Ingestion is not gated by the Graph RAG flag.","keys":["canvas.output_file","canvas.chunking","canvas.max_chunk_size","canvas.context_depth","canvas.context_chars"],"on":{"always":1}},"i-jsonl":{"n":"Chunk JSONL files","k":"core","w":"One *_chunks.jsonl per lane, all with the same record: doc_id, text and metadata. The doc_id is a hash of the source file and the start of the text, so it is stable and a wider re-ingest only adds chunks. These files are the source of truth: both indexes are derived from them, and they cannot be regenerated by simply re-running an ingest.","keys":["paths.chunks_file"],"on":{"always":1}},"i-ops":{"n":"Maintenance","k":"optional","w":"Operations on a corpus that already exists, run from the console tabs. Retag changes metadata only and needs no re-embed. Delete removes documents in pages and edits the JSONL. Recalibrate re-runs course detection. Dedup drops repeated chunks. A text edit mints new doc_ids; a metadata edit does not.","keys":[],"on":{"auto":"run on demand from the console"}},"i-append":{"n":"index --append","k":"core","w":"Embeds only chunks whose doc_id is new and upserts them into Chroma, so re-running anything is safe, then rebuilds the sparse index. The embedder is resolved from the embedding registry (local model or an OpenAI-compatible endpoint, with optional query and document prefixes). Every collection gets a fingerprint sidecar, and the query service checks it at startup. stamp verifies and records one for an older store by re-embedding a sample. A plain index (without --append) rebuilds from chunks.jsonl alone and drops every appended lane.","keys":["embedding.provider","embedding.local_model","embedding.query_prefix","embedding.doc_prefix","embedding.batch_size","embedding.verify.sample_size","embedding.verify.min_cosine"],"on":{"always":1}},"i-dense":{"n":"ChromaDB (dense)","k":"core","w":"The vector store the dense lane searches. It is derived: lose it and it rebuilds from the JSONL files (a full re-embed). Its fingerprint sidecar records which embedder built it.","keys":["paths.chroma_dir","paths.collection_name"],"on":{"always":1}},"i-sparse":{"n":"bm25s (sparse)","k":"core","w":"The keyword index the sparse lane searches. BM25 cannot add incrementally, so it is rebuilt from the union of every JSONL after an append; rebuild_bm25.py is the low-memory recovery path. Cheap and derived.","keys":["paths.bm25_index"],"on":{"always":1}},"i-hype":{"n":"HyPE questions","k":"optional","w":"build_hype.py asks the LLM what questions each chunk answers (one call per chunk, so scope it by path or file type) and embeds those questions as a collection of their own, with their own fingerprint. It feeds the HyPE query lane.","keys":["retrieval.hype.enabled","retrieval.hype.collection"],"on":{"flag":"retrieval.hype.enabled","on":"LANE ON","off":"LANE OFF"},"d":"off"},"i-restart":{"n":"Restart the query API","k":"optional","w":"The query service loads both indexes once and stays warm, so it must be restarted after any index change (the console has a button). With auto restart on, the console does it after each index-changing job.","keys":["webui.auto_restart_rag"],"on":{"flag":"webui.auto_restart_rag","on":"AUTO","off":"MANUAL"},"d":"off"}}</script>
   </div>
 
   <div class="panel">
     <div class="info-section-head">
       <div><span class="ic-type">Console guide</span><h2>Workspace map</h2></div>
-      <p class="hint">Seven focused surfaces, each with one clear job.</p>
+      <p class="hint">Each surface has one clear job.</p>
     </div>
     <div class="infocards">
       <div class="infocard"><div class="ic-top"><span class="ic-icon"><svg viewBox="0 0 24 24"><path d="M4 19V9m5 10V5m5 14v-7m5 7V3"/></svg></span><div><span class="ic-type">Observe</span><h3>Ledger</h3></div></div><p>See corpus and index health without changing anything.</p><div class="ic-features"><span>Index health</span><span>Domain mix</span><span>Recent jobs</span></div></div>
@@ -1655,25 +1775,17 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
       <thead><tr><th>Knob</th><th>What it controls</th><th>Enable / raise ⟶ vs ⟵ disable / lower</th></tr></thead>
       <tbody>
         <tr><td>preset</td><td>A named bundle of the knobs below. <code>code</code> = wide + no HyDE + code-boosted; <code>concept</code> = tight + HyDE; <code>synthesis</code> = wide + HyDE + parent/neighbor context.</td><td>Pick <code>code</code> for “my implementation of X”, <code>concept</code> for a definition, <code>synthesis</code> to connect topics. Blank = auto (code-intent queries self-apply <code>code</code>).</td></tr>
-        <tr><td>rerank_k</td><td><code>rerank_top_k</code> — how many reranked chunks reach the LLM.</td><td>Raise (10–15) for richer, multi-source answers; lower (3–5) for a tight, focused answer. Default 7.</td></tr>
-        <tr><td>dense_k</td><td><code>dense_top_k</code> — vector/semantic candidate pool into fusion.</td><td>Raise for paraphrase/conceptual questions (wider semantic net); the reranker still trims. Default 20.</td></tr>
-        <tr><td>sparse_k</td><td><code>sparse_top_k</code> — BM25 keyword candidate pool into fusion.</td><td>Raise for exact terms, code identifiers, names, error strings. Default 20.</td></tr>
-        <tr><td>max tokens</td><td>Caps the answer’s output length (Ask only).</td><td>Small (200–400) for a quick fact; large (1500+) for a full synthesis. Default 2500.</td></tr>
+        <tr><td>rerank_k</td><td><code>rerank_top_k</code> — how many reranked chunks reach the LLM.</td><td>Raise for richer, multi-source answers; lower for a tight, focused answer. Config default: <b data-cfg="retrieval.rerank_top_k">…</b>.</td></tr>
+        <tr><td>dense_k</td><td><code>dense_top_k</code> — vector/semantic candidate pool into fusion.</td><td>Raise for paraphrase/conceptual questions (wider semantic net); the reranker still trims. Config default: <b data-cfg="retrieval.dense_top_k">…</b>.</td></tr>
+        <tr><td>sparse_k</td><td><code>sparse_top_k</code> — BM25 keyword candidate pool into fusion.</td><td>Raise for exact terms, code identifiers, names, error strings. Config default: <b data-cfg="retrieval.sparse_top_k">…</b>.</td></tr>
+        <tr><td>max tokens</td><td>Caps the answer’s output length (Ask only).</td><td>Small for a quick fact; large for a full synthesis. Config default: <b data-cfg="generation.max_tokens">…</b>.</td></tr>
         <tr><td>HyDE</td><td>Searches with a hypothetical <i>answer</i> instead of the raw question — helps conceptual recall.</td><td>ON for concepts/paraphrase. <b>OFF for code / exact-term / “my script”</b> queries (the prose hypothetical drags in lecture notes). The <code>code</code> preset turns it off for you.</td></tr>
-        <tr><td>HyPE</td><td>Adds a lane matching your query against pre-generated hypothetical <i>questions</i> per chunk.</td><td>ON when your wording differs from how the material is written. Safe to try — fails soft if a chunk wasn’t HyPE-indexed. Default off.</td></tr>
+        <tr><td>HyPE</td><td>Adds a lane matching your query against pre-generated hypothetical <i>questions</i> per chunk.</td><td>ON when your wording differs from how the material is written. Safe to try — fails soft if the HyPE collection hasn’t been built. Config default: <b data-cfg="retrieval.hype.enabled">…</b>.</td></tr>
         <tr><td>Omnisearch</td><td>Fuses live-vault hits from Obsidian (notes not yet ingested).</td><td>ON for “this week / today / just wrote”. Needs Obsidian open with the Omnisearch HTTP server; else zero live hits, no error.</td></tr>
-        <tr><td>rerank</td><td>How the fused candidates are reordered before the top-k cut. <code>cross_encoder</code> = in-process semantic scoring; <code>http</code> = the configured external <code>/v1/rerank</code> service; <code>lexical</code> = model-free query-term coverage; <code>none</code> = keep raw RRF order.</td><td>Use <code>http</code> when a reranker runs on better host hardware, <code>lexical</code> for exact identifiers or zero model load, and <code>none</code> to inspect fusion itself. <code>default</code> follows <code>retrieval.rerank_mode</code>.</td></tr>
+        <tr><td>rerank</td><td>How the fused candidates are reordered before the top-k cut. <code>cross_encoder</code> = in-process semantic scoring; <code>http</code> = the configured external <code>/v1/rerank</code> service; <code>lexical</code> = model-free query-term coverage; <code>none</code> = keep the fusion order; <code>laya</code> = the experimental fine-tuned scorer, refused unless its flag is on.</td><td>Use <code>http</code> when a reranker runs on better host hardware, <code>lexical</code> for exact identifiers or zero model load, and <code>none</code> to inspect fusion itself. <code>default</code> follows <code>retrieval.rerank_mode</code>.</td></tr>
         <tr><td>parents / neighbors</td><td>E2 small-to-big, post-rerank: <b>parents</b> swaps a matched note chunk for its FULL enclosing section; <b>neighbors</b> appends a PDF hit’s adjacent pages as marked supplementary sources.</td><td>ON when citations are on-topic but fragmentary (the <code>synthesis</code> preset carries both). OFF to keep sources tight. <code>default</code> = preset/config value.</td></tr>
       </tbody>
     </table>
-  </div>
-
-  <div class="panel">
-    <h2>The fusion math (RRF)</h2>
-    <p class="hint">Each lane returns its own ranked list. A document at rank <i>r</i> in a lane contributes \( 1/(k+r) \); a doc’s fused score is the sum across every lane it appears in. Then the cross-encoder reranks the top of that pool.</p>
-    <div class="formula">$$ \text{score}(d) \;=\; \sum_{\ell \,\in\, \text{lanes}} \frac{1}{k + r_\ell(d)}, \qquad k = 60 $$</div>
-    <p class="hint"><b>Why \(k=60\)?</b> It’s the smoothing constant from the original RRF paper (Cormack et al., 2009) and the de-facto default. With \(k=60\), rank 0 ⟶ \(1/60\!\approx\!0.0167\) and rank 1 ⟶ \(1/61\!\approx\!0.0164\): the first ~dozen ranks contribute almost equally, so no single lane’s exact ordering dominates. A <i>small</i> k sharpens (the #1 hit in each lane wins); a <i>large</i> k flattens (rank barely matters). 60 is the tested middle ground — kept as-is.</p>
-    <p class="hint"><b>Why no per-lane weights?</b> Weighted RRF (\( \sum w_\ell/(k+r_\ell) \)) is a legitimate but marginal tweak <i>here</i>: a cross-encoder reranker sits downstream and re-scores the fused pool, so as long as the right chunks are <i>in</i> the pool (governed by <code>dense_top_k</code> / <code>sparse_top_k</code>), the reranker decides the final order. Weights would mostly re-add a tuning burden for gains within noise — so the honest levers are the per-lane pool sizes + <code>rerank_top_k</code> above, not fusion weights.</p>
   </div>
 </section>
 </div>
@@ -1840,17 +1952,8 @@ $("#nav").addEventListener("click",e=>{const b=e.target.closest("button");if(!b)
   if(b.dataset.tab==="eval")evOpen();
   if(b.dataset.tab==="jobs"){loadJobs();state.timers.tab=setInterval(loadJobs,2000)}
   if(b.dataset.tab==="vault"&&!state.vaultLoaded){state.vaultLoaded=true;loadVaultRoot()}
-  if(b.dataset.tab==="info")renderInfoMath();
+  if(b.dataset.tab==="info")dgLoad();
 });
-/* Render the Info tab's LaTeX once KaTeX is available (deferred CDN load). */
-function renderInfoMath(){
-  if(state.infoRendered)return;
-  if(!window.renderMathInElement){setTimeout(renderInfoMath,300);return;}
-  try{renderMathInElement($("#tab-info"),{delimiters:[
-    {left:"$$",right:"$$",display:true},{left:"\\[",right:"\\]",display:true},
-    {left:"\\(",right:"\\)",display:false}],throwOnError:false});
-    state.infoRendered=true;}catch(e){}
-}
 
 /* ---------- ledger ---------- */
 async function loadOverview(){
@@ -3637,7 +3740,8 @@ async function loadSettings(){
       const ctrl=f.kind==="enum"
         ?`<select id="${id}" data-key="${esc(key)}">${f.values.map(v=>`<option${v===String(f.value)?" selected":""}>${esc(v)}</option>`).join("")}</select>`
         :`<div class="row" style="flex-wrap:nowrap;gap:6px"><input id="${id}" data-key="${esc(key)}"${listAttr} value="${esc(String(f.value??""))}" style="flex:1" spellcheck="false">${browse}</div>${dl}`;
-      return `<div><label class="f">${esc(f.label)} <span class="mono" style="font-size:11px;color:var(--ink-faint)">${esc(key)}</span></label>${ctrl}${badge}</div>`;
+      const desc=f.desc?`<div class="hint" style="margin:2px 0 0">${esc(f.desc)}</div>`:"";
+      return `<div><label class="f">${esc(f.label)} <span class="mono" style="font-size:11px;color:var(--ink-faint)">${esc(key)}</span></label>${ctrl}${desc}${badge}</div>`;
     }).join("");
     renderProviders(s);
     renderRerankers(s);
@@ -4148,6 +4252,141 @@ $$(".dgbtn").forEach(b=>b.onclick=()=>{
   $("#dg-query").style.display=b.dataset.dg==="query"?"":"none";
   $("#dg-ingest").style.display=b.dataset.dg==="ingest"?"":"none";
 });
+
+/* ---------- info: interactive pipeline diagrams ----------
+   Every stage is a <g class="stg" data-stage="id"> in the SVG; its name, kind, description, config
+   keys and how "on" is judged live in the JSON block #dg-stages. Hover or focus previews a stage in
+   the card beside the diagram, click / Enter / Space pins it, Esc releases. On/off comes from
+   GET /api/pipeline-state (config.yaml read fresh from disk), and a failed read is shown, never
+   swallowed into a blank card. */
+const DG_STAGES=JSON.parse($("#dg-stages").textContent);
+const DG_KIND={core:"Always on",optional:"Optional",auto:"Automatic",exp:"Experimental"};
+const DG_FOOT={
+  query:"Values are config.yaml as saved on disk. The query service reads them when it starts, so a change needs a :8051 restart. A preset or a per-call option overrides them for a single query.",
+  ingest:"Values are config.yaml as saved on disk. Each ingest or index job reads them when it starts, so a change applies to the next job."};
+state.dg=null;state.dgErr="";state.dgAt=null;state.dgPin={query:null,ingest:null};state.dgShown={query:undefined,ingest:undefined};
+const dgRoot=id=>id[0]==="q"?"query":"ingest";
+function dgFmt(v){
+  if(v===null)return "null";
+  if(Array.isArray(v))return !v.length?"[] (empty)":(v.length<=6&&v.every(x=>typeof x!=="object")?v.join(", "):v.length+" entries");
+  if(typeof v==="object")return Object.keys(v).length+" entries";
+  return v===""?"\"\" (blank)":String(v);
+}
+function dgState(id){
+  const s=DG_STAGES[id],L=state.dg;
+  if(!L)return {t:"UNKNOWN",c:"unk",why:state.dgErr||"The live config has not loaded yet."};
+  if(s.exp){
+    const r=L.exp[s.exp];
+    return r?{t:r.on?"ON":"OFF",c:r.on?"on":"off",led:r.on?"on":"off"}
+            :{t:"UNKNOWN",c:"unk",why:"The experimental registry has no row named "+s.exp+"."};
+  }
+  const o=s.on||{};
+  if(o.always)return {t:"ALWAYS ON",c:"core"};
+  if(o.auto)return {t:"AUTOMATIC",c:"auto",why:"Opens by itself: "+o.auto+"."};
+  const keys=o.mode?[o.mode]:o.flag?[o.flag]:o.any?o.any:o.pick?[o.pick.key]:[];
+  const gone=keys.find(k=>L.unset.has(k));
+  if(gone)return {t:"UNSET",c:"unk",why:gone+" is not in config.yaml, so the code default applies."};
+  if(o.mode)return {t:"MODE: "+String(L.values[o.mode]),c:"mode"};
+  const lab=o.pick||o;
+  const on=o.pick?o.pick.hit.includes(String(L.values[o.pick.key]).toLowerCase())&&(!o.pick.req||!!L.values[o.pick.req])
+                 :keys.some(k=>!!L.values[k]);
+  return {t:on?(lab.on||"ON"):(lab.off||"OFF"),c:on?"on":"off",led:on?"on":"off"};
+}
+function dgCardHtml(id){
+  const s=DG_STAGES[id],st=dgState(id),L=state.dg,root=dgRoot(id);
+  const chips=`<div class="dg-chips"><span class="dg-chip ${s.k==="exp"?"xp":""}">${DG_KIND[s.k]}</span>`+
+    `<span class="dg-chip ${st.c}">${esc(st.t)}</span>`+
+    (s.d?`<span class="dg-chip">ships ${s.d==="on"?"on":"off"}</span>`:"")+`</div>`;
+  const keys=s.keys.length
+    ?`<dl class="dg-keys">`+s.keys.map(k=>{
+        const gone=L&&L.unset.has(k);
+        return `<dt>${esc(k)}</dt><dd${gone?` class="unset"`:""}>${!L?"—":gone?"not in config.yaml":esc(dgFmt(L.values[k]))}</dd>`;
+      }).join("")+`</dl>`
+    :`<p>None: this stage has no setting of its own.</p>`;
+  const exp=s.exp&&L&&L.exp[s.exp]?`<p>Flag <code>${esc(L.exp[s.exp].key)}</code>, switched in Settings &rarr; Experimental features.</p>`:"";
+  return `${chips}<h3>${esc(s.n)}</h3><p>${esc(s.w)}</p>${st.why?`<p>${esc(st.why)}</p>`:""}${exp}`+
+    (s.p?`<h4>Per call</h4><p>${esc(s.p)}</p>`:"")+`<h4>Config keys</h4>${keys}<div class="dg-foot">${esc(DG_FOOT[root])}</div>`;
+}
+function dgIdleHtml(){
+  return `<h3>Stage details</h3><p>Hover or focus a stage to preview it. Click it (or press Enter) to pin its details here; click again or press Esc to release.</p>`+
+    (state.dgErr?`<p style="color:var(--red)">${esc(state.dgErr)}</p>`:"");
+}
+function dgPaint(root,id,force){
+  if(!force&&state.dgShown[root]===id)return;
+  state.dgShown[root]=id;
+  $("#dg-"+root+" .dg-card").innerHTML=id?dgCardHtml(id):dgIdleHtml();
+}
+/* Everything that depends on the live config: dots and labels on the stages, the [data-cfg]
+   values in the knobs table, the status line, and the cards. */
+function dgApply(){
+  $$(".stg").forEach(g=>{
+    const id=g.dataset.stage,s=DG_STAGES[id];
+    if(!s)return;
+    const st=dgState(id);
+    g.setAttribute("aria-label",`${s.n}. ${DG_KIND[s.k]}. ${st.t}`);
+    let led=g.querySelector(".dg-led");
+    const box=g.querySelector("rect.bx");
+    if(st.led&&box){
+      if(!led){led=document.createElementNS("http://www.w3.org/2000/svg","circle");
+        led.setAttribute("r","5");g.append(led)}
+      led.setAttribute("cx",+box.getAttribute("x")+ +box.getAttribute("width")-11);
+      led.setAttribute("cy",+box.getAttribute("y")+11);
+      led.setAttribute("class","dg-led "+st.led);
+    }else if(led)led.remove();
+  });
+  $$("[data-cfg]").forEach(el=>{
+    const L=state.dg,k=el.dataset.cfg;
+    el.textContent=!L?"n/a":L.unset.has(k)?"unset":dgFmt(L.values[k]);
+  });
+  const live=$("#dg-live");
+  live.replaceChildren();
+  if(state.dg){
+    live.className="dg-live";
+    live.textContent="live config: config.yaml read at "+state.dgAt.toLocaleTimeString();
+  }else if(state.dgErr){
+    live.className="dg-live err";
+    const b=document.createElement("button");b.className="btn";b.textContent="Retry";b.onclick=dgLoad;
+    live.append(state.dgErr+" — descriptions still work, on/off state is unavailable.",b);
+  }else{
+    live.className="dg-live";
+    live.textContent="reading the live config…";
+  }
+  for(const root of ["query","ingest"])dgPaint(root,state.dgShown[root]??state.dgPin[root],true);
+}
+async function dgLoad(){
+  try{
+    const r=await api("/api/pipeline-state");
+    state.dg={values:r.values,unset:new Set(r.unset),exp:Object.fromEntries(r.experimental.map(f=>[f.id,f]))};
+    state.dgErr="";state.dgAt=new Date();
+  }catch(e){
+    state.dg=null;state.dgErr="Could not read the live config (GET /api/pipeline-state: "+e.message+")";
+  }
+  dgApply();
+}
+$$(".dg-wrap").forEach(wrap=>{
+  const root=wrap.id==="dg-query"?"query":"ingest";
+  const stage=el=>el&&el.closest?el.closest(".stg"):null;
+  const pinOf=id=>wrap.querySelector(`.stg[data-stage="${id}"]`);
+  const release=()=>{const g=state.dgPin[root]&&pinOf(state.dgPin[root]);
+    if(g){g.classList.remove("sel");g.setAttribute("aria-pressed","false")}state.dgPin[root]=null};
+  wrap.addEventListener("mouseover",e=>{const g=stage(e.target);if(g)dgPaint(root,g.dataset.stage)});
+  wrap.addEventListener("mouseout",e=>{if(stage(e.target)&&!stage(e.relatedTarget))dgPaint(root,state.dgPin[root])});
+  wrap.addEventListener("focusin",e=>{const g=stage(e.target);if(g)dgPaint(root,g.dataset.stage)});
+  wrap.addEventListener("focusout",e=>{if(stage(e.target)&&!stage(e.relatedTarget))dgPaint(root,state.dgPin[root])});
+  const toggle=g=>{
+    const id=g.dataset.stage,was=state.dgPin[root]===id;
+    release();
+    if(!was){state.dgPin[root]=id;g.classList.add("sel");g.setAttribute("aria-pressed","true")}
+    dgPaint(root,id);
+  };
+  wrap.addEventListener("click",e=>{const g=stage(e.target);if(g)toggle(g)});
+  wrap.addEventListener("keydown",e=>{
+    if(e.key==="Escape"){release();dgPaint(root,null);return}
+    const g=stage(e.target);
+    if(g&&(e.key==="Enter"||e.key===" ")){e.preventDefault();toggle(g)}
+  });
+});
+dgApply();   // idle cards now; the Info tab fetches the live values when it opens
 
 /* ---------- query history (browser-local, last 20) ---------- */
 function qhLoad(){try{return JSON.parse(localStorage.getItem("ledger-qhistory")||"[]")}catch(e){return[]}}

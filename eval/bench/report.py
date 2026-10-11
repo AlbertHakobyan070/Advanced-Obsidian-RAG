@@ -40,6 +40,10 @@ def _header(summary: dict, meta: dict) -> list[str]:
              f"**config digest** `{meta['config_digest']}`"]
     index = meta.get("index") or {}
     parts = []
+    if "collection" in index:
+        emb = index.get("embedding") or {}
+        parts.append(f"collection {index['collection']} ({emb.get('provider')} · {emb.get('model')}"
+                     + (f", cap {emb['max_seq_length']}" if "max_seq_length" in emb else "") + ")")
     if "dense_count" in index:
         parts.append(f"dense {index['dense_count']}")
     if "bm25" in index:
@@ -79,7 +83,7 @@ def _ladder_table(summary: dict) -> list[str]:
                      f"{p['hit@5_mcnemar_p']:.3f}", real])
     if not rows:
         return []
-    return ["## Ladder steps (paired)", "",
+    return ["## Ladder steps and spec baselines (paired)", "",
             "Δ nDCG@10 is B minus A over the questions both configurations scored. A step "
             "is real only when its paired 95% CI excludes zero.", ""] \
         + _table(["step (B vs A)", "n", "Δ nDCG@10 [95% CI]", "McNemar p (hit@5)",

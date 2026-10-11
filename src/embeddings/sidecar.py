@@ -18,7 +18,8 @@ questions alike), written by whatever built the vectors.
                      stored vector, so a stamp is a proof and not a claim.
 
 What has to match is the vector space: kind, model, normalisation, both
-prefixes and, when the configured side knows it, the dimension. The provider
+prefixes, the endpoint's token cap (max_seq_length) and, when the configured
+side knows it, the dimension. The provider
 NAME, base_url, device and batch size do not change the vectors and are not
 compared.
 
@@ -148,6 +149,7 @@ def make_sidecar(spec: EmbeddingSpec, *, collection: str, role: str, status: str
         "normalize": spec.normalize,
         "query_prefix": spec.query_prefix,
         "doc_prefix": spec.doc_prefix,
+        "max_seq_length": spec.max_seq_length,
         "created_at": created_at or now,
         "completed_at": now if status == "complete" else None,
         "count": count,
@@ -231,6 +233,9 @@ def fingerprint_diff(spec: EmbeddingSpec, dimension: int | None, sidecar: dict, 
     for field, ours in (("doc_prefix", spec.doc_prefix), ("query_prefix", spec.query_prefix)):
         if sidecar[field] != ours:
             diff.append(field)
+    # .get: a sidecar written before the field existed means "no cap declared".
+    if sidecar.get("max_seq_length") != spec.max_seq_length:
+        diff.append("max_seq_length")
     return diff
 
 

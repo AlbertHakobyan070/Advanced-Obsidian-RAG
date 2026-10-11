@@ -62,6 +62,7 @@ class RAGPipeline:
         neighbor_ctx: NeighborContext | None = None,
         graph: GraphExpander | None = None,
         gate: RelevanceGate | None = None,
+        scope_lanes: bool = True,
     ):
         self.retriever = retriever
         self.reranker = reranker
@@ -72,6 +73,9 @@ class RAGPipeline:
         self.presets = presets or {}
         # Domain/content-type routing (retrieval.domain_signals / content_signals).
         self.scope_router = scope_router or ScopeRouter(None, None)
+        # retrieval.scope_lanes: whether a detected scope opens the dense_scope /
+        # sparse_scope lanes. False still detects (and echoes) the scope.
+        self.scope_lanes = scope_lanes
         # E2 small-to-big context expansion (both default OFF; see
         # retrieval.parent_context / retrieval.neighbor_context).
         self.parent_ctx = parent_ctx
@@ -115,6 +119,7 @@ class RAGPipeline:
             graph=GraphExpander.from_config(cfg, retriever, reranker),
             # Built here so a bad gate block fails the build, not a request.
             gate=RelevanceGate.from_config(cfg, reranker),
+            scope_lanes=bool(cfg.get("retrieval.scope_lanes", True)),
         )
 
     def _resolve_overrides(
@@ -177,6 +182,7 @@ class RAGPipeline:
         auto_preset: bool = True,
         lanes: list[str] | None = None,
         metadata_boost: bool | None = None,
+        scope_lanes: bool | None = None,
         gate: bool | None = None,
         gate_threshold: float | None = None,
         gate_scorer: str | None = None,
@@ -217,6 +223,9 @@ class RAGPipeline:
           metadata_boost
                       True/False forces the course/domain/tag boost on or off
                       (None follows retrieval.metadata_boost)
+          scope_lanes True/False forces the dense_scope / sparse_scope lanes on
+                      or off (None follows retrieval.scope_lanes). Off still
+                      detects the scope; it just never runs those lanes
           gate        True/False forces the relevance gate on or off (None
                       follows retrieval.relevance_gate.enabled). It runs after
                       the rerank and before the small-to-big expansion and
@@ -264,6 +273,7 @@ class RAGPipeline:
         # would dilute the keywords) and routed as extra fusion lanes.
         with trace.span("scope"):
             scope = self.scope_router.detect(question)
+        scope_lanes_on = self.scope_lanes if scope_lanes is None else bool(scope_lanes)
 
         with trace.span("hyde"):
             search_text, hyde_status = self.hyde.expand_with_info(
@@ -273,7 +283,7 @@ class RAGPipeline:
             dense_top_k=dk,
             sparse_top_k=sk,
             boost_code=overrides.get("boost_code", False),
-            scope=scope if scope else None,
+            scope=scope if (scope and scope_lanes_on) else None,
             omnisearch=use_omni,
             hype=use_hype,
             lane_weights=weights or None,
@@ -333,6 +343,7 @@ class RAGPipeline:
             "hyde_cache": hyde_status,
             "boost_code": overrides.get("boost_code", False),
             "scope": scope.labels if scope else [],
+            "scope_lanes": scope_lanes_on,
             "candidates": len(candidates),
             "omnisearch": bool(
                 self.retriever.omnisearch is not None
@@ -416,6 +427,7 @@ class RAGPipeline:
         auto_preset: bool = True,
         lanes: list[str] | None = None,
         metadata_boost: bool | None = None,
+        scope_lanes: bool | None = None,
         gate: bool | None = None,
         gate_threshold: float | None = None,
         gate_scorer: str | None = None,
@@ -436,7 +448,7 @@ class RAGPipeline:
             parent_context=parent_context, neighbor_context=neighbor_context,
             hype=hype, rerank=rerank, rerank_instruction=rerank_instruction,
             lane_weights=lane_weights, auto_preset=auto_preset,
-            lanes=lanes, metadata_boost=metadata_boost,
+            lanes=lanes, metadata_boost=metadata_boost, scope_lanes=scope_lanes,
             gate=gate, gate_threshold=gate_threshold, gate_scorer=gate_scorer,
         )
         answer = self.generator.generate(question, top, max_tokens=max_tokens)

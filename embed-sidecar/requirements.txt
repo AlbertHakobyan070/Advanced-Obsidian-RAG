@@ -1,0 +1,8 @@
+# The measured working stack (G:\eg2_bench\gpu_venv), GPU build. Create a venv
+# of its own; never install this into the project venv, which pins an older
+# sentence-transformers and a CPU torch. See README.md.
+--extra-index-url https://download.pytorch.org/whl/cu126
+torch==2.14.1+cu126
+torchvision==0.29.1+cu126
+sentence-transformers==6.1.0
+transformers==5.19.0

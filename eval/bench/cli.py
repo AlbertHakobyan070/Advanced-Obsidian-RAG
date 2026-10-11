@@ -97,6 +97,12 @@ def _cmd_run(args) -> None:
     except KeyError as e:
         _fail(e.args[0])
     cfg = load_config(args.config)
+    if args.collection:
+        from src.embeddings.reembed import config_for_collection
+        try:
+            cfg = config_for_collection(cfg, args.collection)
+        except ValueError as e:
+            _fail(str(e))
     from eval.bench import runner
 
     print(f"bench run: split {args.split}, {len(configs)} configuration(s), questions from {sets}")
@@ -278,10 +284,14 @@ def add_bench_parser(subparsers) -> None:
     r.add_argument("--unseal-test", action="store_true", dest="unseal_test",
                    help="allow a sealed split; every opening is appended to eval/test_ledger.jsonl")
     r.add_argument("--configs", default="ladder", metavar="SPEC",
-                   help="ladder | loo | factorial, or comma-separated names from eval/configs.yaml "
-                        "(default: ladder)")
+                   help="ladder | loo | factorial | routing | hyde, or comma-separated names from "
+                        "eval/configs.yaml (default: ladder)")
     r.add_argument("--limit", type=int, default=None, metavar="N",
                    help="run only the first N questions of the split (smoke runs)")
+    r.add_argument("--collection", default=None, metavar="NAME",
+                   help="score this collection with the embedder its fingerprint names instead "
+                        "of the configured one; it must be complete and hold exactly the "
+                        "active collection's ids (see main.py index --rebuild-into)")
     r.add_argument("--out-root", default=None, dest="out_root", metavar="DIR",
                    help="where the run directory is created (default: eval/runs in the "
                         "checkout, wherever this is run from)")

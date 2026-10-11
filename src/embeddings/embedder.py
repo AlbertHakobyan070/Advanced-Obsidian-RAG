@@ -258,7 +258,7 @@ def write_sparse_meta(bm25_index: Path, count: int) -> Path:
 
 class _OpenAIEmbedding:
     def __init__(self, model: str, api_key: str, dimensions: int | None,
-                 base_url: str | None = None):
+                 base_url: str | None = None, max_seq_length: int | None = None):
         from openai import OpenAI
         # base_url only when set: a plain OpenAI config builds the client with
         # exactly the arguments it always did.
@@ -266,6 +266,7 @@ class _OpenAIEmbedding:
                        else OpenAI(api_key=api_key))
         self.model = model
         self.dimensions = dimensions
+        self.max_seq_length = max_seq_length
 
     @property
     def dimension(self) -> int | None:
@@ -276,6 +277,18 @@ class _OpenAIEmbedding:
         if self.dimensions:
             kwargs["dimensions"] = self.dimensions
         resp = self.client.embeddings.create(**kwargs)
+        # The cap is part of the collection's fingerprint, so a server that
+        # truncates at a different length than the entry declares would write
+        # vectors the fingerprint mislabels. Our embed-sidecar reports its cap
+        # as an extra response field; an endpoint that reports nothing (Ollama,
+        # OpenAI) cannot be checked and is taken at its entry's word.
+        reported = (getattr(resp, "model_extra", None) or {}).get("max_seq_length")
+        if self.max_seq_length is not None and reported is not None                 and reported != self.max_seq_length:
+            raise RuntimeError(
+                f"the embedding endpoint truncates at max_seq_length {reported}, but "
+                f"embedding.providers declares {self.max_seq_length}; those vectors "
+                f"would not match the fingerprint. Restart the endpoint with the "
+                f"declared cap, or fix the entry.")
         return [d.embedding for d in resp.data]
 
 
@@ -370,6 +383,7 @@ class Embedder:
                 api_key=api_key,
                 dimensions=spec.dimensions,
                 base_url=spec.base_url,
+                max_seq_length=spec.max_seq_length,
             )
         else:
             raise ValueError(f"Unknown embedding kind: {spec.kind!r}")

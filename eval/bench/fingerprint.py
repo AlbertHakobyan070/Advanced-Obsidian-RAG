@@ -17,6 +17,8 @@ import json
 import subprocess
 from pathlib import Path
 
+from src.embeddings.registry import resolve_embedding_spec
+
 
 def _git(repo: Path, *args: str) -> str:
     r = subprocess.run(["git", *args], cwd=str(repo), capture_output=True,
@@ -59,11 +61,17 @@ def index_fingerprint(cfg, rag) -> dict:
     # never from unpickling the payload (a multi-GB RAM spike on a 16 GB box).
     meta_path = Path(str(cfg.path("paths.bm25_index")) + ".meta.json")
     bm25 = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else None
+    # The EFFECTIVE embedder (a providers: entry's own model and cap), not
+    # embedding.local_model, which a hosted provider never reads.
+    spec = resolve_embedding_spec(cfg)
+    embedding = {"provider": spec.provider, "model": spec.model}
+    if spec.max_seq_length is not None:
+        embedding["max_seq_length"] = spec.max_seq_length
     return {
         "dense_count": rag.retriever._get_collection().count(),
+        "collection": cfg.get("paths.collection_name", "obsidian_vault"),
         "bm25": bm25,
-        "embedding": {"provider": cfg.get("embedding.provider"),
-                      "model": cfg.get("embedding.local_model")},
+        "embedding": embedding,
         "reranker": cfg.get("retrieval.cross_encoder_model"),
         "chunk_files": chunk_files_digest(cfg.path("paths.chunks_file").parent),
     }

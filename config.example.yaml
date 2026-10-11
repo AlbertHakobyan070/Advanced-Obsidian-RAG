@@ -87,7 +87,35 @@ embedding:
   #     api_key_env: null                  # keyless local server
   #     query_prefix: "search_query: "
   #     doc_prefix: "search_document: "
-  providers: {}
+  #
+  # EmbeddingGemma 2 (google/embeddinggemma-2, 768-d) on the GPU embedding sidecar
+  # (embed-sidecar/README.md; ports 8104 / 8105). Both entries use the model card's
+  # prompts. `max_seq_length` is the token cap the sidecar truncates at: it
+  # changes the vectors of every longer chunk, so it is part of a collection's
+  # fingerprint, and the client refuses a sidecar started with another value.
+  # Start the sidecar with EMBED_MAX_SEQ_LENGTH equal to the entry you use.
+  # `dimensions` below 768 truncates and re-normalises (Matryoshka); it is also
+  # part of the fingerprint. Nothing uses these until embedding.provider names one
+  # (build a collection first: main.py index --rebuild-into NAME --embedding eg2).
+  providers:
+    eg2:
+      kind: openai
+      base_url: "http://127.0.0.1:8104/v1"
+      model: "google/embeddinggemma-2"
+      api_key_env: null                  # keyless local sidecar
+      dimensions: 768
+      max_seq_length: 1024
+      query_prefix: "task: search result | query: "
+      doc_prefix: "title: none | text: "
+    eg2_l512:                            # the like-for-like control: bge-small also caps at 512
+      kind: openai
+      base_url: "http://127.0.0.1:8105/v1"   # own port, so both caps can run at once on two GPUs
+      model: "google/embeddinggemma-2"
+      api_key_env: null
+      dimensions: 768
+      max_seq_length: 512
+      query_prefix: "task: search result | query: "
+      doc_prefix: "title: none | text: "
   # `main.py stamp` and the end of every re-embed re-embed this many stored
   # chunks and require each to match its stored vector at >= min_cosine. The
   # same model on the same text scores ~1.0; another model or prefix lands far
@@ -339,7 +367,14 @@ retrieval:
     enabled: true
     path: data/cache/hyde.sqlite
   # If a query mentions a course/domain, bias retrieval toward it
-  metadata_boost: true
+  metadata_boost: false     # off by default: no effect after rerank, -0.040 nDCG@10 without it (dev, 2026-10-11)
+  # Scope lanes: when the query names a domain or content type (retrieval.
+  # domain_signals / content_signals), add the filtered dense_scope and
+  # sparse_scope lanes to the fusion. false = the scope is still DETECTED (and
+  # echoed as retrieval.scope) but those two lanes are neither run nor fused.
+  # Independent of metadata_boost above. Per-call override: {"scope_lanes": false}
+  # on /search, /query and /compare.
+  scope_lanes: false        # off by default: same evidence; the scope is still detected
 
   # Relevance gate: a cutoff applied AFTER the rerank and BEFORE the parent/
   # neighbor expansion below. Reranking orders the pool but never says "none of
