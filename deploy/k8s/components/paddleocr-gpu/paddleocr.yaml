@@ -1,0 +1,120 @@
+# PaddleOCR sidecar (ocr-sidecar/Dockerfile.gpu), GPU. Same server.py and contract
+# as the CPU component; the Service keeps the name `paddleocr` so the config does
+# not change.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: paddleocr
+  labels:
+    app.kubernetes.io/name: paddleocr
+    app.kubernetes.io/component: ocr
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: paddleocr
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: paddleocr
+        app.kubernetes.io/component: ocr
+    spec:
+      enableServiceLinks: false      # see base/rag.yaml
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # amd64 only: the PaddlePaddle cu118 wheels are x86_64 builds. Requesting
+      # nvidia.com/gpu below already steers the pod to a GPU node; the label or
+      # taint of YOUR GPU pool, if it has one, belongs in the overlay's patch.
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      containers:
+        - name: paddleocr
+          image: noetrix-paddleocr-gpu
+          ports:
+            - name: http
+              containerPort: 8103
+          env:
+            - name: PADDLE_OCR_LANG
+              value: en
+            - name: PADDLE_OCR_DEVICE
+              value: gpu:0
+            # "ocr" = PP-OCRv6 (3.1 s/page measured on a GTX 1070 Ti); "vl" =
+            # PaddleOCR-VL, ~30x the cost and ~7.9 GB of VRAM. A request can also
+            # choose per call.
+            - name: PADDLE_OCR_PIPELINE
+              value: ocr
+          volumeMounts:
+            - name: cache
+              mountPath: /paddle_cache
+          # Measured: 592 MiB of VRAM for the default pipeline, warm page 0.16 s.
+          # System memory is an ESTIMATE until measured -- the weights live on the
+          # card, not in RAM.
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              memory: 3Gi
+              nvidia.com/gpu: 1
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 36        # the first start downloads weights and warms the GPU context
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 4
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: cache
+          persistentVolumeClaim:
+            claimName: paddle-cache
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: paddle-cache
+  labels:
+    app.kubernetes.io/name: paddleocr
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: paddleocr
+  labels:
+    app.kubernetes.io/name: paddleocr
+    app.kubernetes.io/component: ocr
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: paddleocr
+  ports:
+    - name: http
+      port: 8103
+      targetPort: http

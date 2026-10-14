@@ -15,7 +15,11 @@
 # real 512x512 matmul on the card. Do not "modernise" this to cu126/cu129
 # without re-running that check; import and device_count both succeed on a
 # wheel with no matching arch, and only a real kernel launch tells you.
-FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
+# NVIDIA publishes this tag for amd64 and arm64 (the latter for Grace/Jetson-class
+# hosts); the PaddlePaddle cu118 wheels below are x86_64 only, so this image is
+# linux/amd64 only. Pinned by digest (the index) -- to bump it:
+#   docker buildx imagetools inspect nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
+FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04@sha256:85fb7ac694079fff1061a0140fd5b5a641997880e12112d92589c3bbb1e8b7ca
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1
@@ -61,12 +65,25 @@ RUN pip3 install --no-cache-dir "paddlex[ocr]==3.7.2"
 
 COPY server.py /srv/server.py
 
+# Non-root, same as the CPU image: HOME is the weights volume and the only
+# writable place. The NVIDIA runtime injects the driver libraries for any uid. A
+# volume an older (root) image already filled is handed over by the compose
+# files' `*-perms` service (Kubernetes: fsGroup).
+ARG APP_UID=10001
+ARG APP_GID=10001
+RUN groupadd --gid ${APP_GID} ocr \
+ && useradd --uid ${APP_UID} --gid ${APP_GID} --home-dir /paddle_cache \
+            --no-create-home --shell /usr/sbin/nologin ocr \
+ && mkdir -p /paddle_cache && chown ${APP_UID}:${APP_GID} /paddle_cache
+
 # Weights land here on first use; compose mounts a named volume so the download
 # happens once rather than on every container recreate.
 ENV PADDLE_OCR_HOME=/paddle_cache \
     HOME=/paddle_cache \
     PADDLE_OCR_DEVICE=gpu:0 \
     PADDLE_OCR_PIPELINE=ocr
+
+USER ${APP_UID}:${APP_GID}
 
 EXPOSE 8103
 CMD ["python", "-m", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8103"]

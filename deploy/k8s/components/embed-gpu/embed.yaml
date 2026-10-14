@@ -1,0 +1,127 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: embed
+  labels:
+    app.kubernetes.io/name: embed
+    app.kubernetes.io/component: embedding
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: embed
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: embed
+        app.kubernetes.io/component: embedding
+    spec:
+      # The Service `embed` would otherwise inject EMBED_PORT=tcp://10.x.x.x:8104, the
+      # variable the sidecar reads as a port NUMBER (see base/rag.yaml).
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # The CUDA 12.6 torch wheels are x86_64 builds (embed-sidecar/Dockerfile).
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      containers:
+        - name: embed
+          image: noetrix-embed
+          ports:
+            - name: http
+              containerPort: 8104
+          env:
+            - name: EMBED_HOST
+              value: 0.0.0.0
+            - name: EMBED_PORT
+              value: "8104"
+            # Must equal embedding.providers.eg2.max_seq_length: the client refuses
+            # a server whose cap differs.
+            - name: EMBED_MAX_SEQ_LENGTH
+              value: "1024"
+            # google/embeddinggemma-2 may be gated for your account. Optional.
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: noetrix-provider-keys
+                  key: HF_TOKEN
+                  optional: true
+          volumeMounts:
+            - name: hf-cache
+              mountPath: /hf_cache          # ~1.7 GB of weights, downloaded once
+          # Measured on the live sidecars (2026-10-13, Windows host, GTX 1070 Ti):
+          # peak working set 2.5-2.8 GB; ~3.4 GB of VRAM in use by one sidecar at
+          # cap 1024. (Their commit charge reads 5-11 GB, but that is CUDA address
+          # space reserved, not memory used.)
+          resources:
+            requests:
+              cpu: "1"
+              memory: 3Gi
+            limits:
+              memory: 6Gi
+              nvidia.com/gpu: 1
+          # The model loads BEFORE the port opens, so the first probe that connects
+          # means a model is in memory. The long startup window is the download plus
+          # the load onto the card.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 4
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: hf-cache
+          persistentVolumeClaim:
+            claimName: embed-hf-cache
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: embed-hf-cache
+  labels:
+    app.kubernetes.io/name: embed
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: embed
+  labels:
+    app.kubernetes.io/name: embed
+    app.kubernetes.io/component: embedding
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: embed
+  ports:
+    - name: http
+      port: 8104
+      targetPort: http

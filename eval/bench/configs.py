@@ -37,10 +37,11 @@ def factor_config(active: frozenset[str]) -> dict:
 
     Composition rule: `lanes` = the active families among {dense, sparse}, plus
     their `*_scope` lanes when `routing` is on, plus their `*_code` lanes when
-    `code` is on (sorted); `metadata_boost` = routing; `auto_preset` = code;
-    `rerank` = "cross_encoder" if rerank else "none"; `hyde` = hyde; everything
-    else from EVAL_DEFAULTS. A set with neither dense nor sparse yields
-    `lanes = []`, which the runner scores 0 without searching.
+    `code` is on (sorted); `metadata_boost` = `scope_lanes` = routing (config.yaml
+    ships retrieval.scope_lanes off, so listing the scope lanes alone would not
+    open them); `auto_preset` = code; `rerank` = "cross_encoder" if rerank else
+    "none"; `hyde` = hyde; everything else from EVAL_DEFAULTS. A set with neither
+    dense nor sparse yields `lanes = []`, which the runner scores 0 without searching.
     """
     families = [f for f in ("dense", "sparse") if f in active]
     lanes = list(families)
@@ -52,6 +53,7 @@ def factor_config(active: frozenset[str]) -> dict:
         **EVAL_DEFAULTS,
         "lanes": sorted(lanes),
         "metadata_boost": "routing" in active,
+        "scope_lanes": "routing" in active,
         "auto_preset": "code" in active,
         "rerank": "cross_encoder" if "rerank" in active else "none",
         "hyde": "hyde" in active,
@@ -67,7 +69,7 @@ LADDER: list[tuple[str, frozenset[str]]] = [
     ("R3-routing", frozenset({"dense", "sparse", "routing"})),
     ("R4-code", frozenset({"dense", "sparse", "routing", "code"})),
     ("R5-rerank", frozenset({"dense", "sparse", "routing", "code", "rerank"})),
-    ("R6-hyde", frozenset(FACTORS)),          # the shipped default
+    ("R6-hyde", frozenset(FACTORS)),          # every factor on (routing ships off, so not config.yaml)
 ]
 
 
@@ -90,11 +92,32 @@ def hyde_ablation() -> list[tuple[str, dict]]:
     return [("H-off", factor_config(R5)), ("H-on", factor_config(R5 | {"hyde"}))]
 
 
+def diversity_ablation() -> list[tuple[str, dict]]:
+    """The per-file cap (retrieval.max_per_file) over the shipped retrieval pipeline
+    with HyDE OFF (so no LLM is in the loop; config.yaml itself ships use_hyde: true):
+    R5 with the scope lanes and the metadata boost off. D-off is that pipeline
+    uncapped; it is F-none of the routing ablation."""
+    base = {**factor_config(R5), "scope_lanes": False, "metadata_boost": False}
+    return [(name, {**base, "max_per_file": cap})
+            for name, cap in (("D-off", 0), ("D-cap2", 2), ("D-cap3", 3))]
+
+
+def decompose_ablation() -> list[tuple[str, dict]]:
+    """Query decomposition over D-off's pipeline: off, on, and on with the per-file cap
+    at 2. It needs an LLM, so run it with --llm replay:<store> for a fixed one."""
+    base = dict(diversity_ablation())["D-off"]
+    return [("Q-off", {**base, "decompose": False}),
+            ("Q-on", {**base, "decompose": True}),
+            ("Q-on-cap2", {**base, "decompose": True, "max_per_file": 2})]
+
+
 # config -> the config the report pairs it with (B minus A): each ladder rung against
 # the rung before it, each routing variant and H-on against their reference.
 BASELINES: dict[str, str] = {
     **{b: a for (a, _), (b, _) in zip(LADDER, LADDER[1:])},
     "F-noscope": "F-full", "F-noboost": "F-full", "F-none": "F-full", "H-on": "H-off",
+    "D-cap2": "D-off", "D-cap3": "D-off", "Q-on": "Q-off", "Q-on-cap2": "Q-off",
+    "rr-bge-m3-http": "rr-minilm",          # named configs in eval/configs.yaml (Laya step 0)
 }
 
 
@@ -103,7 +126,7 @@ def ladder() -> list[tuple[str, dict]]:
 
 
 def leave_one_out() -> list[tuple[str, dict]]:
-    """The shipped default, then the default minus each factor in turn."""
+    """Every factor on, then that set minus each factor in turn."""
     full = frozenset(FACTORS)
     return [("full", factor_config(full))] + [(f"-{f}", factor_config(full - {f})) for f in FACTORS]
 
@@ -138,8 +161,8 @@ def load_named(path) -> dict[str, dict]:
 
 def resolve(spec: str, path) -> list[tuple[str, dict]]:
     """A `--configs` value to [(name, overrides)]: `ladder`, `loo`, `factorial`,
-    `routing` or `hyde` (generated; `path` is not read), or comma-separated names
-    from `path`."""
+    `routing`, `hyde`, `diversity` or `decompose` (generated; `path` is not read),
+    or comma-separated names from `path`."""
     if spec == "ladder":
         return ladder()
     if spec == "loo":
@@ -150,11 +173,15 @@ def resolve(spec: str, path) -> list[tuple[str, dict]]:
         return routing_ablation()
     if spec == "hyde":
         return hyde_ablation()
+    if spec == "diversity":
+        return diversity_ablation()
+    if spec == "decompose":
+        return decompose_ablation()
     named = load_named(path)
     out = []
     for name in (n.strip() for n in spec.split(",")):
         if name not in named:
             raise KeyError(f"unknown config {name!r}; known: {', '.join(sorted(named)) or '(none)'} "
-                           f"(or one of ladder, loo, factorial, routing, hyde)")
+                           f"(or one of ladder, loo, factorial, routing, hyde, diversity, decompose)")
         out.append((name, named[name]))
     return out

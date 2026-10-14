@@ -181,6 +181,8 @@ configurations:
 | `factorial` | **Every subset** of the factors, named `F:<factors joined by +>` (`F:none` is the empty set). A subset with neither dense nor sparse has no lane to search and scores 0 without searching. |
 | `routing` | **Routing split.** `routing` is two mechanisms, so this separates them at the R5 level (HyDE off): `F-full` (scope lanes + metadata boost), `F-noscope` (boost only), `F-noboost` (scope lanes only), `F-none` (neither). Each variant is paired against `F-full` in the report. Switched by the per-call `scope_lanes` and `metadata_boost` keys. |
 | `hyde` | `H-off` (the R5 pipeline) and `H-on` (R5 plus HyDE), paired. |
+| `diversity` | **Per-file cap.** The shipped retrieval pipeline with HyDE switched off so no LLM is in the loop (R5, scope lanes and metadata boost off) uncapped (`D-off`), then with `max_per_file` 2 (`D-cap2`) and 3 (`D-cap3`), each paired against `D-off`. The cap targets recall@10 and complete@10; nDCG@10 and hit@1 are its guards. |
+| `decompose` | **Query decomposition** over `D-off`'s pipeline: `Q-off`, `Q-on`, and `Q-on-cap2` (decomposition plus the per-file cap at 2), each paired against `Q-off`. It needs an LLM: run it with `--llm replay:<store>` so every sub-query comes from one fixed model (see "Replay stores" below). |
 | `name[,name…]` | Hand-written configurations from `eval/configs.yaml`. |
 
 The generated sets are built from the same binary factors (`FACTORS` in
@@ -225,6 +227,27 @@ How a run behaves:
   `ERROR: …` and exits 2. A component that is switched off is never quietly
   swapped: a run that asks for `laya-rerank` while Laya is disabled fails with the
   refusal text instead of scoring another reranker.
+
+### Replay stores (a fixed LLM)
+
+A configuration that calls an LLM (HyDE, decomposition, `--answers`) is only as
+trustworthy as the provider behind it, and a provider chain that falls back to
+another model mid-run changes the system under test. `--llm` answers every LLM call
+from a **replay store** instead (`src/llm/replay.py`): a JSONL file of completions
+keyed by the exact system and user prompt.
+
+1. `bench run … --llm record:eval/llm/<model>.jsonl` runs normally, but every prompt
+   the pipeline sends is appended to `<model>.pending.jsonl` and that call fails.
+   The prompts are rendered by the pipeline's own code, so they are the real ones.
+2. Write one completion per pending prompt into the store: `{"key", "model",
+   "completion"}`, all with the same `model` label.
+3. `bench run … --llm replay:eval/llm/<model>.jsonl` answers from the store. A miss
+   fails that row, and so does a HyDE fallback to the raw question, which HyDE would
+   otherwise absorb silently. `run.json` records the store and its model.
+
+The store's model label is part of HyDE's cache key, so replayed drafts never mix
+with a provider's. Stores quote the vault (recorded prompts carry retrieved chunks),
+so `eval/llm/` is gitignored like `eval/runs/`.
 
 ### Metrics and statistics
 

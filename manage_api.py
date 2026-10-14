@@ -36,6 +36,7 @@ import json
 import os
 import re
 import shutil
+import statistics
 import subprocess
 import sys
 import threading
@@ -44,12 +45,12 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from queue import Queue
-from typing import Any, Iterator, Optional
+from typing import Annotated, Any, Iterator, Optional
 
 import yaml
-from fastapi import FastAPI, UploadFile
+from fastapi import FastAPI, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from eval.bench.questions import (
@@ -57,7 +58,9 @@ from eval.bench.questions import (
     save_suite, sets_lock)
 from src.utils.branding import CONSOLE_API_TITLE, CONSOLE_SERVICE
 from src.utils.chroma_client import persistent_client
+from src.utils import release
 from src.utils.config_loader import Config, load_config
+from src.utils.release import PRODUCT_VERSION
 from src.utils.logger import configure_logging, get_logger
 
 log = get_logger("manage_api")
@@ -78,7 +81,9 @@ RAG_API = CFG.get("webui.rag_api", "http://127.0.0.1:8051")
 COLLECTION = CFG.get("paths.collection_name", "obsidian_vault")
 PAGE = 5000                      # ChromaDB paging batch (see module docstring)
 
-app = FastAPI(title=CONSOLE_API_TITLE, version="0.2.0")
+app = FastAPI(title=CONSOLE_API_TITLE, version=PRODUCT_VERSION)
+# The commit this process started from, for /api/releases (None outside git).
+_STARTED_COMMIT = (release.git_head(ROOT) or {}).get("commit")
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
@@ -260,6 +265,7 @@ class Job:
         d = asdict(self)
         d["argv"] = " ".join(self.argv)
         d["record"] = _job_record_path(self.id).name
+        d.update(_agent_view(self))
         return d
 
 
@@ -542,6 +548,23 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
                 tags = ",".join(str(t) for t in tags)
             argv += ["--force-tags", str(tags)]
         return argv
+    if kind == "ocrstudio_ingest":
+        # One document's OCR Studio pages -> ITS OWN chunk file. The name is
+        # pinned to ocrstudio_*_chunks.jsonl so this lane can never be pointed
+        # at (and truncate) another lane's canonical file.
+        doc = _vault_rel(str(prm.get("doc") or ""))
+        if not doc or ".." in doc.split("/") or re.match(r"^[A-Za-z]:", doc):
+            raise ValueError("ocrstudio_ingest needs a vault-relative doc path")
+        out = _vault_data_path(str(prm.get("output") or ""))
+        name = Path(out).name
+        if not (name.startswith("ocrstudio_") and name.endswith("_chunks.jsonl")):
+            raise ValueError("ocrstudio_ingest writes only data/ocrstudio_*_chunks.jsonl")
+        _refuse_other_lanes_file(out, "ocrstudio")
+        pages = prm.get("pages") or "done"
+        if pages not in ("done", "all"):
+            raise ValueError("pages must be done|all")
+        return [py, "main.py", "ocr-studio-ingest", "--doc", doc, "--output", out,
+                "--pages", pages]
     if kind == "fetch_web":
         urls = prm.get("urls") or []
         if isinstance(urls, str):
@@ -580,6 +603,8 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
         return [py, "main.py", "index"]
     if kind == "rebuild_bm25":
         return [py, "rebuild_bm25.py"]
+    if kind == "build_tantivy":
+        return [py, "build_tantivy.py"]
     if kind == "build_hype":
         argv = [py, "build_hype.py"]
         if prm.get("include_path"):
@@ -760,6 +785,81 @@ def _load_job_records(limit: int = 200) -> int:
     if restored:
         log.info("restored %d job record(s) from %s", len(restored), JOBS_DIR)
     return len(restored)
+
+
+# ---- what an agent waiting on a job can read instead of polling blind ----
+
+# A counter in a log line: "[3/9] file.pdf", "dense append: 1/1", a tqdm bar's
+# "87000/174939 [", "page.number=41/42". Bounded on both sides so a path or a
+# date is not read as one; done > total is dropped for the same reason.
+_COUNTER_RE = re.compile(r"(?:^|[\s\[=|:])(\d+)\s*/\s*(\d+)(?=[\s\],.|]|$)")
+
+
+def _rendered_lines(path: Path, max_bytes: int = 1 << 16) -> list[str]:
+    """The log's last `max_bytes` as a terminal shows them: tqdm redraws its bar
+    in place with \\r, so each line keeps only its newest redraw."""
+    try:
+        size = path.stat().st_size
+        with open(path, "rb") as f:
+            f.seek(max(0, size - max_bytes))
+            blob = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return []
+    lines = blob.split("\n")
+    if size > max_bytes:
+        lines = lines[1:]                   # the cut landed mid-line
+    shown = (ln.rstrip("\r").rsplit("\r", 1)[-1].rstrip() for ln in lines)
+    return [ln for ln in shown if ln.strip()]
+
+
+def _progress(job: Job) -> dict | None:
+    """The newest counter the job's log shows, with the line it came from. It is
+    the current PHASE (a file, a page, a BM25 bar), not the whole job: the line
+    is returned so the reader can tell which."""
+    for line in reversed(_rendered_lines(Path(job.log_file))):
+        for m in reversed(list(_COUNTER_RE.finditer(line))):
+            done, total = int(m.group(1)), int(m.group(2))
+            if 0 < total and done <= total:
+                return {"done": done, "total": total, "line": line[-200:]}
+    return None
+
+
+def _typical_seconds(kind: str) -> dict | None:
+    """Median wall time of this kind's successful runs (live and restored), or
+    None until one has finished: an ETA is never guessed. Runs of one kind can
+    differ in size (one PDF vs fifty), so this is a rough guide, not a promise."""
+    with _jobs_lock:
+        runs = [j.ended - j.started for j in _JOBS.values()
+                if j.kind == kind and j.status == "done"
+                and j.started is not None and j.ended is not None]
+    if not runs:
+        return None
+    return {"median_s": round(statistics.median(runs), 1), "runs": len(runs)}
+
+
+def _agent_view(job: Job) -> dict:
+    """Elapsed time, place in the queue, the latest progress line and an ETA
+    from how long this kind of job usually takes. The ETA is null when there is
+    no finished run to go by or the job is already past its usual time."""
+    elapsed = (((job.ended if job.ended is not None else time.time()) - job.started)
+               if job.started is not None else None)
+    typical = _typical_seconds(job.kind) if job.status in ("queued", "running") else None
+    eta = None
+    if job.status == "running" and typical and elapsed is not None:
+        left = typical["median_s"] - elapsed
+        eta = round(left, 1) if left > 0 else None
+    position = None
+    if job.status == "queued":
+        with _jobs_lock:
+            queued = [j for j in _ORDER if _JOBS[j].status == "queued"]
+        position = queued.index(job.id) + 1 if job.id in queued else None
+    return {
+        "elapsed_s": round(elapsed, 1) if elapsed is not None else None,
+        "queue_position": position,
+        "progress": _progress(job) if job.status == "running" else None,
+        "typical": typical,
+        "eta_s": eta,
+    }
 
 
 def enqueue(kind: str, params: dict) -> Job:
@@ -1314,8 +1414,93 @@ def jobs_create(body: JobIn) -> dict:
 
 @app.get("/api/jobs")
 def jobs_list() -> dict:
+    # Snapshot under the lock, render outside it: public() takes the lock
+    # itself (queue position, typical duration) and it is not reentrant.
     with _jobs_lock:
-        return {"jobs": [_JOBS[j].public() for j in _ORDER[::-1]]}
+        jobs = [_JOBS[j] for j in _ORDER[::-1]]
+    return {"jobs": [j.public() for j in jobs]}
+
+
+@app.get("/api/releases")
+def releases() -> dict:
+    """The version on disk, what each part of this install runs or holds, and
+    the release notes. A part is `current`, `behind` (an older version, or a
+    running service started from another commit: restart or reinstall it),
+    `missing` (not there to check), `not running` (the query API did not
+    answer) or `invalid` (its VERSION file is malformed). One part failing to
+    check never hides the others."""
+    import requests
+    cfg = load_config()                      # fresh: Settings edits apply at once
+    disk = release.read_version()
+    head = release.git_head(ROOT)
+
+    def state(version, commit=None):
+        if version != disk:
+            return "behind"
+        if commit and head and commit != head["commit"]:
+            return "behind"
+        return "current"
+
+    comps = [{"name": "console", "where": "this console process",
+              "version": PRODUCT_VERSION, "commit": _STARTED_COMMIT,
+              "state": state(PRODUCT_VERSION, _STARTED_COMMIT),
+              "note": "restart the console to run the files on disk"
+                      if state(PRODUCT_VERSION, _STARTED_COMMIT) == "behind" else ""}]
+
+    q = {"name": "query API", "where": RAG_API, "version": None, "commit": None}
+    try:
+        h = requests.get(f"{RAG_API}/health", timeout=3).json()
+    except (requests.RequestException, ValueError) as e:
+        q.update(state="not running", note=f"no answer from {RAG_API}/health "
+                                           f"({type(e).__name__})")
+    else:
+        q.update(version=h.get("version"), commit=h.get("commit"))
+        if q["version"] is None:
+            q.update(state="behind", note="it predates version reporting: restart :8051")
+        else:
+            q.update(state=state(q["version"], q["commit"]))
+            q["note"] = "restart :8051 to serve the files on disk" if q["state"] == "behind" else ""
+    comps.append(q)
+
+    for d in cfg.get("webui.release_check.skill_dirs") or []:
+        for name in ("personal-rag", "rag-ops"):
+            p = Path(d).expanduser() / name / "SKILL.md"
+            row = {"name": f"skill {name}", "where": str(p), "version": None, "commit": None}
+            if not p.is_file():
+                row.update(state="missing", note="not installed here")
+            else:
+                row["version"] = release.skill_version(p)
+                row["state"] = state(row["version"]) if row["version"] else "behind"
+                row["note"] = ("" if row["state"] == "current" else
+                               "it predates version lines: reinstall it" if not row["version"]
+                               else "reinstall it from this checkout")
+            comps.append(row)
+
+    bundle = cfg.get("webui.release_check.bundle_app_dir")
+    if bundle:
+        p = cfg.path("webui.release_check.bundle_app_dir").resolve()
+        row = {"name": "bundle", "where": str(p), "version": None, "commit": None}
+        if not p.is_dir():
+            row.update(state="missing", note="no packaged app folder here")
+        elif not (p / "VERSION").is_file():
+            row.update(state="behind", note="it predates versioning: rebuild the archive")
+        else:
+            try:
+                row["version"] = release.read_version(p / "VERSION")
+            except RuntimeError as e:
+                row.update(state="invalid", note=str(e))
+            else:
+                row["state"] = state(row["version"])
+                row["note"] = "rebuild the archive" if row["state"] == "behind" else ""
+        comps.append(row)
+
+    try:
+        notes = release.parse_changelog(release.CHANGELOG_FILE.read_text(encoding="utf-8"))
+        notes_error = None
+    except FileNotFoundError:
+        notes, notes_error = [], f"{release.CHANGELOG_FILE.name} is not in this install"
+    return {"version": disk, "checkout": head, "components": comps,
+            "notes": notes, "notes_error": notes_error}
 
 
 @app.get("/api/jobs/provenance")
@@ -1406,21 +1591,36 @@ def jobs_get(jid: str) -> dict:
 
 
 @app.get("/api/jobs/{jid}/log")
-def jobs_log(jid: str, offset: int = 0) -> dict:
+def jobs_log(jid: str, offset: int = 0,
+             tail: Annotated[int, Query(ge=0, le=500)] = 0,
+             wait: Annotated[float, Query(ge=0, le=60)] = 0) -> dict:
+    """Bytes from `offset` (resume where the last read stopped), or with `tail`
+    the last N lines as a terminal shows them. `wait` makes it a long poll: it
+    returns as soon as the log grows past `offset` or the job's status changes,
+    else after `wait` seconds — one call instead of a polling loop. `job` is the
+    job's record with its progress and ETA."""
     job = _JOBS.get(jid)
     if not job:
         return JSONResponse({"error": "no such job"}, status_code=404)
     p = Path(job.log_file)
+    if wait > 0 and job.status in ("queued", "running"):
+        status0, deadline = job.status, time.monotonic() + wait
+        while (time.monotonic() < deadline and job.status == status0
+               and (not p.exists() or p.stat().st_size <= offset)):
+            time.sleep(0.25)
     if not p.exists():
-        return {"offset": 0, "data": "", "status": job.status}
+        return {"offset": 0, "data": "", "status": job.status, "job": job.public()}
     size = p.stat().st_size
+    if tail:
+        return {"offset": size, "data": "\n".join(_rendered_lines(p)[-tail:]),
+                "status": job.status, "job": job.public()}
     offset = max(0, min(offset, size))
     with open(p, "rb") as f:
         f.seek(offset)
         blob = f.read(1 << 16)
     return {"offset": offset + len(blob),
             "data": blob.decode("utf-8", errors="replace"),
-            "status": job.status}
+            "status": job.status, "job": job.public()}
 
 
 @app.post("/api/jobs/{jid}/retry")
@@ -2071,31 +2271,42 @@ def canvas_folders(refresh: int = 0) -> dict:
         return JSONResponse(
             {"error": f"the configured vault folder does not exist: {vault}"},
             status_code=404)
-    # Cached: this walks the whole vault, and the Ingest tab asks on every
-    # visit. `refresh=1` (the console's ⟳ rescan) bypasses it.
+    entry, cached = _canvas_scan(vault, bool(refresh))
+    if cached:
+        return {**entry["result"], "cached": True,
+                "age_s": int(time.time() - entry["at"])}
+    return {**entry["result"], "cached": False}
+
+
+def _canvas_scan(vault: Path, refresh: bool) -> tuple[dict, bool]:
+    """The vault-wide canvas walk, cached: ({at, result, files}, was_cached).
+
+    Cached because it walks the whole vault and the Ingest and Graph tabs ask on
+    every visit. `refresh` (the console's ⟳ rescan) bypasses it. One walk serves
+    both the folder counts and the Graph tab's file list."""
     cached = _CANVAS_SCAN.get(str(vault))
     if cached and not refresh and (time.time() - cached["at"]) < _CANVAS_SCAN_TTL:
-        return {**cached["result"], "cached": True,
-                "age_s": int(time.time() - cached["at"])}
+        return cached, True
 
     from src.ingestion.canvas_loader import iter_canvas_files
     t0 = time.time()
     roots: dict[str, int] = {}
-    total = 0
+    files = []
     for f in iter_canvas_files(vault):
         rel = f.relative_to(vault).parts
         key = rel[0] if len(rel) > 1 else "(vault root)"
         roots[key] = roots.get(key, 0) + 1
-        total += 1
+        files.append(f.relative_to(vault).as_posix())
     result = {
         "vault": str(vault),
-        "total": total,
+        "total": len(files),
         "ms": int((time.time() - t0) * 1000),
         "folders": [{"path": k, "canvases": v}
                     for k, v in sorted(roots.items(), key=lambda kv: -kv[1])],
     }
-    _CANVAS_SCAN[str(vault)] = {"at": time.time(), "result": result}
-    return {**result, "cached": False}
+    entry = {"at": time.time(), "result": result, "files": sorted(files, key=str.lower)}
+    _CANVAS_SCAN[str(vault)] = entry
+    return entry, False
 
 
 @app.post("/api/canvas/preview")
@@ -2186,6 +2397,239 @@ def canvas_preview(body: CanvasPreviewIn) -> dict:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ---- Graph tab: view and edit one .canvas file ----
+#
+# The only console feature that WRITES INTO THE VAULT, so every write is
+# fenced:
+#   * only an existing *.canvas file inside the vault, nothing else;
+#   * only on an explicit Save, which carries the sha256 of the bytes the
+#     editor loaded — a file changed on disk since then is refused (409);
+#   * the save is merged onto the file as it is on disk (canvas_edit.py): only
+#     the fields the editor edits are copied, everything else is the file's own;
+#   * the old bytes are backed up OUTSIDE the vault first (canvas.backup_dir,
+#     default logs/canvas_backups/<timestamp>_<key>_<name>.canvas);
+#   * the new bytes go to a dot-named temp file beside the canvas (same volume,
+#     so the replace is atomic; Obsidian ignores dotfiles) and replace it, with
+#     the Windows PermissionError retry the eval sets use.
+
+class CanvasSaveIn(BaseModel):
+    path: str
+    base_sha256: str = Field(min_length=64, max_length=64)
+    data: dict[str, Any]
+
+
+class CanvasPathIn(BaseModel):
+    path: str
+
+
+class CanvasLabelIn(BaseModel):
+    path: str
+    from_text: str = Field(max_length=4000)
+    to_text: str = Field(max_length=4000)
+    examples: list[str] = Field(default_factory=list, max_length=30)
+
+
+def _canvas_file(path: str) -> tuple[Path, str]:
+    """(absolute file, vault-relative posix path) of an EXISTING canvas."""
+    vault = _vault_root().resolve()
+    rel = _vault_rel(path)
+    if not rel:
+        raise ValueError("no canvas path given")
+    p = (vault / rel).resolve()
+    if p == vault or not _vault_contains(vault, p):
+        raise ValueError("path escapes the vault")
+    if p.suffix.lower() != ".canvas":
+        raise ValueError("only .canvas files can be opened or saved here")
+    if not p.is_file():
+        raise FileNotFoundError(f"no such canvas in the vault: {rel}")
+    return p, p.relative_to(vault).as_posix()
+
+
+def _canvas_backup_dir() -> Path:
+    d = (CFG.path("canvas.backup_dir") if CFG.get("canvas.backup_dir")
+         else ROOT / "logs" / "canvas_backups")
+    if _vault_contains(_vault_root().resolve(), d.resolve()):
+        raise ValueError(f"canvas.backup_dir {d} is inside the vault; backups must live "
+                         f"outside it")
+    return d
+
+
+@app.get("/api/canvas/files")
+def canvas_files(refresh: int = 0) -> dict:
+    """Every .canvas in the vault (vault-relative paths), from the cached scan."""
+    vault = _vault_root()
+    if not vault.is_dir():
+        return JSONResponse({"ok": False, "error": f"the vault folder does not exist: {vault}"},
+                            status_code=404)
+    entry, cached = _canvas_scan(vault, bool(refresh))
+    return {"ok": True, "files": entry["files"], "cached": cached,
+            "age_s": int(time.time() - entry["at"])}
+
+
+@app.get("/api/canvas/file")
+def canvas_file(path: str) -> dict:
+    """One canvas, parsed, with the sha256 of its bytes (Save must send it back)."""
+    try:
+        p, rel = _canvas_file(path)
+        raw = p.read_bytes()
+        data = json.loads(raw.decode("utf-8-sig"))
+    except (ValueError, FileNotFoundError) as e:          # JSONDecodeError is a ValueError
+        return _refuse(e)
+    if not isinstance(data, dict) or not isinstance(data.get("nodes", []), list):
+        return _refuse(ValueError(f"{rel} is not a canvas (no nodes list)"))
+    return {"ok": True, "path": rel, "sha256": hashlib.sha256(raw).hexdigest(),
+            "bytes": len(raw), "data": data,
+            "indexed": [{"source_file": sf, "chunks": d["chunks"], "jsonls": d["jsonls"]}
+                        for sf, d in _indexed_as(rel).items()]}
+
+
+@app.post("/api/canvas/file")
+def canvas_save(body: CanvasSaveIn) -> dict:
+    """Save edits to one canvas (see the fence list above)."""
+    from eval.bench.questions import _retry_locked
+    from src.ingestion.canvas_edit import dump_canvas, merge_canvas
+    try:
+        p, rel = _canvas_file(body.path)
+        raw = p.read_bytes()
+        current = hashlib.sha256(raw).hexdigest()
+        if current != body.base_sha256:
+            return JSONResponse(
+                {"ok": False, "current_sha256": current,
+                 "error": f"{rel} changed on disk since it was loaded (Obsidian or "
+                          f"another tab saved it). Nothing was written; reload it and "
+                          f"redo the edit."}, status_code=409)
+        text = raw.decode("utf-8-sig")
+        merged = merge_canvas(json.loads(text), body.data)
+        bom = b"\xef\xbb\xbf" if raw.startswith(b"\xef\xbb\xbf") else b""   # kept as found
+        new = bom + dump_canvas(merged, text).encode("utf-8")
+        backup_dir = _canvas_backup_dir()
+    except (ValueError, FileNotFoundError) as e:
+        return _refuse(e)
+    if new == raw:
+        return {"ok": True, "unchanged": True, "sha256": current, "path": rel}
+
+    from src.ocr_studio.pages import doc_key
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup = backup_dir / f"{time.strftime('%Y%m%d-%H%M%S')}_{doc_key(rel)[:8]}_{p.name}"
+    for i in itertools.count(2):                  # two saves in one second
+        if not backup.exists():
+            break
+        backup = backup.with_name(f"{backup.stem}-{i}{backup.suffix}")
+    backup.write_bytes(raw)
+
+    tmp = p.with_name(f".{p.name}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        tmp.write_bytes(new)
+        if hashlib.sha256(p.read_bytes()).hexdigest() != current:   # changed while merging
+            return JSONResponse({"ok": False, "backup": str(backup),
+                                 "error": f"{rel} changed on disk during the save; nothing "
+                                          f"was written. Reload and redo the edit."},
+                                status_code=409)
+        _retry_locked(os.replace, tmp, p)
+    finally:
+        tmp.unlink(missing_ok=True)
+    log.info("canvas saved: %s (%d -> %d bytes, backup %s)", rel, len(raw), len(new), backup)
+    return {"ok": True, "path": rel, "sha256": hashlib.sha256(new).hexdigest(),
+            "bytes": len(new), "backup": str(backup)}
+
+
+@app.post("/api/canvas/reindex")
+def canvas_reindex(body: CanvasPathIn) -> dict:
+    """Re-index ONE canvas through the scoped canvas lane.
+
+    Canvas doc_ids are keyed on node ids, so the canonical canvas_chunks.jsonl
+    still holds the OLD text under the SAME ids. Left there, the next sparse
+    rebuild (it unions the files in name order, first id wins) would serve the
+    old text while the dense index serves the new, and deleted nodes would stay
+    in both. So the canvas's rows are removed first — the /api/documents/delete
+    path — and then the scoped ingest writes its own file and appends it.
+    """
+    from src.ingestion.canvas_loader import CanvasLoader
+    from src.ocr_studio.pages import doc_key
+    try:
+        p, rel = _canvas_file(body.path)
+        loader = CanvasLoader.from_config(CFG)
+        loader.include_path = rel.lower()
+        matched = loader.discover_files()
+        if [f.resolve() for f in matched] != [p]:
+            raise ValueError(
+                f"the canvas lane's include filter would match {len(matched)} file(s) for "
+                f"{rel} (it is a substring test, or the canvas sits under canvas.skip_roots): "
+                + ", ".join(f.relative_to(loader.vault_path).as_posix() for f in matched[:5]))
+        n = len(loader.load_file(matched[0]))     # malformed JSON raises here, not in the job
+    except (ValueError, FileNotFoundError) as e:
+        return _refuse(e)
+    if n == 0:
+        return _refuse(ValueError(
+            f"{rel} has no text node long enough to become a chunk; to drop its old "
+            f"chunks, delete it in the Documents tab"))
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", p.stem)[:40].strip("_") or "canvas"
+    out = f"data/canvas_edit_{slug}_{doc_key(rel)[:8]}_chunks.jsonl"
+    indexed = _indexed_as(rel)
+    removed = None
+    if indexed:
+        try:
+            chroma_deleted = _chroma_delete_by_source(set(indexed))
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": f"ChromaDB delete failed, nothing "
+                                 f"changed: {type(e).__name__}: {e}"}, status_code=500)
+        removed = {"chroma_deleted": chroma_deleted,
+                   "jsonl_removed": _jsonl_remove_sources(
+                       set(indexed), {j for d in indexed.values() for j in d["jsonls"]})}
+        build_manifest(force=False)
+    try:
+        j1 = enqueue("ingest_canvas", {"include_path": rel, "output": out})
+    except ValueError as e:
+        return _refuse(e)
+    j2 = enqueue("index_append", {"file": out})
+    return {"ok": True, "chunks": n, "output": out, "removed": removed,
+            "jobs": [j1.public(), j2.public()],
+            "note": "restart serve_api (:8051) once the append job finishes."}
+
+
+_DEFAULT_RELATIONS = ["is-a", "part-of", "example-of", "prerequisite-of", "leads-to",
+                      "causes", "contrasts-with", "implements", "uses", "defines",
+                      "related-to"]
+
+
+@app.post("/api/canvas/suggest_label")
+def canvas_suggest_label(body: CanvasLabelIn) -> dict:
+    """Ask the generation model for an edge label. Writes nothing: the label is
+    put in the editor's label box and only reaches the file on Save, so a human
+    reviews every one (the canvas-augmentation plan's rule)."""
+    from src.llm.llm_client import LLMClient
+    try:
+        _canvas_file(body.path)
+    except (ValueError, FileNotFoundError) as e:
+        return _refuse(e)
+    cfg = load_config()
+    vocab = list(cfg.get("canvas.augment.vocabulary") or _DEFAULT_RELATIONS)
+    examples = "\n".join(f"- {x}" for x in body.examples if x.strip()) or "(none)"
+    system = ("You label the edges of a student's concept map. Reply with ONE JSON object "
+              '{"relation": "<one of the vocabulary>", "label": "<2-5 word label in the '
+              "map's own language and voice>\"} and nothing else.")
+    user = (f"Vocabulary: {', '.join(vocab)}\n"
+            f"Labels already on this canvas (style examples):\n{examples}\n\n"
+            f"FROM node:\n{body.from_text[:2000]}\n\nTO node:\n{body.to_text[:2000]}")
+    try:
+        client = LLMClient.from_config(cfg)
+        reply = client.complete(system, user, temperature=0.0, max_tokens=120).text
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"the generation model is unavailable: "
+                             f"{type(e).__name__}: {e}"}, status_code=502)
+    m = re.search(r"\{.*\}", reply or "", re.S)
+    try:
+        got = json.loads(m.group(0)) if m else {}
+    except ValueError:
+        got = {}
+    relation, label = str(got.get("relation") or ""), str(got.get("label") or "").strip()
+    if relation not in vocab or not label:
+        return JSONResponse({"ok": False, "reply": (reply or "")[:500],
+                             "error": "the model's reply was not a label from the vocabulary"},
+                            status_code=502)
+    return {"ok": True, "relation": relation, "label": label, "model": client.model}
+
+
 @app.get("/api/vault/search")
 def vault_search(q: str, limit: int = 60) -> dict:
     """Whole-vault filename search (books outside the tree root get their
@@ -2265,6 +2709,17 @@ EDITABLE_SETTINGS: dict[str, dict] = {
                                      "desc": "Add domain/content-filtered dense and sparse lanes "
                                              "to the fusion when the query names a domain or course "
                                              "(detection itself stays on)."},
+    "retrieval.decompose.enabled":  {"kind": "enum", "restart": ":8051",
+                                     "values": ["true", "false"],
+                                     "label": "Query decomposition",
+                                     "desc": "Split a multi-part question into one search per part "
+                                             "(one LLM call per question; LLM errors are shown)."},
+    "retrieval.max_per_file":       {"kind": "enum", "restart": ":8051",
+                                     "values": ["0", "1", "2", "3", "4"],
+                                     "label": "Max chunks per file",
+                                     "desc": "Cap how many chunks of one source file the final "
+                                             "list may hold, so a second source is not crowded "
+                                             "out (0 = no cap)."},
     "retrieval.metadata_boost":     {"kind": "enum", "restart": ":8051",
                                      "values": ["true", "false"],
                                      "label": "Metadata boost",
@@ -3262,6 +3717,673 @@ def ocr_warm() -> dict:
                     f"returning no text is expected and fine."}
 
 
+# ---- OCR Studio (the OCR tab) ----
+#
+# Hand-guided OCR of ONE document: draw regions, pick an engine and language
+# per region, clean the page up, OCR, correct, ingest. Design:
+# docs/superpowers/specs/2026-10-05-ocr-studio-design.md; code in src/ocr_studio/.
+#
+# Region OCR runs IN this process, synchronously: one Tesseract call or one
+# HTTP call to the sidecar / VLM per region, which the tab needs to answer
+# interactively. The ingest that WRITES chunks is a queued job like every other
+# lane (ocrstudio_ingest -> index_append), so it leaves a job record.
+#
+# Only the import route writes into the vault: whole files, into
+# ocr_studio.upload_dir, never overwriting. Page state (and each document's
+# working page set) lives in <data>/ocr_studio/, figure crops in
+# pdf.figures_dir, chunks in data/ocrstudio_*_chunks.jsonl.
+
+from fastapi import Form as _Form        # here, not in the header: the import route's field
+
+class StudioPageIn(BaseModel):
+    path: str
+    page: int = Field(ge=1)
+    data: dict[str, Any]
+
+
+class StudioMaskIn(BaseModel):
+    path: str
+    page: int = Field(ge=1)
+    png_b64: Optional[str] = None            # None clears the mask
+
+
+class StudioProposeIn(BaseModel):
+    path: str
+    page: int = Field(ge=1)
+    source: str = "layout"                   # layout | paddle
+    lang: str = ""
+
+
+class StudioOcrIn(BaseModel):
+    path: str
+    page: int = Field(ge=1)
+    region: dict[str, Any]
+
+
+class StudioIngestIn(BaseModel):
+    path: str
+    mode: str = "append"                     # append | replace
+    pages: str = "done"                      # done | all
+    dry_run: bool = False
+
+
+class StudioPageSetIn(BaseModel):
+    path: str
+    pages: str = ""                          # a typed range, "" = every page
+
+
+class StudioExportIn(BaseModel):
+    paths: list[str]
+    pages: str = "done"                      # done | all
+
+
+def _studio_opt(key: str, default):
+    return CFG.get(f"ocr_studio.{key}", default)
+
+
+def _studio_store():
+    from src.ocr_studio.pages import Store, store_root
+    return Store(store_root(CFG))
+
+
+def _studio_doc(path: str) -> tuple[Path, str]:
+    """(absolute file, vault-relative posix path) of a studio document.
+    Read-only use; anything outside the vault or not a PDF/image is refused."""
+    from src.ocr_studio.render import DOC_EXTS
+    vault = _vault_root().resolve()
+    rel = _vault_rel(path)
+    if not rel:
+        raise ValueError("no document path given")
+    p = (vault / rel).resolve()
+    if p == vault or not _vault_contains(vault, p):
+        raise ValueError("path escapes the vault")
+    if p.suffix.lower() not in DOC_EXTS:
+        raise ValueError(f"OCR Studio opens PDFs and images ({', '.join(sorted(DOC_EXTS))}), "
+                         f"not {p.suffix or 'this file'}")
+    if not p.is_file():
+        raise FileNotFoundError(f"no such file in the vault: {rel}")
+    return p, p.relative_to(vault).as_posix()
+
+
+def _refuse(e: Exception) -> JSONResponse:
+    return JSONResponse({"ok": False, "error": str(e)},
+                        status_code=404 if isinstance(e, FileNotFoundError) else 400)
+
+
+def _studio_upload_dir() -> tuple[Path, str]:
+    """(absolute folder, vault-relative posix) where OCR imports land. Refused
+    as the vault root, outside it, or inside the inbox: "Ingest inbox now"
+    scopes by path SUBSTRING and filename (PDFLoader include_path /
+    include_files) and archives what it ingests, so it would run a raw scan
+    through the PDF lane and move the file out from under its studio state."""
+    vault = _vault_root().resolve()
+    rel = _vault_rel(_studio_opt("upload_dir", "OCR Studio"))
+    if not rel or ".." in rel.split("/"):
+        raise ValueError(f"ocr_studio.upload_dir must be a vault-relative folder, got {rel!r}")
+    d = (vault / rel).resolve()
+    if d == vault or not _vault_contains(vault, d):
+        raise ValueError(f"ocr_studio.upload_dir escapes the vault: {rel!r}")
+    inbox_rel = _vault_rel(CFG.get("webui.inbox_dir")) or "Inbox"
+    if _vault_contains((vault / inbox_rel).resolve(), d):
+        raise ValueError(f"ocr_studio.upload_dir ({rel}) is inside the inbox ({inbox_rel}): "
+                         f"'Ingest inbox now' would ingest and archive these files. "
+                         f"Point it at a folder outside the inbox.")
+    return d, d.relative_to(vault).as_posix()
+
+
+def _studio_parse_set(spec: str, count: int) -> list[int] | None:
+    """A typed page range -> the working page set (1-based), None = every page.
+    A page past the end is an error, not quietly dropped."""
+    from src.ingestion.pdf_loader import parse_page_spec
+    pages = [i + 1 for i in parse_page_spec(spec)]      # ValueError on a malformed token
+    past = [n for n in pages if n > count]
+    if past:
+        raise ValueError(f"page {past[0]} is past the end: the document has {count} page(s)")
+    return None if not pages or len(pages) == count else pages
+
+
+def _studio_spec(pages) -> str | None:
+    from src.ingestion.ocr_scan import _ranges
+    return _ranges(list(pages)) if pages else None
+
+
+def _studio_check_page(store, rel: str, page: int) -> None:
+    """Work happens only on the document's working pages."""
+    working = store.page_set(rel)
+    if working and page not in working:
+        raise ValueError(f"page {page} is outside the working pages {_studio_spec(working)} "
+                         f"of {rel}; widen them first (working pages: edit)")
+
+
+def _indexed_as(rel: str) -> dict[str, dict]:
+    """Manifest entries for this vault file, whatever separators its lane wrote
+    (the PDF lane writes OS paths, the canvas lane posix ones)."""
+    want = rel.replace("\\", "/").lower()
+    return {sf: d for sf, d in build_manifest().items()
+            if sf.replace("\\", "/").lower() == want}
+
+
+def _studio_page_image(p: Path, rel: str, page: int, dpi: int, ops: list[dict]):
+    from PIL import Image
+    from src.ocr_studio import render
+    img, scale = render.render(p, page, dpi, _studio_opt("max_edge_px", 6000))
+    mask_file = _studio_store().mask_file(rel, page)
+    mask = Image.open(mask_file) if mask_file.is_file() else None
+    return render.apply_ops(img, ops, mask), scale
+
+
+@app.get("/api/ocrstudio/engines")
+def ocrstudio_engines() -> dict:
+    """Each engine's availability and the languages it actually has (what the
+    region language picker offers). Read fresh, so Settings edits apply."""
+    from src.ocr_studio import engines
+    return {"ok": True, "engines": engines.status(load_config()),
+            "proposal_sources": list(engines.PROPOSAL_SOURCES),
+            "defaults": {"preview_dpi": _studio_opt("preview_dpi", 110),
+                         "dpi": _studio_opt("dpi", 300), "pad_px": _studio_opt("pad_px", 12),
+                         "engine": _studio_opt("default_engine", "tesseract"),
+                         "lang": CFG.get("pdf.ocr_language", "eng")}}
+
+
+@app.get("/api/ocrstudio/files")
+def ocrstudio_files(q: str = "", limit: int = 60) -> dict:
+    """Documents to open: imports (ocr_studio.upload_dir), the inbox's
+    PDFs/images, documents with studio state, and (q >= 2 chars) a filename
+    search of the whole vault. Every row carries its studio state (modified or
+    not) and working page set. Never creates the inbox or the import folder."""
+    from src.ocr_studio.pages import doc_state
+    from src.ocr_studio.render import DOC_EXTS
+    vault = _vault_root()
+    if not vault.is_dir():
+        return JSONResponse({"ok": False, "error": f"the vault folder does not exist: {vault}"},
+                            status_code=404)
+    inbox = vault / (_vault_rel(CFG.get("webui.inbox_dir")) or "Inbox")
+    store = _studio_store()
+    row = lambda f: {"path": f.relative_to(vault).as_posix(), "name": f.name,
+                     "bytes": f.stat().st_size}
+    inbox_rows = ([row(f) for f in sorted(inbox.iterdir())
+                   if f.is_file() and f.suffix.lower() in DOC_EXTS] if inbox.is_dir() else [])
+    uploads, uploads_error, up_rel = [], None, _vault_rel(_studio_opt("upload_dir", "OCR Studio"))
+    try:
+        _, up_rel = _studio_upload_dir()
+        up = vault / up_rel
+        if up.is_dir():
+            uploads = [row(f) for f in sorted(up.iterdir()) if f.is_file()
+                       and not f.name.startswith(".") and f.suffix.lower() in DOC_EXTS]
+    except ValueError as e:
+        uploads_error = str(e)
+    shown = {r["path"] for r in uploads}
+    studied = [{"path": r, "name": Path(r).name} for r in store.docs()
+               if (vault / r).is_file() and r not in shown]
+    rows, truncated = [], False
+    ql = q.strip().lower()
+    if len(ql) >= 2:
+        limit = max(1, min(limit, 200))
+        skip = _TREE_SKIP - {"_ingested"}
+        for dirpath, dirnames, filenames in os.walk(vault):
+            dirnames[:] = [d for d in dirnames if d not in skip and not d.startswith(".")]
+            for name in filenames:
+                if ql in name.lower() and Path(name).suffix.lower() in DOC_EXTS:
+                    rows.append(row(Path(dirpath) / name))
+            if len(rows) >= limit:
+                rows, truncated = rows[:limit], True
+                break
+    for r in (*uploads, *inbox_rows, *studied, *rows):
+        r["state"] = doc_state(store, r["path"])
+        r["page_set"] = _studio_spec(store.page_set(r["path"]))
+    return {"ok": True, "uploads": uploads, "upload_dir": up_rel, "uploads_error": uploads_error,
+            "inbox": inbox_rows, "studied": studied, "rows": rows, "truncated": truncated}
+
+
+@app.get("/api/ocrstudio/doc")
+def ocrstudio_doc(path: str) -> dict:
+    """One document: page sizes, the scanner's per-page verdict (same threshold
+    as ingest), each page's studio progress, and whether it is indexed."""
+    import pymupdf
+    from src.ingestion.ocr_scan import scan_pdf
+    from src.ocr_studio.ingest import output_name
+    from src.ocr_studio.pages import doc_state, page_worked
+    try:
+        p, rel = _studio_doc(path)
+    except (ValueError, FileNotFoundError) as e:
+        return _refuse(e)
+    threshold = int(CFG.get("pdf.skip_scanned_threshold", 50))
+    with pymupdf.open(str(p)) as doc:
+        sizes = [[round(pg.rect.width, 2), round(pg.rect.height, 2)] for pg in doc]
+    if p.suffix.lower() == ".pdf":
+        verdicts = {r["page"]: r for r in scan_pdf(p, threshold=threshold)["pages"]}
+    else:
+        verdicts = {1: {"page": 1, "chars": 0, "has_images": True, "verdict": "needs_ocr"}}
+    store = _studio_store()
+    saved = store.pages(rel)
+    page_set = store.page_set(rel)
+    working = set(page_set or range(1, len(sizes) + 1))
+    masks = store.mask_pages(rel)
+    pages = []
+    for n, size in enumerate(sizes, 1):
+        v = verdicts.get(n, {})
+        s = saved.get(n) or {}
+        regs = s.get("regions") or []
+        pages.append({"page": n, "size": size, "verdict": v.get("verdict"),
+                      "chars": v.get("chars"), "regions": len(regs),
+                      "ocr_done": sum(r.get("status") == "done" for r in regs),
+                      "status": s.get("status") if s else None,
+                      "in_set": n in working, "worked": page_worked(s) or n in masks})
+    indexed = _indexed_as(rel)
+    return {"ok": True, "path": rel, "name": p.name,
+            "kind": "pdf" if p.suffix.lower() == ".pdf" else "image",
+            "page_count": len(sizes), "threshold": threshold, "pages": pages,
+            "page_set": _studio_spec(page_set), "state": doc_state(store, rel),
+            "indexed": [{"source_file": sf, "chunks": d["chunks"], "jsonls": d["jsonls"]}
+                        for sf, d in indexed.items()],
+            "output": "data/" + output_name(rel)}
+
+
+@app.get("/api/ocrstudio/page")
+def ocrstudio_page(path: str, page: int) -> dict:
+    from src.ocr_studio import render
+    from src.ocr_studio.pages import assemble_page
+    try:
+        p, rel = _studio_doc(path)
+        w, h = render.page_size(p, page)
+    except (ValueError, FileNotFoundError) as e:
+        return _refuse(e)
+    store = _studio_store()
+    data = store.load(rel, page)
+    return {"ok": True, "path": rel, "page_no": page, "size": [w, h], "page": data,
+            "has_mask": store.mask_file(rel, page).is_file(),
+            "markdown": assemble_page(data)}
+
+
+@app.get("/api/ocrstudio/page.png")
+def ocrstudio_page_png(path: str, page: int, dpi: int = 0, ops: str = "", raw: int = 0):
+    """The page as the engines will see it: rendered, then the page's clean-up
+    ops (or the `ops` JSON given here, to preview unsaved ones) and the heal
+    mask applied. raw=1 skips both."""
+    from src.ocr_studio import render
+    try:
+        p, rel = _studio_doc(path)
+        dpi = max(36, min(int(dpi or _studio_opt("preview_dpi", 110)), 300))
+        if raw:
+            op_list = []
+        elif ops:
+            op_list = render.validate_ops(json.loads(ops))
+        else:
+            op_list = render.validate_ops(_studio_store().load(rel, page).get("ops"))
+        img, _ = _studio_page_image(p, rel, page, dpi, op_list)
+    except (ValueError, FileNotFoundError) as e:
+        return _refuse(e)
+    return Response(content=render.to_png(img), media_type="image/png",
+                    headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/ocrstudio/page")
+def ocrstudio_page_save(body: StudioPageIn) -> dict:
+    """Save one page's regions, ops, status and OCR DPI. A deskew op with no
+    angle is measured now and stored as a number, so the page renders the same
+    way every time after."""
+    from src.ocr_studio import render
+    from src.ocr_studio.pages import assemble_page
+    try:
+        p, rel = _studio_doc(body.path)
+        _studio_check_page(_studio_store(), rel, body.page)
+        data = dict(body.data)
+        ops = render.validate_ops(data.get("ops"))
+        if any(o["op"] == "deskew" and o.get("angle") is None for o in ops):
+            img, _ = render.render(p, body.page, _studio_opt("preview_dpi", 110))
+            ops = render.resolve_deskew(img, ops)
+        data["ops"] = ops
+        saved = _studio_store().save(rel, body.page, data)
+    except (ValueError, FileNotFoundError) as e:
+        return _refuse(e)
+    return {"ok": True, "page": saved, "markdown": assemble_page(saved)}
+
+
+@app.post("/api/ocrstudio/mask")
+def ocrstudio_mask(body: StudioMaskIn) -> dict:
+    """Store (or clear, png_b64=null) the healing-brush mask. White = heal."""
+    import base64
+    import io
+    from PIL import Image
+    try:
+        _, rel = _studio_doc(body.path)
+        _studio_check_page(_studio_store(), rel, body.page)
+        png = None
+        if body.png_b64:
+            b64 = body.png_b64.split(",", 1)[1] if body.png_b64.startswith("data:") else body.png_b64
+            png = base64.b64decode(b64, validate=True)
+            if len(png) > 20 * 1024 * 1024:
+                raise ValueError("mask is larger than 20 MB")
+            Image.open(io.BytesIO(png)).verify()
+        _studio_store().save_mask(rel, body.page, png)
+    except (ValueError, FileNotFoundError) as e:
+        return _refuse(e)
+    except Exception as e:                       # PIL: not an image
+        return _refuse(ValueError(f"mask is not a PNG: {type(e).__name__}"))
+    return {"ok": True, "has_mask": png is not None}
+
+
+@app.get("/api/ocrstudio/mask.png")
+def ocrstudio_mask_png(path: str, page: int):
+    try:
+        _, rel = _studio_doc(path)
+    except (ValueError, FileNotFoundError) as e:
+        return _refuse(e)
+    f = _studio_store().mask_file(rel, page)
+    if not f.is_file():
+        return JSONResponse({"ok": False, "error": "no mask on this page"}, status_code=404)
+    return FileResponse(f, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/ocrstudio/propose")
+def ocrstudio_propose(body: StudioProposeIn) -> dict:
+    """Layout proposals for one page as plain boxes; nothing is saved. They are
+    found on the raw page and moved by the SAVED deskew, so they line up with
+    the cleaned page the regions are drawn and cropped on."""
+    import pymupdf
+    from src.ocr_studio import engines, render
+    try:
+        p, rel = _studio_doc(body.path)
+        with pymupdf.open(str(p)) as doc:
+            if body.page > doc.page_count:
+                raise ValueError(f"page {body.page} is out of range 1..{doc.page_count}")
+            chars = len((doc[body.page - 1].get_text("text") or "").strip())
+            size = (doc[body.page - 1].rect.width, doc[body.page - 1].rect.height)
+        scanned = chars < int(CFG.get("pdf.skip_scanned_threshold", 50))
+        regions = engines.propose(load_config(), p, body.page, body.source, scanned,
+                                  body.lang or CFG.get("pdf.ocr_language", "eng"))
+        ops = render.validate_ops(_studio_store().load(rel, body.page).get("ops"))
+        for r in regions:
+            r["bbox"] = render.deskew_bbox(r["bbox"], ops, size)
+    except (ValueError, FileNotFoundError) as e:
+        return _refuse(e)
+    except engines.EngineError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
+    return {"ok": True, "source": body.source, "scanned": scanned, "regions": regions}
+
+
+@app.post("/api/ocrstudio/ocr")
+def ocrstudio_ocr(body: StudioOcrIn) -> dict:
+    """OCR one region with ITS engine and language, against the page as its
+    saved ops leave it, and store the result on the saved page. An engine
+    failure is the region's status ("error" + the reason), never a quiet switch
+    to another engine. Figure regions are saved as PNG, not OCR'd."""
+    from src.ocr_studio import engines, render
+    from src.ocr_studio.pages import assemble_page, doc_key, figures_root, validate_region
+    try:
+        p, rel = _studio_doc(body.path)
+        _studio_check_page(_studio_store(), rel, body.page)
+        region = validate_region(body.region)
+        if region["type"] == "ignore":
+            raise ValueError("ignore regions are left out, not OCR'd")
+        if region["type"] != "figure" and not region["engine"]:
+            raise ValueError("pick an engine for this region first")
+        store = _studio_store()
+        saved = store.load(rel, body.page)
+        dpi = int(saved.get("dpi") or _studio_opt("dpi", 300))
+        img, scale = _studio_page_image(p, rel, body.page, dpi,
+                                        render.validate_ops(saved.get("ops")))
+        crop, (cx, cy) = render.crop(img, scale, region["bbox"], int(_studio_opt("pad_px", 12)))
+    except (ValueError, FileNotFoundError) as e:
+        return _refuse(e)
+
+    if region["type"] == "figure":
+        out = figures_root(CFG) / doc_key(rel) / f"p{body.page:04d}_r{region['id']}.png"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        crop.save(out, format="PNG")
+        region.update(figure=str(out), status="done", format="image", error=None,
+                      engine_used=None)
+    else:
+        try:
+            res = engines.run(load_config(), region["engine"], render.to_png(crop), region["lang"])
+        except engines.EngineError as e:
+            region.update(status="error", error=str(e))
+        else:
+            fmt = "latex" if region["type"] == "formula" and res["format"] == "markdown" \
+                else res["format"]
+            region.update(
+                text=res["text"], raw=res["text"], format=fmt, status="done", error=None,
+                confidence=res["confidence"], engine_used=region["engine"], ms=res["ms"],
+                lines=[{"text": ln["text"], "conf": ln["conf"],
+                        "bbox": [round((ln["bbox"][0] + cx) / scale, 2),
+                                 round((ln["bbox"][1] + cy) / scale, 2),
+                                 round((ln["bbox"][2] + cx) / scale, 2),
+                                 round((ln["bbox"][3] + cy) / scale, 2)]}
+                       for ln in res["lines"]])
+    regions = [r for r in saved.get("regions") or [] if r.get("id") != region["id"]]
+    saved["regions"] = regions + [region]
+    try:
+        saved = store.save(rel, body.page, saved)
+    except ValueError as e:
+        return _refuse(e)
+    return {"ok": True, "region": region, "markdown": assemble_page(saved)}
+
+
+@app.post("/api/ocrstudio/ingest")
+def ocrstudio_ingest(body: StudioIngestIn) -> dict:
+    """Assembled pages -> chunks -> data/ocrstudio_<doc>_chunks.jsonl -> index.
+
+    append   only for a document with NO chunks in the index yet. Corrected
+             text gets new doc_ids (they hash the text), so appending over an
+             indexed document would leave its old chunks beside the new ones.
+    replace  first removes the document's chunks from Chroma AND from every
+             JSONL that holds them — the /api/documents/delete path, because
+             deleting from Chroma alone lets the next sparse rebuild resurrect
+             them — then queues the same ingest.
+    dry_run  reports what would be written and what is indexed now; nothing
+             is queued or removed.
+    """
+    from src.ocr_studio.ingest import PAGE_SETS, build_chunks, output_name
+    if body.mode not in ("append", "replace"):
+        return _refuse(ValueError("mode must be append|replace"))
+    if body.pages not in PAGE_SETS:
+        return _refuse(ValueError(f"pages must be one of {PAGE_SETS}"))
+    try:
+        _, rel = _studio_doc(body.path)
+        chunks, info = build_chunks(CFG, _vault_root(), rel, body.pages, _studio_store())
+    except (ValueError, FileNotFoundError) as e:
+        return _refuse(e)
+    out = "data/" + output_name(rel)
+    indexed = _indexed_as(rel)
+    existing = [{"source_file": sf, "chunks": d["chunks"], "jsonls": d["jsonls"]}
+                for sf, d in indexed.items()]
+    if body.dry_run:
+        return {"ok": True, "dry_run": True, "info": info, "indexed": existing, "output": out}
+    if not chunks:
+        return _refuse(ValueError(
+            f"nothing to ingest: {info['pages_selected']} page(s) selected ({body.pages}), "
+            f"{info['pages_with_text']} with text, 0 chunks (pages shorter than "
+            f"pdf.min_chunk_size are dropped, as in the PDF lane)"))
+    if indexed and body.mode == "append":
+        return JSONResponse(
+            {"ok": False, "indexed": existing,
+             "error": f"{rel} already has {sum(d['chunks'] for d in indexed.values())} "
+                      f"chunk(s) in the index ({', '.join(sorted({j for d in indexed.values() for j in d['jsonls']}))}). "
+                      f"Appending would keep them beside the corrected ones; use replace."},
+            status_code=409)
+    replaced = None
+    if indexed:
+        jsonl_names = {j for d in indexed.values() for j in d["jsonls"]}
+        try:
+            chroma_deleted = _chroma_delete_by_source(set(indexed))
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": f"ChromaDB delete failed, nothing "
+                                 f"changed: {type(e).__name__}: {e}"}, status_code=500)
+        replaced = {"chroma_deleted": chroma_deleted,
+                    "jsonl_removed": _jsonl_remove_sources(set(indexed), jsonl_names)}
+        build_manifest(force=False)
+    try:
+        j1 = enqueue("ocrstudio_ingest", {"doc": rel, "output": out, "pages": body.pages})
+    except ValueError as e:
+        return _refuse(e)
+    j2 = enqueue("index_append", {"file": out})
+    return {"ok": True, "info": info, "output": out, "replaced": replaced,
+            "jobs": [j1.public(), j2.public()],
+            "note": "index --append rebuilds the sparse index itself; restart serve_api "
+                    "(:8051) once the append job finishes."}
+
+
+@app.get("/api/ocrstudio/quality")
+def ocrstudio_quality() -> dict:
+    """Character error rate per engine: each region's raw engine output against
+    the text kept for it, over pages marked done (the hand-checked set)."""
+    from src.ocr_studio.pages import quality
+    return {"ok": True, **quality(_studio_store())}
+
+
+@app.post("/api/ocrstudio/upload")
+def ocrstudio_upload(file: UploadFile, pages: str = _Form("")):
+    """ONE PDF or image INTO ocr_studio.upload_dir, whole and byte-for-byte.
+    `pages` (a typed range) becomes its working page set, so every page keeps
+    its real number. Never overwrites: a taken name, or one with studio state
+    left from a deleted file, gets " (2)". Plain def, so the copy and the
+    PyMuPDF check run in the threadpool, not on the event loop."""
+    import pymupdf
+    from src.ocr_studio.render import DOC_EXTS
+    name = re.sub(r"[^\w.\- ()\[\]]", "_", Path(file.filename or "").name).strip()
+    ext = Path(name).suffix.lower()
+    if ext not in DOC_EXTS:
+        return _refuse(ValueError(f"OCR Studio imports PDFs and images ({', '.join(sorted(DOC_EXTS))}), "
+                                  f"not {Path(name).suffix or repr(name)}"))
+    try:
+        up, up_rel = _studio_upload_dir()
+    except ValueError as e:
+        return _refuse(e)
+    cap_mb = _studio_opt("upload_max_mb", 500)
+    created = not up.exists()
+    up.mkdir(parents=True, exist_ok=True)
+    tmp = up / f".{uuid.uuid4().hex[:8]}.part{ext}"     # dot = hidden; ext = PyMuPDF's type hint
+    try:
+        size = 0
+        with open(tmp, "wb") as out:
+            while blob := file.file.read(1 << 20):
+                size += len(blob)
+                if size > float(cap_mb) * 1024 * 1024:
+                    return JSONResponse({"ok": False, "error": f"{name} is larger than "
+                                         f"ocr_studio.upload_max_mb ({cap_mb} MB)"}, status_code=413)
+                out.write(blob)
+        try:
+            with pymupdf.open(str(tmp)) as doc:
+                locked, count = doc.needs_pass, doc.page_count
+        except Exception as e:                   # PyMuPDF: not a document it can read
+            raise ValueError(f"{name} is not a readable PDF or image ({type(e).__name__}: {e})")
+        if locked:
+            raise ValueError(f"{name} is password-protected; remove the password first")
+        if not count:
+            raise ValueError(f"{name} has no pages")
+        page_set = _studio_parse_set(pages, count)
+        store = _studio_store()
+        dest = up / name
+        for i in itertools.count(2):
+            rel = f"{up_rel}/{dest.name}"
+            if not dest.exists() and not store.doc_dir(rel).exists():
+                break
+            dest = up / f"{Path(name).stem} ({i}){ext}"
+        store.set_page_set(rel, page_set)
+        os.replace(tmp, dest)
+    except ValueError as e:
+        return _refuse(e)
+    finally:
+        tmp.unlink(missing_ok=True)
+        if created and up.is_dir() and not any(up.iterdir()):
+            up.rmdir()                           # a failed first import leaves no folder
+    return {"ok": True, "path": rel, "name": dest.name, "page_count": count,
+            "page_set": _studio_spec(page_set), "bytes": size, "renamed": dest.name != name}
+
+
+@app.post("/api/ocrstudio/pageset")
+def ocrstudio_pageset(body: StudioPageSetIn) -> dict:
+    """Set (pages = a typed range) or clear (pages = "") a document's working
+    pages. Refused when pages with saved work would fall outside the new set:
+    that work would drop out of the page strip, the export and the ingest."""
+    from src.ocr_studio import render
+    from src.ocr_studio.pages import page_worked
+    try:
+        p, rel = _studio_doc(body.path)
+        count = render.page_count(p)
+        new = _studio_parse_set(body.pages, count)
+    except (ValueError, FileNotFoundError) as e:
+        return _refuse(e)
+    store = _studio_store()
+    if new:
+        worked = {n for n, pg in store.pages(rel).items() if page_worked(pg)} | store.mask_pages(rel)
+        outside = sorted(worked - set(new))
+        if outside:
+            return JSONResponse({"ok": False, "worked_outside": outside, "error":
+                                 f"page(s) {_studio_spec(outside)} of {rel} have saved work and "
+                                 f"would fall outside {_studio_spec(new)}: include them, or clear "
+                                 f"their regions, clean-up and mask first"}, status_code=409)
+    store.set_page_set(rel, new)
+    return {"ok": True, "path": rel, "page_count": count, "page_set": _studio_spec(new),
+            "pages_in_set": len(new) if new else count}
+
+
+@app.post("/api/ocrstudio/export")
+def ocrstudio_export(body: StudioExportIn):
+    """A zip of the studio's text, one <stem>.md per document: its working
+    pages ('done' or every saved page) in page order, each after a
+    `<!-- page N -->` marker carrying the REAL page number, with its figure
+    crops in <stem>_figures/ linked relatively. Reads studio state only (never
+    the PDF's own text layer) and writes nothing. A document with nothing to
+    export, or a figure crop gone missing, refuses the whole export by name."""
+    import io
+    import zipfile
+    from src.ocr_studio.ingest import PAGE_SETS
+    from src.ocr_studio.pages import assemble_page
+    if body.pages not in PAGE_SETS:
+        return _refuse(ValueError(f"pages must be one of {PAGE_SETS}"))
+    if not body.paths:
+        return _refuse(ValueError("no documents to export"))
+    store = _studio_store()
+    docs, used, empty = [], set(), []
+    try:
+        for path in body.paths:
+            _, rel = _studio_doc(path)
+            working = store.page_set(rel)
+            stem = base = Path(rel).stem
+            for i in itertools.count(2):         # two "notes.pdf" in different folders
+                if base.lower() not in used:
+                    break
+                base = f"{stem} ({i})"
+            used.add(base.lower())
+            figs: dict[str, str] = {}            # zip name -> figure crop on disk
+
+            def link(f, base=base, figs=figs):
+                arc = f"{base}_figures/{Path(f).name}"
+                figs[arc] = f
+                return arc
+            parts = []
+            for n, pg in store.pages(rel).items():
+                if (working and n not in working) or (body.pages == "done" and pg.get("status") != "done"):
+                    continue
+                for r in pg.get("regions") or []:
+                    if r.get("type") == "figure" and r.get("figure") and not Path(r["figure"]).is_file():
+                        raise ValueError(f"{rel} page {n}: the figure crop of region {r['id']} is "
+                                         f"missing ({r['figure']}); OCR that region again")
+                text = assemble_page(pg, link).strip()
+                if text:
+                    parts.append(f"<!-- page {n} -->\n\n{text}")
+            if not parts:
+                empty.append(rel)
+            head = (f"<!-- source: {rel} · pages: {body.pages}"
+                    + (f" · working pages: {_studio_spec(working)}" if working else "") + " -->")
+            docs.append((base, head, parts, figs))
+    except (ValueError, FileNotFoundError) as e:
+        return _refuse(e)
+    if empty:
+        return _refuse(ValueError(
+            f"nothing to export from {', '.join(empty)}: no text on its "
+            f"{'pages marked done' if body.pages == 'done' else 'saved pages'} (working pages only)"))
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for base, head, parts, figs in docs:
+            z.writestr(f"{base}.md", head + "\n\n" + "\n\n".join(parts) + "\n")
+            for arc, f in figs.items():
+                z.write(f, arc)
+    return Response(content=buf.getvalue(), media_type="application/zip", headers={
+        "Content-Disposition": f'attachment; filename="ocr_export_{time.strftime("%Y%m%d_%H%M%S")}.zip"'})
+
+
 # ---- folder browser (Settings path pickers) ----
 
 def _browse_roots(windows: bool | None = None) -> list[dict]:
@@ -3912,6 +5034,8 @@ PIPELINE_STATE_KEYS: tuple[str, ...] = (
     "retrieval.dense_top_k", "retrieval.sparse_top_k",
     "retrieval.code_file_types",
     "retrieval.scope_lanes", "retrieval.domain_signals", "retrieval.content_signals",
+    "retrieval.max_per_file",
+    "retrieval.decompose.enabled", "retrieval.decompose.max_subqueries",
     "retrieval.hype.enabled", "retrieval.hype.collection", "retrieval.hype.top_k",
     "retrieval.omnisearch.enabled", "retrieval.omnisearch.base_url",
     "retrieval.omnisearch.top_k",
@@ -4057,17 +5181,154 @@ def api_schema() -> dict:
                          "min_chunk_size": "int?", "max_chunk_size": "int?",
                          "chunking": "heading|fixed|document|none",
                          "context_depth": "0|1|2"}},
+            "GET /api/canvas/files": {
+                "permission": "read",
+                "purpose": "every .canvas in the vault (cached vault walk; "
+                           "refresh=1 rescans) — the Graph tab's file list"},
+            "GET /api/canvas/file": {
+                "permission": "read",
+                "purpose": "one canvas parsed, plus the sha256 of its bytes that "
+                           "a save must send back, and its indexed chunks",
+                "query": {"path": "vault-relative .canvas path"}},
+            "POST /api/canvas/file": {
+                "permission": "mutating",
+                "purpose": "WRITES INTO THE VAULT: save edits to one existing "
+                           ".canvas. Refused (409) if the file changed since it "
+                           "was loaded; merged onto the file on disk so only "
+                           "node text/position, edge labels and added/deleted "
+                           "text nodes and edges change; the old bytes are "
+                           "backed up outside the vault (canvas.backup_dir) "
+                           "first; written atomically",
+                "body": {"path": "vault-relative .canvas path",
+                         "base_sha256": "sha256 from GET /api/canvas/file",
+                         "data": "{nodes, edges} as edited"}},
+            "POST /api/canvas/reindex": {
+                "permission": "mutating",
+                "purpose": "re-index ONE canvas: removes its chunks from Chroma "
+                           "and the JSONLs (same ids would otherwise keep the "
+                           "old text in the sparse union), then queues a scoped "
+                           "ingest_canvas into its own data/canvas_edit_*"
+                           "_chunks.jsonl + index_append",
+                "body": {"path": "vault-relative .canvas path"}},
+            "POST /api/canvas/suggest_label": {
+                "permission": "mutating",
+                "purpose": "ask the generation model (may bill) for an edge "
+                           "label from canvas.augment.vocabulary; writes "
+                           "nothing — the label only lands in the file on Save",
+                "body": {"path": "str", "from_text": "str", "to_text": "str",
+                         "examples": "list[str] (labels already on the canvas)"}},
+            "GET /api/ocrstudio/engines": {
+                "permission": "read",
+                "purpose": "OCR Studio: each engine's availability and the "
+                           "languages it actually has, plus the tab defaults"},
+            "GET /api/ocrstudio/files": {
+                "permission": "read",
+                "purpose": "OCR Studio documents: imports (ocr_studio.upload_dir), "
+                           "inbox PDFs/images, documents with studio state, and a "
+                           "vault filename search; every row carries its state "
+                           "(modified or not) and working page set",
+                "query": {"q": "filename substring (>=2 chars)?"}},
+            "GET /api/ocrstudio/doc": {
+                "permission": "read",
+                "purpose": "one document: page sizes, the scanner's per-page "
+                           "verdict, per-page studio progress, its working page "
+                           "set (in_set per page), indexed chunks",
+                "query": {"path": "vault-relative PDF or image"}},
+            "GET /api/ocrstudio/page": {
+                "permission": "read",
+                "purpose": "one page's regions, ops, status and assembled markdown",
+                "query": {"path": "str", "page": "1-based int"}},
+            "GET /api/ocrstudio/page.png": {
+                "permission": "read",
+                "purpose": "the page rendered with its clean-up ops and heal "
+                           "mask (or `ops` JSON to preview unsaved ones; raw=1 "
+                           "for none)",
+                "query": {"path": "str", "page": "int", "dpi": "int?",
+                          "ops": "json?", "raw": "0|1"}},
+            "POST /api/ocrstudio/page": {
+                "permission": "mutating",
+                "purpose": "save one page's regions/ops/status/dpi (studio "
+                           "state outside the vault)",
+                "body": {"path": "str", "page": "int",
+                         "data": "{regions, ops, status, dpi}"}},
+            "POST /api/ocrstudio/mask": {
+                "permission": "mutating",
+                "purpose": "store or clear (png_b64=null) a page's healing mask",
+                "body": {"path": "str", "page": "int", "png_b64": "str|null"}},
+            "GET /api/ocrstudio/mask.png": {
+                "permission": "read", "purpose": "a page's stored healing mask"},
+            "POST /api/ocrstudio/propose": {
+                "permission": "read",
+                "purpose": "layout proposals for a page (pymupdf-layout, or "
+                           "the Paddle sidecar's line boxes); saves nothing",
+                "body": {"path": "str", "page": "int", "source": "layout|paddle",
+                         "lang": "str?"}},
+            "POST /api/ocrstudio/ocr": {
+                "permission": "mutating",
+                "purpose": "OCR one region with its own engine + language (no "
+                           "fallback: a failing engine is the region's error) and "
+                           "store the result; figure regions are saved as PNG "
+                           "under pdf.figures_dir. May call the sidecar/VLM",
+                "body": {"path": "str", "page": "int", "region": "region object"}},
+            "POST /api/ocrstudio/ingest": {
+                "permission": "mutating",
+                "purpose": "chunk the document's done pages into its own "
+                           "data/ocrstudio_*_chunks.jsonl and queue "
+                           "ocrstudio_ingest + index_append. append is refused "
+                           "for an already-indexed document; replace first "
+                           "REMOVES the document's chunks from Chroma and every "
+                           "JSONL (confirm with the operator); dry_run reports only",
+                "body": {"path": "str", "mode": "append|replace",
+                         "pages": "done|all", "dry_run": "bool"}},
+            "GET /api/ocrstudio/quality": {
+                "permission": "read",
+                "purpose": "character error rate per engine over the regions of "
+                           "pages marked done (raw engine output vs kept text)"},
+            "POST /api/ocrstudio/upload": {
+                "permission": "mutating",
+                "purpose": "import ONE PDF/image INTO the vault's "
+                           "ocr_studio.upload_dir, whole (multipart 'file'); "
+                           "'pages' (typed range) becomes its working page set, "
+                           "pages keep their real numbers. Never overwrites, never "
+                           "indexes; refused over ocr_studio.upload_max_mb (413)",
+                "body": {"file": "multipart file", "pages": "range e.g. 12-18,30 (\"\" = all)"}},
+            "POST /api/ocrstudio/pageset": {
+                "permission": "mutating",
+                "purpose": "set or clear a document's working pages (studio "
+                           "state outside the vault); 409 when saved work would "
+                           "fall outside. Page saves, masks and OCR outside the "
+                           "set are refused; export and ingest use only the set",
+                "body": {"path": "str", "pages": "range (\"\" = all pages)"}},
+            "POST /api/ocrstudio/export": {
+                "permission": "read",
+                "purpose": "zip of the studio's markdown per document (real page "
+                           "numbers as <!-- page N --> markers) + figure crops; "
+                           "working pages only, writes nothing",
+                "body": {"paths": "list[str]", "pages": "done|all"}},
             "GET /api/inbox": {
                 "permission": "read",
                 "purpose": "files currently staged in the upload inbox"},
             "GET /api/jobs": {"permission": "read",
                               "purpose": "all jobs newest-first with status"},
             "GET /api/jobs/{id}": {"permission": "read",
-                                   "purpose": "one job's full record"},
+                                   "purpose": "one job's full record, plus elapsed_s, "
+                                              "queue_position (1 = next), progress "
+                                              "({done, total, line} of the CURRENT "
+                                              "phase, read from the log), typical "
+                                              "({median_s, runs} of this kind's past "
+                                              "successful runs) and eta_s (null with "
+                                              "no history or once past the usual time)"},
             "GET /api/jobs/{id}/log": {
                 "permission": "read",
-                "purpose": "tail a job's log from byte offset",
-                "query": {"offset": "int (resume point from the last poll)"}},
+                "purpose": "a job's log: bytes from offset, or the last `tail` "
+                           "lines; with `wait` it long-polls until the log grows "
+                           "or the status changes. Carries the job record (with "
+                           "progress and ETA) as `job`",
+                "query": {"offset": "int (resume point from the last read)",
+                          "tail": "int 0-500 (last N lines as a terminal shows "
+                                  "them; returns offset = log size to resume from)",
+                          "wait": "float 0-60 seconds (long poll; returns at once "
+                                  "for a job that is no longer queued or running)"}},
             "POST /api/upload": {
                 "permission": "mutating",
                 "purpose": "save PDF(s) INTO the vault inbox (multipart 'files'). "
@@ -4162,6 +5423,13 @@ def api_schema() -> dict:
                 "purpose": "move _converted .md files into the inbox root so "
                            "the ingest lanes can pick them up",
                 "body": {"names": "list[str]"}},
+            "GET /api/releases": {
+                "permission": "read",
+                "purpose": "the version on disk, each part of the install "
+                           "(console, query API, installed skills, packaged "
+                           "bundle) as current | behind | missing | not "
+                           "running | invalid with what to do, and the "
+                           "release notes from CHANGELOG.md"},
             "GET /api/jobs/provenance": {
                 "permission": "read",
                 "purpose": "which command produced each chunk file, and which "
@@ -4373,6 +5641,14 @@ def api_schema() -> dict:
                 "params": {"files": "list[str] (inbox filenames)",
                            "ocr_pages": '"1-4,9"? (Tesseract, PDFs only)'},
                 "note": "markitdown any-file -> .md into <inbox>/_converted"},
+            "ocrstudio_ingest": {
+                "permission": "mutating",
+                "params": {"doc": "vault-relative PDF/image path",
+                           "output": "data/ocrstudio_*_chunks.jsonl (only)",
+                           "pages": "done|all"},
+                "note": "OCR Studio pages -> PDF-lane chunks in the document's "
+                        "own file. Queue it through POST /api/ocrstudio/ingest, "
+                        "which owns the append/replace guards"},
             "index_append": {"permission": "mutating",
                              "params": {"file": "data/*.jsonl"},
                              "note": "idempotent upsert; also rebuilds sparse"},
@@ -4386,6 +5662,13 @@ def api_schema() -> dict:
                                       "or an embedding-model change only"},
             "rebuild_bm25": {"permission": "mutating", "params": {},
                              "note": "sync sparse after ingest/delete/retag"},
+            "build_tantivy": {"permission": "mutating", "params": {},
+                              "note": "EXPERIMENTAL: build the tantivy index beside "
+                                      "the BM25 pickle (needs the optional tantivy "
+                                      "package). Run before setting "
+                                      "retrieval.sparse_backend: tantivy, then restart "
+                                      ":8051; while that is set, rebuild_bm25 and "
+                                      "appends rebuild it too"},
             "build_hype": {"permission": "mutating",
                            "params": {"include_path": "substr",
                                       "file_types": "csv", "questions": "int",

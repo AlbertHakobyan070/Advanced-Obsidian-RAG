@@ -1,0 +1,113 @@
+# PaddleOCR sidecar (ocr-sidecar/), CPU. The config reaches it at
+# http://paddleocr:8103 (pdf.paddle_ocr.base_url, set by make_docker_config.py).
+#
+# It is an ingest-day tool: `kubectl -n noetrix scale deploy/paddleocr --replicas=0`
+# when the scanned material is indexed hands the memory back.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: paddleocr
+  labels:
+    app.kubernetes.io/name: paddleocr
+    app.kubernetes.io/component: ocr
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: paddleocr
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: paddleocr
+        app.kubernetes.io/component: ocr
+    spec:
+      enableServiceLinks: false      # see base/rag.yaml
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: paddleocr
+          image: noetrix-paddleocr
+          ports:
+            - name: http
+              containerPort: 8103
+          env:
+            - name: PADDLE_OCR_LANG
+              value: en
+          volumeMounts:
+            - name: cache
+              mountPath: /paddle_cache   # recognition weights, downloaded once
+          # Memory is an ESTIMATE until measured: the models are ~200 MB on disk and
+          # the engine holds detection + recognition + angle classifier in RAM.
+          # Re-measure with `kubectl top pod` under a real scanned PDF.
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1Gi
+            limits:
+              cpu: "4"
+              memory: 3Gi
+          # /health answers 503 when the engine cannot import, so these probes tell
+          # "up but unable to OCR" apart from healthy -- the failure that once passed
+          # for healthy because /health never imported paddle.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 4
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: cache
+          persistentVolumeClaim:
+            claimName: paddle-cache
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: paddle-cache
+  labels:
+    app.kubernetes.io/name: paddleocr
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: paddleocr
+  labels:
+    app.kubernetes.io/name: paddleocr
+    app.kubernetes.io/component: ocr
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: paddleocr
+  ports:
+    - name: http
+      port: 8103
+      targetPort: http

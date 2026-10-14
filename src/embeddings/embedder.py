@@ -185,12 +185,14 @@ def iter_jsonl_records(path: Path, *, strict: bool = False) -> Iterator[dict]:
 
 
 def build_sparse_union(chunks_file: Path, bm25_index: Path,
-                       extra: Path | None = None) -> int:
+                       extra: Path | None = None, tantivy: bool = False) -> int:
     """
     THE sparse rebuild (used by both `index --append` and rebuild_bm25.py so
     the two can't diverge again): BM25 over chunks.jsonl + every
     data/*_chunks.jsonl (+ the just-appended file), deduped by doc_id,
-    written as the same pickle payload shape the retriever loads.
+    written as the same pickle payload shape the retriever loads. With
+    `tantivy` (retrieval.sparse_backend: tantivy) the tantivy index beside the
+    pickle is rebuilt from the same rows, so the two never disagree.
 
     Memory: streams each file record-by-record and keeps only the payload
     lists (ids/texts/metas) — no whole-file strings, no Chunk objects. The
@@ -237,6 +239,10 @@ def build_sparse_union(chunks_file: Path, bm25_index: Path,
         pickle.dump(payload, f)
     write_sparse_meta(bm25_index, len(ids))
     log.info("Sparse index rebuilt over union: %d docs", len(ids))
+    if tantivy:
+        from src.retrieval import sparse_tantivy
+        sparse_tantivy.build(bm25_index, ids, texts)
+        log.info("Tantivy index rebuilt beside it: %s", sparse_tantivy.index_dir(bm25_index))
     return len(ids)
 
 
@@ -340,7 +346,10 @@ class Embedder:
         batch_size: int = 100,
         spec: EmbeddingSpec | None = None,
         hype_collection_name: str | None = None,
+        sparse_backend: str = "bm25s",
     ):
+        # With "tantivy", every pickle this writes gets its tantivy index too.
+        self.sparse_backend = sparse_backend
         self.backend = backend
         self.chunks_file = chunks_file
         self.chroma_dir = chroma_dir
@@ -397,6 +406,7 @@ class Embedder:
             batch_size=cfg.get("embedding.batch_size", 100),
             spec=spec,
             hype_collection_name=cfg.get("retrieval.hype.collection", "hype_questions"),
+            sparse_backend=cfg.get("retrieval.sparse_backend", "bm25s"),
         )
 
     # ---- chunk loading ----
@@ -592,7 +602,8 @@ class Embedder:
     def _rebuild_sparse_from_union(self, extra_file: Path) -> None:
         """Delegates to build_sparse_union (module-level, streaming) — see it
         for the memory story. Kept as a method for call-site compatibility."""
-        build_sparse_union(self.chunks_file, self.bm25_index, extra=extra_file)
+        build_sparse_union(self.chunks_file, self.bm25_index, extra=extra_file,
+                           tantivy=self.sparse_backend == "tantivy")
 
     def _build_dense(self, chunks: list[Chunk]) -> None:
         self.chroma_dir.mkdir(parents=True, exist_ok=True)
@@ -634,6 +645,9 @@ class Embedder:
         with open(self.bm25_index, "wb") as f:
             pickle.dump(payload, f)
         log.info("Sparse index built: %d docs -> %s", len(chunks), self.bm25_index.name)
+        if self.sparse_backend == "tantivy":
+            from src.retrieval import sparse_tantivy
+            sparse_tantivy.build(self.bm25_index, payload["ids"], payload["documents"])
 
     @staticmethod
     def _clean_meta(meta: dict[str, Any]) -> dict[str, Any]:

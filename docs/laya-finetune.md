@@ -87,6 +87,25 @@ Ordered by cost. Stop at the first kill.
    trained to imitate it has no reason to either: **stop before running anything else.** (The
    RAG's own config notes that on this corpus bge-reranker-v2-m3 "reordered ~half the top-5
    without a measured quality win", at about 22 times MiniLM's CPU cost.)
+
+   **Result (2026-10-13): the teacher passes.** Run `20261013-214201-ef6e125` (dev split, the
+   bge-small `obsidian_vault` collection, HyDE off, config defaults otherwise; only the reranker
+   differs), configs `rr-minilm` and `rr-bge-m3-http` in `eval/configs.yaml`. The teacher was
+   served fp32 on a GTX 1070 Ti by `embed-sidecar/server.py` with `SIDECAR_TASK=rerank` (its
+   README has the launch lines). Paired over the 179 answerable dev questions, bge-reranker-v2-m3
+   minus MiniLM, 95% bootstrap CI (the bench's `paired_diff_ci`, seed 0):
+
+   | metric | MiniLM | bge-reranker-v2-m3 | paired delta [95% CI] |
+   |---|---|---|---|
+   | nDCG@10 | 0.758 | 0.804 | **+0.046 [+0.017, +0.076]** |
+   | MRR@10 | 0.751 | 0.801 | **+0.049 [+0.010, +0.089]** |
+   | hit@5 | 0.844 | 0.883 | +0.039 [+0.000, +0.084], McNemar p 0.118 |
+
+   The nDCG@10 interval excludes zero, so by spec section 11 the teacher beats the shipped
+   reranker on dev: step 1 is worth running, and the teacher is itself a **candidate default
+   reranker** (GPU only: on CPU it costs about 22 times MiniLM). Three caveats: 158 of the 179
+   questions were drafted by a model (then verified), and on the 21 hand-written ones the gain is
+   +0.009 (diagnostic size); every suite has fewer than 30 questions; the test split is unopened.
 1. **A mini-run on one Kaggle T4** (about 1 GPU-hour, budget 2): export with
    `--n-passages 500 --negatives 7`, run the notebook with `NPROC = 1` and `epochs=2` in its
    `TRAIN_CFG`. On the held-out passages, kill if Laya's nDCG@10 is not above MiniLM's, or if the

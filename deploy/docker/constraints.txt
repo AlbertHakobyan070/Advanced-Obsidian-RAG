@@ -1,0 +1,26 @@
+# Pins for the TRANSITIVE packages that decide whether the models load and
+# behave. requirements.txt pins only the direct dependencies, so a fresh image
+# build resolves everything underneath them to "latest" -- on 2026-10-13 that
+# meant transformers 5.19.0 and huggingface-hub 2.2.0 against the 5.14.1 / 1.24.0
+# the project is actually developed and tested with.
+#
+# These are the versions in the working project venv. They are constraints, not
+# requirements: pip installs a package only if something asks for it, and
+# refuses to resolve to anything else. Bump them together with requirements.txt,
+# in the same commit, after running the tests.
+#
+# Regenerate the values with:   <project venv>\Scripts\python -m pip list
+# Check both image architectures still resolve (metadata only, nothing installs):
+#   uv pip compile requirements.txt -c deploy/docker/constraints.txt \
+#       --python-platform aarch64-unknown-linux-gnu --python-version 3.11 --only-binary :all:
+#
+# torch is NOT here: the Dockerfile installs it first from the CPU index with
+# its own pin (ARG TORCH_VERSION), and pip then treats it as already satisfied.
+transformers==5.14.1
+tokenizers==0.22.2
+huggingface-hub==1.24.0
+hf-xet==1.5.2
+safetensors==0.8.0
+onnxruntime==1.20.1
+scikit-learn==1.9.0
+scipy==1.17.1

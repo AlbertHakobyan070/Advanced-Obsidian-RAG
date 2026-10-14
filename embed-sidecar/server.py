@@ -43,6 +43,7 @@ Deliberate choices:
 
 Configuration, all environment variables:
 
+    SIDECAR_TASK           embed   embed | rerank (rerank: see RERANK MODE below)
     EMBED_MODEL            google/embeddinggemma-2
     EMBED_MAX_SEQ_LENGTH   512
     EMBED_TRUNCATE_DIM     (unset = keep all 768)
@@ -53,6 +54,29 @@ Configuration, all environment variables:
 
 Standard library HTTP server on purpose: the verified venv already holds the
 whole dependency set, and one GPU serialises requests anyway.
+
+RERANK MODE (SIDECAR_TASK=rerank). The same server serves a cross-encoder
+instead, behind the /v1/rerank shape the project's `rerank_mode: http` client
+(src/retrieval/reranker.py) reads, so a big reranker runs on a GPU outside the
+CPU-only project venv:
+
+    GET  /health      -> {"ok": true, "task": "rerank", "model", "device", "dtype",
+                          "max_seq_length", "batch_size", "versions"}
+    POST /v1/rerank   {"model": "<served id, or its name after the last '/'>",
+                       "query": "text", "documents": ["text", ...], "top_n": N}
+                      -> {"model", "results": [{"index": i, "relevance_score": x}, ...]}
+                         best first, top_n long (default: every document)
+
+    RERANK_MODEL     BAAI/bge-reranker-v2-m3
+    EMBED_MAX_SEQ_LENGTH, EMBED_BATCH_SIZE, EMBED_DEVICE, EMBED_HOST / EMBED_PORT
+                     as above (the config's rerank_http.base_url says :8101)
+
+  * The bare name is accepted because retrieval.rerank_http.model names the model
+    that way (`bge-reranker-v2-m3`); any other id is a 400.
+  * relevance_score is the raw logit (no sigmoid): the client only sorts on it.
+  * fp32, checked after the load: a model that loaded in another dtype stops startup.
+  * (query, document) pairs go to the model unchanged and are truncated to
+    EMBED_MAX_SEQ_LENGTH tokens, as the in-process cross_encoder mode does.
 """
 from __future__ import annotations
 
@@ -70,6 +94,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("embed-sidecar")
 
 DEFAULT_MODEL = "google/embeddinggemma-2"
+DEFAULT_RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
 
 
 class RequestError(Exception):
@@ -150,7 +175,68 @@ def embeddings_response(service: EmbedService, body: dict) -> dict:
             "max_seq_length": service.max_seq_length}
 
 
-def make_handler(service: EmbedService):
+class RerankService:
+    """A loaded cross-encoder. `model` needs `.predict(pairs, batch_size=,
+    show_progress_bar=)` returning one score per (query, document) pair (a
+    CrossEncoder, or a fake in tests)."""
+
+    def __init__(self, model, model_id: str, device: str, max_seq_length: int,
+                 batch_size: int, dtype: str = "float32", versions: dict | None = None):
+        if max_seq_length < 1:
+            raise ValueError(f"max_seq_length must be a positive integer, got {max_seq_length}")
+        self.model = model
+        self.model_id = model_id
+        self.served_names = {model_id, model_id.rsplit("/", 1)[-1]}
+        self.device = device
+        self.max_seq_length = max_seq_length
+        self.batch_size = batch_size
+        self.dtype = dtype
+        self.versions = versions or {}
+        self._lock = threading.Lock()
+
+    def score(self, query: str, documents: list[str]) -> list[float]:
+        with self._lock:                                  # one GPU: one predict at a time
+            raw = self.model.predict([(query, d) for d in documents],
+                                     batch_size=self.batch_size, show_progress_bar=False)
+        scores = np.asarray(raw, dtype=np.float64).reshape(-1)
+        if scores.size != len(documents) or not np.isfinite(scores).all():
+            raise RuntimeError(f"the model returned {scores.size} score(s) for {len(documents)} "
+                               f"document(s), or a non-finite one: refusing to rank on that")
+        return scores.tolist()
+
+    def health(self) -> dict:
+        return {"ok": True, "task": "rerank", "model": self.model_id, "device": self.device,
+                "dtype": self.dtype, "max_seq_length": self.max_seq_length,
+                "batch_size": self.batch_size, "versions": self.versions}
+
+
+def rerank_response(service: RerankService, body: dict) -> dict:
+    """The /v1/rerank response for one request body; RequestError on a request
+    this server will not answer."""
+    if not isinstance(body, dict):
+        raise RequestError("request body must be a JSON object")
+    if body.get("model") not in service.served_names:
+        raise RequestError(f"this server serves {service.model_id!r}, not {body.get('model')!r}")
+    query = body.get("query")
+    if not isinstance(query, str) or not query.strip():
+        raise RequestError("query must be a non-empty string")
+    docs = body.get("documents")
+    if not isinstance(docs, list) or not docs or not all(isinstance(d, str) for d in docs):
+        raise RequestError("documents must be a non-empty list of strings")
+    top_n = body.get("top_n", len(docs))
+    if isinstance(top_n, bool) or not isinstance(top_n, int) or top_n < 1:
+        raise RequestError(f"top_n must be a positive integer, got {top_n!r}")
+
+    scores = service.score(query, docs)
+    order = sorted(range(len(docs)), key=lambda i: scores[i], reverse=True)[:top_n]
+    return {"model": service.model_id,
+            "results": [{"index": i, "relevance_score": scores[i]} for i in order]}
+
+
+def make_handler(service: EmbedService | RerankService):
+    route, respond = (("/v1/rerank", rerank_response) if isinstance(service, RerankService)
+                      else ("/v1/embeddings", embeddings_response))
+
     class Handler(BaseHTTPRequestHandler):
         def _send(self, status: int, payload: dict) -> None:
             raw = json.dumps(payload).encode("utf-8")
@@ -167,16 +253,16 @@ def make_handler(service: EmbedService):
                 self._send(404, {"error": {"message": f"no route GET {self.path}"}})
 
         def do_POST(self):
-            if self.path != "/v1/embeddings":
+            if self.path != route:
                 self._send(404, {"error": {"message": f"no route POST {self.path}"}})
                 return
             try:
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
-                self._send(200, embeddings_response(service, body))
+                self._send(200, respond(service, body))
             except (RequestError, ValueError) as e:        # ValueError covers bad JSON
                 self._send(400, {"error": {"message": str(e), "type": "invalid_request_error"}})
             except Exception as e:                         # a real fault: say so, and log it
-                log.error("embedding failed:\n%s", traceback.format_exc())
+                log.error("%s failed:\n%s", route, traceback.format_exc())
                 self._send(500, {"error": {"message": f"{type(e).__name__}: {e}", "type": "server_error"}})
 
         def log_message(self, fmt, *args):
@@ -195,6 +281,15 @@ def _env_int(name: str, default: int | None) -> int | None:
         raise SystemExit(f"{name}={raw!r} is not an integer")
 
 
+def _device(torch) -> str:
+    device = os.environ.get("EMBED_DEVICE", "cuda")
+    if device.startswith("cuda") and not torch.cuda.is_available():
+        raise SystemExit(f"EMBED_DEVICE={device} but torch cannot see a CUDA device "
+                         f"(CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')!r}); "
+                         f"set EMBED_DEVICE=cpu to run on the CPU on purpose")
+    return device
+
+
 def load_service() -> EmbedService:
     # sentence-transformers honours SENTENCE_TRANSFORMERS_HOME over HF_HOME, and
     # this machine sets it user-wide to a folder that does not hold the weights:
@@ -207,12 +302,8 @@ def load_service() -> EmbedService:
     from sentence_transformers import SentenceTransformer
 
     model_id = os.environ.get("EMBED_MODEL", DEFAULT_MODEL)
-    device = os.environ.get("EMBED_DEVICE", "cuda")
+    device = _device(torch)
     max_seq_length = _env_int("EMBED_MAX_SEQ_LENGTH", 512)
-    if device.startswith("cuda") and not torch.cuda.is_available():
-        raise SystemExit(f"EMBED_DEVICE={device} but torch cannot see a CUDA device "
-                         f"(CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')!r}); "
-                         f"set EMBED_DEVICE=cpu to run on the CPU on purpose")
     log.info("loading %s on %s, fp32, text-only", model_id, device)
     model = SentenceTransformer(
         model_id, device=device, model_kwargs={"torch_dtype": torch.float32},
@@ -225,8 +316,35 @@ def load_service() -> EmbedService:
                                   "transformers": transformers.__version__})
 
 
+def load_rerank_service() -> RerankService:
+    os.environ.pop("SENTENCE_TRANSFORMERS_HOME", None)       # see load_service
+
+    import sentence_transformers
+    import torch
+    import transformers
+    from sentence_transformers import CrossEncoder
+
+    model_id = os.environ.get("RERANK_MODEL", DEFAULT_RERANK_MODEL)
+    device = _device(torch)
+    max_seq_length = _env_int("EMBED_MAX_SEQ_LENGTH", 512)
+    log.info("loading cross-encoder %s on %s, fp32, max_length %d", model_id, device, max_seq_length)
+    model = CrossEncoder(model_id, device=device, max_length=max_seq_length,
+                         model_kwargs={"torch_dtype": torch.float32},
+                         activation_fn=torch.nn.Identity())
+    dtypes = sorted({str(p.dtype) for p in model.parameters()})
+    if dtypes != ["torch.float32"]:
+        raise SystemExit(f"{model_id} loaded with parameter dtype(s) {dtypes}, not float32")
+    return RerankService(model, model_id, device, max_seq_length, _env_int("EMBED_BATCH_SIZE", 16),
+                         versions={"torch": torch.__version__,
+                                   "sentence_transformers": sentence_transformers.__version__,
+                                   "transformers": transformers.__version__})
+
+
 def main() -> None:
-    service = load_service()
+    task = os.environ.get("SIDECAR_TASK", "embed")
+    if task not in ("embed", "rerank"):
+        raise SystemExit(f"SIDECAR_TASK={task!r}: must be 'embed' or 'rerank'")
+    service = load_rerank_service() if task == "rerank" else load_service()
     host, port = os.environ.get("EMBED_HOST", "127.0.0.1"), _env_int("EMBED_PORT", 8104)
     log.info("ready: %s", json.dumps(service.health()))
     ThreadingHTTPServer((host, port), make_handler(service)).serve_forever()

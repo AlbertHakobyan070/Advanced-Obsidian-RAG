@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# An external reranker over /v1/rerank (llama.cpp server, upstream image pinned by
+# digest; amd64 + arm64). This is the lane behind `retrieval.rerank_mode: http`;
+# the config points at http://rerank:8102/v1. Opt in with:
+#   components: [../../components/rerank]
+#
+# You supply the model: copy a reranker GGUF into the rerank-models volume, e.g.
+#   kubectl -n noetrix cp bge-reranker-v2-m3-Q4_K_M.gguf <rerank-pod>:/models/
+# (the pod starts but stays NotReady until the file is there).
+resources:
+  - rerank.yaml

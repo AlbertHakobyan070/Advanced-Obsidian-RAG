@@ -37,6 +37,9 @@ services:
       dockerfile: Dockerfile.gpu
     image: noetrix-ocr-gpu:latest
     container_name: noetrix-ocr-gpu
+    depends_on:
+      paddle-cache-perms:
+        condition: service_completed_successfully
     environment:
       PADDLE_OCR_LANG: "${PADDLE_OCR_LANG:-en}"
       # WHICH physical card. This, not the `device_ids` reservation below, is
@@ -100,6 +103,18 @@ services:
       # Generous: the first start downloads weights and warms the GPU context.
       start_period: 180s
       retries: 5
+
+  # One-shot: the image runs as a non-root user (uid 10001). A paddle-cache volume
+  # filled by an earlier, root-running build keeps root ownership and the sidecar
+  # could then not write new weights; this hands it over. A no-op once it is right.
+  paddle-cache-perms:
+    image: noetrix-ocr-gpu:latest
+    pull_policy: never
+    user: "0:0"
+    entrypoint: ["sh", "-c", "find /paddle_cache ! -user 10001 -exec chown 10001:10001 {} +"]
+    volumes:
+      - paddle-cache:/paddle_cache
+    restart: "no"
 
 volumes:
   paddle-cache:

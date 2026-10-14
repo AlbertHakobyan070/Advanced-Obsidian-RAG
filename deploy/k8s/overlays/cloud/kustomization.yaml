@@ -1,0 +1,51 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# CLOUD: a PLACEHOLDER, not a deployment recipe. Every REPLACE-* below is a decision
+# that depends on your cluster and registry; nothing here has been run against one.
+# `kubectl kustomize deploy/k8s/overlays/cloud` renders it, so it stays honest as
+# the base changes.
+#
+# What this overlay deliberately does NOT do:
+#   * expose anything. The query API and the console have no authentication (they
+#     were built to listen on localhost), so both Services are ClusterIP. Put an
+#     authenticating proxy (oauth2-proxy, the cloud's identity-aware proxy, mTLS)
+#     in front before adding an Ingress; an Ingress straight onto the console would
+#     hand the ingest, delete and settings endpoints to the internet.
+#   * create Secrets. See ../../base/secret.template.yaml; use your secret manager.
+#   * publish images. deploy/README.md describes the manual GHCR job.
+resources:
+  - ../../base
+
+# components:                              # opt in per feature
+#   - ../../components/paddleocr           # or paddleocr-gpu (a GPU node pool)
+#   - ../../components/rerank
+#   - ../../components/embed-gpu           # a GPU node pool
+
+# Your registry and the tag you built and pushed. Pin the tag to a release or a
+# digest, never a moving tag.
+images:
+  - name: noetrix-rag
+    newName: REPLACE-registry.example.com/REPLACE-owner/noetrix-rag
+    newTag: REPLACE-TAG
+  - name: noetrix-paddleocr
+    newName: REPLACE-registry.example.com/REPLACE-owner/noetrix-paddleocr
+    newTag: REPLACE-TAG
+
+patches:
+  # Name a StorageClass if the cluster default is not what you want (SSD for the
+  # indexes: Chroma's read path is random I/O). One patch per claim; the base
+  # sizes are the measured corpus footprint plus headroom.
+  - target:
+      kind: PersistentVolumeClaim
+      name: rag-indexes
+    patch: |-
+      - op: add
+        path: /spec/storageClassName
+        value: REPLACE-fast-ssd-class
+  # Pull from a private registry:
+  # - target: {kind: Deployment, name: rag}
+  #   patch: |-
+  #     - op: add
+  #       path: /spec/template/spec/imagePullSecrets
+  #       value: [{name: REPLACE-registry-secret}]

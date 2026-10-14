@@ -1,0 +1,120 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rerank
+  labels:
+    app.kubernetes.io/name: rerank
+    app.kubernetes.io/component: rerank
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rerank
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rerank
+        app.kubernetes.io/component: rerank
+    spec:
+      # llama-server reads LLAMA_ARG_* variables; keep injected service variables out.
+      enableServiceLinks: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: rerank
+          # llama.cpp b11580 (the image's org.opencontainers.image.version), the
+          # digest `:server` pointed at on 2026-10-13. Same as docker-compose.yml.
+          # The tag moves with every upstream build, so the digest is the pin:
+          #   docker buildx imagetools inspect ghcr.io/ggml-org/llama.cpp:server
+          image: ghcr.io/ggml-org/llama.cpp:server@sha256:c789283572ba78c2699b8945a96e654c850f938a717883f2e6187a14adac698f
+          # `args`, not `command`: the image's ENTRYPOINT is /app/llama-server.
+          args:
+            - -m
+            - /models/bge-reranker-v2-m3-Q4_K_M.gguf
+            - --reranking
+            - --pooling
+            - rank
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8102"
+            - -c
+            - "8192"
+          ports:
+            - name: http
+              containerPort: 8102
+          # Writable only so `kubectl cp` can put the model file here; the server
+          # only reads it.
+          volumeMounts:
+            - name: models
+              mountPath: /models
+          # ESTIMATE until measured (no reranker was running when this was written):
+          # a Q4 bge-reranker-v2-m3 is ~0.4 GB on disk, plus the context buffers
+          # for -c 8192. Re-measure with `kubectl top pod`.
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1536Mi
+            limits:
+              cpu: "4"
+              memory: 3Gi
+          # llama-server's /health is 503 while the model loads and 200 once it can
+          # serve; a missing model file keeps the pod crash-looping, loudly.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 4
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: rerank-models
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rerank-models
+  labels:
+    app.kubernetes.io/name: rerank
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rerank
+  labels:
+    app.kubernetes.io/name: rerank
+    app.kubernetes.io/component: rerank
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: rerank
+  ports:
+    - name: http
+      port: 8102
+      targetPort: http

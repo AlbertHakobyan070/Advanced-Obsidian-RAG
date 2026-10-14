@@ -1,0 +1,37 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# The core stack: the RAG (query API + console), the FreeLLMAPI proxy, and the
+# volumes they need. Optional services are kustomize Components in ../components
+# that an overlay opts into. Nothing here is a complete deployment on its own --
+# build an overlay (overlays/local or overlays/cloud), which supplies the image
+# names and storage settings.
+#
+# BEFORE building, two inputs that are deliberately not in git:
+#
+#   1. config.docker.yaml in this folder, GENERATED from config.example.yaml:
+#        python deploy/docker/make_docker_config.py config.example.yaml deploy/k8s/base/config.docker.yaml
+#      It becomes the ConfigMap. kustomize suffixes the ConfigMap name with a hash
+#      of its content, so changing the config rolls the pod -- which is what you want
+#      for a file the app only reads at start.
+#   2. Two Secrets in the namespace, created with kubectl, never written to a file
+#      here. See secret.template.yaml.
+namespace: noetrix
+
+resources:
+  - namespace.yaml
+  - storage.yaml
+  - rag.yaml
+  - freellmapi.yaml
+
+configMapGenerator:
+  - name: noetrix-config
+    files:
+      - config.yaml=config.docker.yaml
+
+# Labels only, not selectors: a Deployment's selector is immutable, and adding to it
+# later would make every existing install un-upgradeable.
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: noetrix
+    includeSelectors: false

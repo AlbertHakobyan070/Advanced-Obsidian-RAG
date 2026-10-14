@@ -28,6 +28,13 @@ def test_routing_without_a_family_adds_nothing():
     assert c["lanes"] == ["sparse", "sparse_scope"] and c["metadata_boost"] is True
 
 
+def test_routing_forces_the_scope_lanes_open_and_their_absence_closes_them():
+    # config.yaml ships retrieval.scope_lanes off, so a routing rung that only
+    # LISTED the scope lanes would run without them.
+    assert factor_config(frozenset({"dense", "sparse", "routing"}))["scope_lanes"] is True
+    assert factor_config(frozenset({"dense", "sparse"}))["scope_lanes"] is False
+
+
 def test_empty_family_yields_no_lanes():
     assert factor_config(frozenset({"rerank", "hyde"}))["lanes"] == []
 

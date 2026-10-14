@@ -13,8 +13,14 @@
 # and paddlepaddle 2.6.2's prebuilt libpaddle.so does not survive that — it
 # abort()s inside `import paddle` with "free(): invalid pointer", a SIGABRT that
 # no Python `except` can catch. Same image, same pins, broken by a base that
-# moved underneath it.
-FROM python:3.11-slim-bookworm
+# moved underneath it. Pinned by digest now (the multi-arch index, so it resolves
+# per platform: amd64 and arm64). To bump it:
+#   docker buildx imagetools inspect python:3.11-slim-bookworm
+#
+# Platforms: linux/amd64 and linux/arm64. paddlepaddle 2.6.2 publishes a
+# manylinux aarch64 wheel; `uv pip compile --python-platform
+# aarch64-unknown-linux-gnu --only-binary :all:` over the pins below resolves.
+FROM python:3.11.17-slim-bookworm@sha256:0a310eeecf4e1f5a0743f9a6520c90c88d089c903ca5fd283f501e3a805f5f89
 
 # OpenCV (a PaddleOCR dependency) needs libgl1 and libglib2.0-0 even in its
 # headless build; without them the import fails with a bare libGL error that
@@ -62,11 +68,25 @@ RUN pip install --no-cache-dir \
 
 COPY server.py /srv/server.py
 
+# Non-root. HOME is the weights volume, so everything PaddleOCR writes lands
+# there and nowhere else is writable. Numeric uid: Kubernetes' runAsNonRoot cannot
+# verify a user given by name. A volume an older (root) image already filled keeps
+# its root ownership; the compose files carry a one-shot `*-perms` service that
+# hands it over, and Kubernetes does the same with fsGroup.
+ARG APP_UID=10001
+ARG APP_GID=10001
+RUN groupadd --gid ${APP_GID} ocr \
+ && useradd --uid ${APP_UID} --gid ${APP_GID} --home-dir /paddle_cache \
+            --no-create-home --shell /usr/sbin/nologin ocr \
+ && mkdir -p /paddle_cache && chown ${APP_UID}:${APP_GID} /paddle_cache
+
 # Model weights land here on first use. Mounted as a named volume by compose so
 # the ~200MB download happens once rather than on every container recreate.
 ENV PADDLE_OCR_HOME=/paddle_cache \
     HOME=/paddle_cache \
     PYTHONUNBUFFERED=1
+
+USER ${APP_UID}:${APP_GID}
 
 EXPOSE 8103
 CMD ["python", "-m", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8103"]

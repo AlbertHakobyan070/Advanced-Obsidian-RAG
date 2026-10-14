@@ -6,8 +6,11 @@ pipeline.py — The full Advanced-RAG query path, wired end to end.
                              question trips a code-intent signal
       -> scope detection     on the RAW question (domain / content hints)
       -> HyDE expansion      optional; its text feeds every retrieval lane
+      -> decomposition       optional; a multi-part question becomes one
+                             retrieve + rerank branch per part, merged by rank
       -> hybrid retrieve     up to eight lanes, weighted RRF, metadata boost
       -> rerank -> top k     cross_encoder | http | lexical | none | laya
+      -> per-file cap        optional; at most N chunks per source file
       -> relevance gate      optional; drops chunks below a threshold, and
                              leaving none makes generation abstain
       -> small-to-big        optional parent swap / adjacent PDF pages
@@ -35,6 +38,8 @@ from src.embeddings.embedder import Embedder
 from src.generation.generator import Answer, Generator
 from src.llm.llm_client import LLMClient
 from src.retrieval.context_expand import NeighborContext, ParentContext
+from src.retrieval.decompose import Decomposer, merge_branches
+from src.retrieval.diversity import cap_per_file
 from src.retrieval.graph_expand import GraphExpander
 from src.retrieval.hyde import HyDE
 from src.retrieval.relevance_gate import RelevanceGate
@@ -63,6 +68,8 @@ class RAGPipeline:
         graph: GraphExpander | None = None,
         gate: RelevanceGate | None = None,
         scope_lanes: bool = True,
+        max_per_file: int = 0,
+        decomposer: Decomposer | None = None,
     ):
         self.retriever = retriever
         self.reranker = reranker
@@ -76,6 +83,12 @@ class RAGPipeline:
         # retrieval.scope_lanes: whether a detected scope opens the dense_scope /
         # sparse_scope lanes. False still detects (and echoes) the scope.
         self.scope_lanes = scope_lanes
+        # retrieval.max_per_file: at most this many chunks of one source file in
+        # the final list (0 = no cap). See diversity.py.
+        self.max_per_file = max_per_file
+        # retrieval.decompose: None = no decomposer (a per-call decompose=True
+        # then does nothing to switch on). See decompose.py.
+        self.decomposer = decomposer
         # E2 small-to-big context expansion (both default OFF; see
         # retrieval.parent_context / retrieval.neighbor_context).
         self.parent_ctx = parent_ctx
@@ -120,6 +133,8 @@ class RAGPipeline:
             # Built here so a bad gate block fails the build, not a request.
             gate=RelevanceGate.from_config(cfg, reranker),
             scope_lanes=bool(cfg.get("retrieval.scope_lanes", True)),
+            max_per_file=int(cfg.get("retrieval.max_per_file", 0) or 0),
+            decomposer=Decomposer.from_config(cfg, llm),
         )
 
     def _resolve_overrides(
@@ -186,6 +201,8 @@ class RAGPipeline:
         gate: bool | None = None,
         gate_threshold: float | None = None,
         gate_scorer: str | None = None,
+        max_per_file: int | None = None,
+        decompose: bool | None = None,
     ) -> tuple[list, dict]:
         """
         Retrieval only — everything query() does EXCEPT generation. Returns
@@ -238,6 +255,16 @@ class RAGPipeline:
           gate_scorer rerank_score | laya for this call (None follows
                       retrieval.relevance_gate.scorer); a scorer other than
                       the configured one needs its own gate_threshold
+          max_per_file
+                      at most this many chunks of one source file in the final
+                      list, best first, backfilled if that leaves fewer than
+                      top_k (None follows retrieval.max_per_file; 0 = no cap)
+          decompose   True/False forces query decomposition on or off (None
+                      follows retrieval.decompose.enabled): one LLM call splits
+                      a multi-part question into sub-queries, each retrieved and
+                      reranked on its own, merged by reciprocal rank. An atomic
+                      question runs unchanged. LLM errors raise; it cannot be
+                      combined with the relevance gate (ValueError)
 
         The echo also reports where the time went: timings (ms per stage),
         lanes_run (candidates each lane returned) and cold (this call loaded
@@ -275,11 +302,23 @@ class RAGPipeline:
             scope = self.scope_router.detect(question)
         scope_lanes_on = self.scope_lanes if scope_lanes is None else bool(scope_lanes)
 
+        gate_on = self.gate.is_on(gate, gate_threshold, gate_scorer)
+        dec_on = self.decomposer is not None and (
+            self.decomposer.enabled if decompose is None else bool(decompose))
+        if dec_on and gate_on:
+            # The gate's rerank_score scorer would read scores computed against
+            # sub-queries, not the question it claims to judge.
+            raise ValueError("decompose and the relevance gate cannot run in one call: "
+                             "turn one of them off")
+
         with trace.span("hyde"):
             search_text, hyde_status = self.hyde.expand_with_info(
                 question, enabled=use_hyde)
-        candidates = self.retriever.retrieve(
-            search_text,
+        subqueries: list[str] = []
+        if dec_on:
+            with trace.span("decompose"):
+                subqueries = self.decomposer.split(question)
+        lane_kw = dict(
             dense_top_k=dk,
             sparse_top_k=sk,
             boost_code=overrides.get("boost_code", False),
@@ -291,20 +330,36 @@ class RAGPipeline:
             metadata_boost=metadata_boost,
             trace=trace,
         )
+        candidates = self.retriever.retrieve(search_text, **lane_kw)
         rerank_mode = rerank if rerank is not None else overrides.get("rerank_mode")
         # "" is meaningful here: it turns a configured criterion OFF for this
         # call, which `or` would silently discard.
         instruction = (rerank_instruction if rerank_instruction is not None
                        else overrides.get("rerank_instruction"))
+        cap = self.max_per_file if max_per_file is None else int(max_per_file)
         with trace.span("rerank"):
-            top = self.reranker.rerank(question, candidates, top_k=k,
+            # A cap or a branch merge needs the whole scored pool, not the top k.
+            top = self.reranker.rerank(question, candidates,
+                                       top_k=len(candidates) if (cap > 0 or subqueries) else k,
                                        mode=rerank_mode, instruction=instruction)
+        branch_pools = [len(candidates)]
+        if subqueries:
+            # Each sub-query is its own branch: retrieved with its own text (no
+            # HyDE) and reranked against itself; see decompose.py.
+            rankings = [top]
+            for sq in subqueries:
+                pool = self.retriever.retrieve(sq, **lane_kw)
+                branch_pools.append(len(pool))
+                with trace.span("rerank"):
+                    rankings.append(self.reranker.rerank(sq, pool, top_k=len(pool),
+                                                         mode=rerank_mode, instruction=instruction))
+            top = merge_branches(rankings, self.retriever.rrf_k)
+        top = cap_per_file(top, k, cap)
 
         # Relevance gate (post-rerank, pre-expansion). It judges the ORIGINAL
         # question — HyDE's text is a hypothetical answer, not what was asked.
         # The span exists only for a call that gates, so a gate-off call's
         # timings carry no stage that never ran.
-        gate_on = self.gate.is_on(gate, gate_threshold, gate_scorer)
         with trace.span("gate") if gate_on else nullcontext():
             top, gate_info = self.gate.apply(
                 question, top, enabled=gate, threshold=gate_threshold,
@@ -344,6 +399,11 @@ class RAGPipeline:
             "boost_code": overrides.get("boost_code", False),
             "scope": scope.labels if scope else [],
             "scope_lanes": scope_lanes_on,
+            "max_per_file": cap,
+            # off | atomic (the LLM kept the question whole) | split; one
+            # candidate-pool size per branch, the original question's first.
+            "decompose": {"status": "off" if not dec_on else ("split" if subqueries else "atomic"),
+                          "subqueries": subqueries, "branch_pools": branch_pools},
             "candidates": len(candidates),
             "omnisearch": bool(
                 self.retriever.omnisearch is not None
@@ -431,6 +491,8 @@ class RAGPipeline:
         gate: bool | None = None,
         gate_threshold: float | None = None,
         gate_scorer: str | None = None,
+        max_per_file: int | None = None,
+        decompose: bool | None = None,
     ) -> Answer:
         """
         Run the full RAG path (search + grounded generation). All knobs are
@@ -450,6 +512,7 @@ class RAGPipeline:
             lane_weights=lane_weights, auto_preset=auto_preset,
             lanes=lanes, metadata_boost=metadata_boost, scope_lanes=scope_lanes,
             gate=gate, gate_threshold=gate_threshold, gate_scorer=gate_scorer,
+            max_per_file=max_per_file, decompose=decompose,
         )
         answer = self.generator.generate(question, top, max_tokens=max_tokens)
         answer.retrieval = info

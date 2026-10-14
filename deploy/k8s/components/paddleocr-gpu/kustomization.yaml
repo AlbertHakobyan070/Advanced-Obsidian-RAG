@@ -1,0 +1,10 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# PaddleOCR on an NVIDIA GPU (CUDA 11.8). linux/amd64 nodes only. Needs the NVIDIA
+# device plugin (it advertises nvidia.com/gpu) on the cluster. Opt in with:
+#   components: [../../components/paddleocr-gpu]
+# Mutually exclusive with components/paddleocr: both answer to `paddleocr`. The
+# overlay must name the image: images: [{name: noetrix-paddleocr-gpu, ...}].
+resources:
+  - paddleocr.yaml

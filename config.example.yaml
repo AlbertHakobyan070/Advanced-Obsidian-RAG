@@ -261,6 +261,12 @@ generation:
 retrieval:
   dense_top_k: 20
   sparse_top_k: 20
+  # Which engine ranks the BM25 lanes. bm25s = the pickle (default). tantivy =
+  # EXPERIMENTAL: needs the optional tantivy package and an index built beside
+  # the pickle by the build_tantivy job (rebuilt with the pickle while this is
+  # set). Same tokenizer and rows; see src/retrieval/sparse_tantivy.py.
+  sparse_backend: bm25s                     # bm25s | tantivy
+  tantivy_filter_pool: 2000                 # tantivy only: hits a filtered lane (scope/code) filters
   rrf_k: 60
   rerank_top_k: 7
   rerank_mode: cross_encoder                # cross_encoder | http | lexical | none | laya
@@ -375,6 +381,20 @@ retrieval:
   # Independent of metadata_boost above. Per-call override: {"scope_lanes": false}
   # on /search, /query and /compare.
   scope_lanes: false        # off by default: same evidence; the scope is still detected
+  # Per-file cap on the FINAL list: at most this many chunks of one source file,
+  # best first; if that leaves fewer than top_k, the skipped ones fill the tail.
+  # Stops one book filling every seat and crowding out a second source.
+  # 0 = no cap. Per-call override: {"max_per_file": 2} on /search and /query.
+  max_per_file: 0
+  # Query decomposition: one LLM call (src/prompts/decompose.yaml) splits a
+  # multi-part question into up to max_subqueries searches; each is retrieved
+  # and reranked against its own text, then all branches merge by reciprocal
+  # rank, so every part keeps a seat. An atomic question runs unchanged. LLM
+  # errors raise (no silent fallback). Cannot be combined with the relevance
+  # gate. Per-call override: {"decompose": true} on /search and /query.
+  decompose:
+    enabled: false
+    max_subqueries: 3
 
   # Relevance gate: a cutoff applied AFTER the rerank and BEFORE the parent/
   # neighbor expansion below. Reranking orders the pool but never says "none of
@@ -762,6 +782,29 @@ canvas:
   # skip_roots: null = no roots skipped by default (canvases carry no
   # agent-project convention to scope out, unlike ingest-code). Set a list to add some.
   skip_roots: null
+  # Graph tab (console): every save keeps the canvas's previous bytes here,
+  # OUTSIDE the vault (a path inside it is refused). Relative = project root.
+  backup_dir: logs/canvas_backups
+  # Graph tab "suggest label": the relation vocabulary the generation model
+  # picks from (docs/superpowers/specs/2026-10-04-canvas-augmentation-plan.md).
+  # A suggestion only fills the label box; nothing is written until Save.
+  augment:
+    vocabulary: [is-a, part-of, example-of, prerequisite-of, leads-to, causes,
+                 contrasts-with, implements, uses, defines, related-to]
+
+# OCR Studio (console OCR tab): hand-guided, region-by-region OCR of one
+# document. Page state lives in <data>/ocr_studio/, never in the vault.
+ocr_studio:
+  preview_dpi: 110          # the page image the tab draws on
+  dpi: 300                  # render DPI for region OCR (the tab can set it per page)
+  pad_px: 12                # padding around a region crop: engines miss glyphs at a tight edge
+  max_edge_px: 6000         # cap on a render's longest side (poster-sized pages)
+  default_engine: tesseract # a new region's engine: tesseract | paddle | paddle-vl | vlm
+  # The OCR tab's imports land here IN the vault (vault-relative), whole files,
+  # never overwritten. Must not be inside webui.inbox_dir: "Ingest inbox now"
+  # would ingest and archive them. Created on the first import.
+  upload_dir: "OCR Studio"
+  upload_max_mb: 500        # one import's size cap (413 above it)
 
 webui:
   # Management console (manage_api.py) — ingest/index/OCR/delete from a browser.
@@ -777,6 +820,13 @@ webui:
   vault_tree_root: ""
   jobs_dir: "logs/jobs"                      # one log file per job
   manifest_cache: "data/.manifest_cache.json"
+  # What the header's version chip compares against this checkout (GET
+  # /api/releases). skill_dirs: installed agent-skill folders, each holding
+  # personal-rag/ and rag-ops/. bundle_app_dir: a packaged copy of the app whose
+  # VERSION file to compare (relative to this checkout), or null.
+  release_check:
+    skill_dirs: ["~/.claude/skills"]
+    bundle_app_dir: null
   # NOTE: ingest jobs started from the console write their output JSONL next to
   # paths.chunks_file (the ACTIVE vault's data dir), not into the project's
   # ./data — otherwise switching vaults leaves new chunks in the old vault's

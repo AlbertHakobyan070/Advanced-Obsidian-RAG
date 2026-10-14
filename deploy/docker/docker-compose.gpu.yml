@@ -1,0 +1,138 @@
+# Noetrix -- GPU services. NVIDIA only, linux/amd64 only. Layer it over the base file:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml \
+#       --profile ocr-gpu up -d --build paddleocr-gpu
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml \
+#       --profile embed up -d --build embed
+#
+# Nothing here starts without its profile, and none of it is shipped in a Mac
+# archive: there is no NVIDIA runtime on Apple Silicon, so an image that cannot
+# run there is an invitation to a build that cannot work. The CPU PaddleOCR in
+# the base file is the portable choice.
+#
+# Needs an NVIDIA runtime (Docker Desktop + WSL2 GPU, or nvidia-container-toolkit
+# on Linux). Verify with:
+#   docker run --rm --gpus all nvidia/cuda:11.8.0-base-ubuntu22.04 nvidia-smi
+#
+# Pick the physical card with NOETRIX_GPU_INDEX (host index, default 0). Docker
+# Desktop ignores the per-device reservation below and exposes every card, so the
+# card is chosen with CUDA_VISIBLE_DEVICES inside the container (measured on the
+# GTX 1070 Ti box: a device_ids reservation alone put the weights on the card
+# driving the display).
+#
+# ocr-sidecar/docker-compose.gpu.yml is the STANDALONE form of the same OCR
+# service (its own compose project, for a machine that never runs the rest of
+# the stack). Use one or the other; both bind host port 8103.
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            # `count`, not device_ids: a native Linux nvidia-container-toolkit
+            # honours device_ids but Docker Desktop does not.
+            count: 1
+            capabilities: [gpu]
+  platform: linux/amd64
+  restart: unless-stopped
+
+services:
+
+  # PaddleOCR on CUDA 11.8 (PaddlePaddle's cu118 build still ships Pascal sm_61;
+  # do not "modernise" without re-running a real kernel launch on the card).
+  # Same server.py and same contract as the CPU service, so it answers to the same
+  # name -- `pdf.paddle_ocr.base_url` stays http://paddleocr:8103 -- and the two
+  # are mutually exclusive.
+  paddleocr-gpu:
+    <<: *gpu
+    profiles: ["ocr-gpu"]
+    build:
+      context: ../../ocr-sidecar
+      dockerfile: Dockerfile.gpu
+    image: ${NOETRIX_OCR_GPU_IMAGE:-noetrix-paddleocr-gpu:local}
+    networks:
+      default:
+        aliases: [paddleocr]
+    depends_on:
+      paddle-cache-perms-gpu:
+        condition: service_completed_successfully
+    environment:
+      PADDLE_OCR_LANG: "${PADDLE_OCR_LANG:-en}"
+      CUDA_VISIBLE_DEVICES: "${NOETRIX_GPU_INDEX:-0}"
+      PADDLE_OCR_DEVICE: "${PADDLE_OCR_DEVICE:-gpu:0}"
+      # "ocr" = PP-OCRv6 (3.1 s/page on the 1070 Ti); "vl" = PaddleOCR-VL, 30x the
+      # cost and ~7.9 GB of VRAM, worth it only for formulas and real tables. A
+      # request can also choose per call.
+      PADDLE_OCR_PIPELINE: "${PADDLE_OCR_PIPELINE:-ocr}"
+    ports:
+      - "127.0.0.1:${NOETRIX_OCR_PORT:-8103}:8103"
+    volumes:
+      - paddle-cache:/paddle_cache
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8103/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 180s      # first start downloads weights and warms the GPU context
+      retries: 5
+
+  paddle-cache-perms-gpu:
+    profiles: ["ocr-gpu"]
+    image: ${NOETRIX_OCR_GPU_IMAGE:-noetrix-paddleocr-gpu:local}
+    pull_policy: never
+    user: "0:0"
+    entrypoint: ["sh", "-c", "find /paddle_cache ! -user 10001 -exec chown 10001:10001 {} +"]
+    volumes:
+      - paddle-cache:/paddle_cache
+    restart: "no"
+
+  # EmbeddingGemma 2 behind an OpenAI-compatible /v1/embeddings (embed-sidecar/).
+  # GPU-ONLY: the server refuses to start on a CPU-only host unless
+  # EMBED_DEVICE=cpu is set on purpose. Needs a Hugging Face token if the model
+  # is gated for your account. `embedding.providers.eg2` points here (cap 1024);
+  # run the second service for `eg2_l512`.
+  embed:
+    <<: *gpu
+    profiles: ["embed"]
+    build:
+      context: ../../embed-sidecar
+    image: ${NOETRIX_EMBED_IMAGE:-noetrix-embed:local}
+    environment: &embed-env
+      CUDA_VISIBLE_DEVICES: "${NOETRIX_GPU_INDEX:-0}"
+      EMBED_HOST: "0.0.0.0"
+      EMBED_PORT: "8104"
+      EMBED_MAX_SEQ_LENGTH: "1024"      # must equal the registry entry's max_seq_length
+      HF_TOKEN: "${HF_TOKEN:-}"
+    ports:
+      - "127.0.0.1:${NOETRIX_EMBED_PORT:-8104}:8104"
+    volumes:
+      - embed-hf-cache:/hf_cache
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8104/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 300s      # the model loads BEFORE the port opens (~1.7 GB onto the card)
+      retries: 5
+
+  embed-l512:
+    <<: *gpu
+    profiles: ["embed"]
+    image: ${NOETRIX_EMBED_IMAGE:-noetrix-embed:local}
+    pull_policy: never
+    environment:
+      <<: *embed-env
+      EMBED_PORT: "8105"
+      EMBED_MAX_SEQ_LENGTH: "512"
+    ports:
+      - "127.0.0.1:${NOETRIX_EMBED_L512_PORT:-8105}:8105"
+    volumes:
+      - embed-hf-cache:/hf_cache
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8105/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 300s
+      retries: 5
+
+volumes:
+  embed-hf-cache:

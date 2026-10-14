@@ -1,0 +1,278 @@
+# Noetrix -- container stack.
+#
+#   cp .env.example .env                                  # then set RAG_HOST_HOME
+#   python make_docker_config.py ../../config.example.yaml config.docker.yaml
+#   docker compose up --build -d                          # the core stack
+#
+#   query API  : http://127.0.0.1:8051    (rag serve equivalent)
+#   console    : http://127.0.0.1:8052    (rag console equivalent)
+#   generation : http://127.0.0.1:3001    (FreeLLMAPI dashboard + /v1 proxy)
+#
+# This file runs unchanged from a repo checkout (here) and from a release
+# archive; the archive adds docker-compose.override.yml, which only re-points the
+# three build contexts. See deploy/README.md.
+#
+# All ports are bound to 127.0.0.1 -- nothing is exposed to the network. The host
+# ports are NOETRIX_*_PORT variables so a second stack (or a test run) can sit
+# beside one that already owns 8051/8052/3001.
+#
+# ---------------------------------------------------------------------------
+# WHAT YOU CAN TURN OFF
+#
+# The parts you are not using can be stopped, and their memory handed back,
+# without touching the parts you are:
+#
+#   docker compose stop freellmapi     # using a direct cloud backend instead
+#   docker compose stop paddleocr      # done ingesting scanned PDFs
+#   docker compose start <service>     # bring one back
+#   docker compose ps                  # what is actually running
+#
+# OPT-IN services never start unless you ask for them by profile:
+#
+#   docker compose --profile ocr    up -d --build paddleocr   # PaddleOCR, CPU
+#   docker compose --profile rerank up -d rerank              # external reranker
+#
+# GPU-only services (NVIDIA, linux/amd64) live in docker-compose.gpu.yml:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml \
+#       --profile ocr-gpu up -d --build paddleocr-gpu
+#
+# The `rag` service is the only one that is not optional -- it is the RAG.
+# ---------------------------------------------------------------------------
+#
+# Compose project name: deliberately NOT set here. Named volumes are prefixed
+# with it, and an unpacked release archive (folder rag-docker-bundle) already
+# owns volumes called rag-docker-bundle_freellmapi-data and _hf-cache. Pinning a
+# different name would orphan the provider keys and the model cache in them.
+# From a checkout use `docker compose -p noetrix ...` (or COMPOSE_PROJECT_NAME).
+services:
+
+  # Generation backend (OpenAI-compatible). Provider keys are added once via its
+  # dashboard on first run (stored in the named volume).
+  #
+  # Pinned to the digest `:latest` pointed at on 2026-10-13 (v0.14.0 by the image's
+  # org.opencontainers.image.version label); it is a multi-arch index (amd64 +
+  # arm64). The image runs as root and is upstream's to change. To move it:
+  #   docker buildx imagetools inspect ghcr.io/tashfeenahmed/freellmapi:latest
+  # and paste the Digest below.
+  #
+  # It gets ONLY the variables it needs. The old `env_file: .env` handed this
+  # third-party image every provider key and the HF token in .env.
+  #
+  # IF ITS DASHBOARD SHOWS "[decrypt failed]" ON EVERY STORED KEY: the keys in
+  # the volume were encrypted with a DIFFERENT ENCRYPTION_KEY than the one now
+  # in .env. That is what happens if .env is replaced (e.g. by unpacking a
+  # newer archive) while the named volume survives. Either restore the old
+  # ENCRYPTION_KEY, or reset the store and re-enter the keys:
+  #     docker compose down && docker volume rm <project>_freellmapi-data
+  freellmapi:
+    image: ghcr.io/tashfeenahmed/freellmapi@sha256:7719d9bdf41795d6a3e32a92324ae9a6c2e95e1fd2011e27d745d6b3a67935b5
+    environment:
+      NODE_ENV: production
+      PORT: "3001"
+      ENCRYPTION_KEY: "${ENCRYPTION_KEY:?set ENCRYPTION_KEY in .env (see .env.example)}"
+    ports:
+      - "127.0.0.1:${NOETRIX_PROXY_PORT:-3001}:3001"
+    volumes:
+      - freellmapi-data:/app/server/data
+    restart: unless-stopped
+
+  # The RAG: serve_api (:8051) + manage_api (:8052) in one container.
+  #
+  # These two stay together on purpose. The console restarts the query API by
+  # signalling a pid it shares a filesystem and a process namespace with; split
+  # across containers that handshake would need the Docker socket, which is a
+  # far bigger grant than the feature is worth. The query API is the memory
+  # cost here (warm index + embedder + cross-encoder); the console alone is
+  # small, so splitting them would not buy much anyway.
+  #
+  # Health: the image's HEALTHCHECK runs deploy/docker/healthcheck.sh, which is
+  # green only when /health says "ready":true. Measured on an empty data volume:
+  # the pipeline builds against an empty index and reports ready after ~85 s of
+  # model loading, so a fresh install goes healthy; until the first ingest /search
+  # answers HTTP 200 with an "error" naming the collection that does not exist yet
+  # (readable, not an empty list). A pipeline that FAILS to build (a bad model id, a moved path) stays
+  # unhealthy, with the reason in /health and in the console's service log.
+  rag:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    image: ${NOETRIX_RAG_IMAGE:-noetrix-rag:local}
+    depends_on:
+      freellmapi:
+        condition: service_started
+      volume-perms:
+        condition: service_completed_successfully
+    environment:
+      # Where docker-entrypoint.sh writes serve_api's pid. The console's
+      # "restart :8051" button signals this pid and the entrypoint's supervisor
+      # relaunches -- without it, restarting means restarting the container.
+      RAG_SERVE_PID_FILE: /tmp/serve_api.pid
+      # Both halves must agree on this: the entrypoint writes the query API's
+      # startup log here and the console's GET /api/service/log reads it. That
+      # log is how a failed restart explains itself instead of just spinning.
+      RAG_LOG_DIR: /app/logs
+      # config.docker.yaml expands ${RAG_HOST_HOME} into parser.vault_path, so this
+      # must be the path AS THE CONTAINER SEES IT. On macOS and Linux that is the
+      # host path itself. On Windows the host path (C:/Users/you) is not a valid
+      # path in a Linux container, so RAG_CONTAINER_HOME names where it appears
+      # (/c/Users/you); start.ps1 sets both. Process environment wins over the
+      # mounted .env, so the .env's own RAG_HOST_HOME never reaches the config.
+      RAG_HOST_HOME: "${RAG_CONTAINER_HOME:-${RAG_HOST_HOME:?set RAG_HOST_HOME in .env, e.g. /Users/yourname}}"
+      # The servers listen on the SAME port numbers the host publishes (see the
+      # ports below), so a remapped port is still the one number everywhere:
+      # config.docker.yaml's webui.rag_api, which the console's page uses from
+      # the BROWSER, expands ${RAG_PORT}. A host-only remap would leave the
+      # console's Query tab talking to whatever owns :8051.
+      RAG_PORT: "${NOETRIX_API_PORT:-8051}"
+      RAG_CONSOLE_PORT: "${NOETRIX_CONSOLE_PORT:-8052}"
+    ports:
+      - "127.0.0.1:${NOETRIX_API_PORT:-8051}:${NOETRIX_API_PORT:-8051}"
+      - "127.0.0.1:${NOETRIX_CONSOLE_PORT:-8052}:${NOETRIX_CONSOLE_PORT:-8052}"
+    # Docker Desktop (Mac/Windows) resolves host.docker.internal on its own;
+    # Linux does not. Declaring it here means the OCR and external-rerank lanes
+    # reach a server running on the HOST the same way on every platform.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # The two MOUNTED FILES. create_host_path: false turns a missing file into
+      # an error at `up` instead of Docker silently creating a DIRECTORY at that
+      # path and the app failing later with "is a directory".
+      #
+      # config.docker.yaml is GENERATED (make_docker_config.py), never kept by
+      # hand. The console's Settings tab edits it in place; regenerating
+      # overwrites those edits.
+      - type: bind
+        source: ./config.docker.yaml
+        target: /app/config.yaml
+        bind: {create_host_path: false}
+      # The Settings tab writes provider keys to /app/.env. Mounting the host
+      # file there makes those changes survive a recreate or rebuild.
+      - type: bind
+        source: ./.env
+        target: /app/.env
+        bind: {create_host_path: false}
+      - ./rag_data:/rag_data        # ChromaDB (dense) + bm25 pickle (sparse)
+      - ./data:/app/data            # JSONL chunk files: PRIMARY data, not rebuildable
+      - hf-cache:/hf_cache          # embed/rerank models, downloaded once
+      - logs:/app/logs              # job logs + the provenance records beside them
+      # ------------------------------------------------------------------
+      # Your home folder, mounted at the SAME ABSOLUTE PATH inside the
+      # container. This one line is what makes the console's folder browser
+      # and the vault switcher usable on a Mac:
+      #
+      #   * a container can only see what is bind-mounted, and it used to see
+      #     exactly one vault at the invented path /vault;
+      #   * mounting home at its own path means /Users/you/... is a real path
+      #     BOTH sides, so what the console shows is what Finder shows, and no
+      #     translation layer can drift;
+      #   * every vault under your home folder becomes switchable with no edit
+      #     to this file.
+      #
+      # Set RAG_HOST_HOME in .env (e.g. RAG_HOST_HOME=/Users/yourname).
+      # Read-write, so the Vault tab AND Ingest/inbox work.
+      #
+      # Windows: the container side cannot be a drive path, so .env also sets
+      # RAG_CONTAINER_HOME=/c/Users/you (start.ps1 writes both). Left unset, the
+      # two sides are the same path, which is the macOS/Linux case above.
+      # ------------------------------------------------------------------
+      - "${RAG_HOST_HOME}:${RAG_CONTAINER_HOME:-${RAG_HOST_HOME}}"
+    restart: unless-stopped
+
+  # One-shot: hand the named volumes to the image's non-root user (uid 10001).
+  # A fresh volume inherits that ownership from the image on its own; one that an
+  # older, root-running image already filled does not, and the model cache would
+  # then fail on its first write. Runs on every `up`, takes a moment, and is a
+  # no-op once the ownership is right. (Kubernetes does the same with fsGroup.)
+  volume-perms:
+    image: ${NOETRIX_RAG_IMAGE:-noetrix-rag:local}
+    pull_policy: never          # the image is the one `rag` builds, never a download
+    user: "0:0"
+    entrypoint: ["sh", "-c", "find /hf_cache /app/logs ! -user 10001 -exec chown 10001:10001 {} +"]
+    volumes:
+      - hf-cache:/hf_cache
+      - logs:/app/logs
+    restart: "no"
+
+  # ------------------------------------------------------------------------
+  # OPT-IN: PaddleOCR for scanned PDFs, CPU.  --profile ocr
+  #
+  # The middle OCR lane: much stronger than Tesseract on skewed, multi-column
+  # and non-Latin scans, and seconds per page on CPU rather than the minutes a
+  # document VLM costs. It lives here rather than in the RAG image because its
+  # dependency tree is larger than the rest of the stack put together and it is
+  # only needed while ingesting. Runs on amd64 and arm64.
+  #
+  #   docker compose --profile ocr up -d --build paddleocr
+  #   # config.yaml (or the console's Settings): pdf.ocr_engine: paddle
+  #   docker compose stop paddleocr        # when the scanned books are indexed
+  # ------------------------------------------------------------------------
+  paddleocr:
+    profiles: ["ocr"]
+    build:
+      context: ../../ocr-sidecar
+    image: ${NOETRIX_OCR_IMAGE:-noetrix-paddleocr:local}
+    depends_on:
+      paddle-cache-perms:
+        condition: service_completed_successfully
+    environment:
+      PADDLE_OCR_LANG: "${PADDLE_OCR_LANG:-en}"
+    ports:
+      - "127.0.0.1:${NOETRIX_OCR_PORT:-8103}:8103"
+    volumes:
+      - paddle-cache:/paddle_cache   # recognition weights, downloaded once
+    restart: unless-stopped
+    healthcheck:
+      # /health answers 503 when the engine cannot import, so a bare -f is enough
+      # to mark a broken container unhealthy rather than "up".
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8103/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 5
+
+  paddle-cache-perms:
+    profiles: ["ocr"]
+    image: ${NOETRIX_OCR_IMAGE:-noetrix-paddleocr:local}
+    pull_policy: never
+    user: "0:0"
+    entrypoint: ["sh", "-c", "find /paddle_cache ! -user 10001 -exec chown 10001:10001 {} +"]
+    volumes:
+      - paddle-cache:/paddle_cache
+    restart: "no"
+
+  # ------------------------------------------------------------------------
+  # OPT-IN: an external reranker served over /v1/rerank.  --profile rerank
+  #
+  # This is the lane behind `retrieval.rerank_mode: http`. It exists so a big
+  # cross-encoder can run somewhere the RAG process cannot use it -- a machine
+  # with a GPU, or simply out of the query API's memory budget.
+  #
+  # You supply the model: put a reranker GGUF next to this file (or point
+  # RERANK_MODEL_DIR at wherever you keep models) and set RERANK_MODEL_FILE.
+  # Upstream image, pinned by digest (amd64 + arm64); it runs as root, which is
+  # upstream's choice and is why it gets the models read-only.
+  #
+  #   docker compose --profile rerank up -d rerank
+  #   # then in the console: Settings -> Reranker -> "External rerank server",
+  #   # and set retrieval.rerank_http.base_url to http://rerank:8102/v1
+  # ------------------------------------------------------------------------
+  rerank:
+    profiles: ["rerank"]
+    image: ghcr.io/ggml-org/llama.cpp:server@sha256:c789283572ba78c2699b8945a96e654c850f938a717883f2e6187a14adac698f
+    command: >-
+      -m /models/${RERANK_MODEL_FILE:-bge-reranker-v2-m3-Q4_K_M.gguf}
+      --reranking --pooling rank
+      --host 0.0.0.0 --port 8102
+      -c ${RERANK_CTX:-8192}
+    ports:
+      - "127.0.0.1:${NOETRIX_RERANK_PORT:-8102}:8102"
+    volumes:
+      - "${RERANK_MODEL_DIR:-./models}:/models:ro"
+    restart: unless-stopped
+
+volumes:
+  freellmapi-data:
+  hf-cache:
+  logs:
+  paddle-cache:

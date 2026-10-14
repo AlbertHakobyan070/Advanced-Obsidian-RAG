@@ -1,0 +1,15 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# EmbeddingGemma 2 (embed-sidecar/) on an NVIDIA GPU. linux/amd64 nodes only, and
+# the NVIDIA device plugin must be installed. Opt in with:
+#   components: [../../components/embed-gpu]
+# The overlay must name the image: images: [{name: noetrix-embed, ...}].
+#
+# Serves the `eg2` registry entry (max_seq_length 1024, http://embed:8104/v1). The
+# `eg2_l512` entry (cap 512, http://embed-l512:8105/v1) needs a second copy of this
+# Deployment with EMBED_PORT=8105, EMBED_MAX_SEQ_LENGTH=512 and a Service named
+# embed-l512; not shipped, because the client refuses a server whose cap differs
+# from the entry's and one card rarely holds both.
+resources:
+  - embed.yaml

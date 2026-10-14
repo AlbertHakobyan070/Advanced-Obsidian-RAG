@@ -1,3 +1,17 @@
+# Files read by Linux tools inside a container build or a container: LF everywhere,
+# including on a Windows checkout. A CRLF turns "#!/bin/sh" into "#!/bin/sh\r" and
+# the container dies with "not found"; it also leaks "\r" into YAML values and
+# Dockerfile instructions. (The app Dockerfile also strips \r from the two scripts
+# it copies, as a second wall.)
+#
+# This block comes FIRST on purpose: a later pattern wins, so the *.ps1 rule below
+# still gives deploy/package/*.ps1 the CRLF Windows PowerShell wants.
+*.sh text eol=lf
+Dockerfile* text eol=lf
+.dockerignore text eol=lf
+docker-compose*.yml text eol=lf
+deploy/** text eol=lf
+
 # Windows shells REQUIRE CRLF in batch files. rag.bat sat in the tree with
 # LF-only endings and cmd.exe mis-parsed it into garbage tokens
 # ("'M' is not recognized as an internal or external command"), which reads as

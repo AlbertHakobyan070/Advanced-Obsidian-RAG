@@ -25,6 +25,9 @@ chat model and pretending otherwise would invite the wrong client:
                   "pipeline": "ocr"}            # optional, defaults per-env
                  -> {"text": "...", "lines": 12, "ms": 1830, "device": "gpu:0",
                      "pipeline": "ocr"}
+                 with "return_boxes": true ("ocr" pipeline) it also returns
+                 "boxes": [{"text", "score", "box": [x0, y0, x1, y1]}] and
+                 "confidence" (the mean score) — OCR Studio shows them
 
 TWO PIPELINES, because PaddleOCR is two genuinely different products under one
 package name and picking between them is the main quality lever here:
@@ -307,34 +310,78 @@ def _run_ocr(engine, image, pipeline: str = "ocr"):
     """
     if pipeline == "vl":
         return _run_vl(engine, image)
+    return [d["text"] for d in _run_ocr_detailed(engine, image)]
 
+
+def _field(page, key):
+    """One field of a result page, read through the mapping OR the attribute
+    shape (paddlex result objects have been both across point releases)."""
+    v = page.get(key) if hasattr(page, "get") else None
+    return getattr(page, key, None) if v is None else v
+
+
+def _box(b) -> list[float] | None:
+    """A detection box in either shape — a polygon of points, or a flat
+    [x0, y0, x1, y1] — as its axis-aligned [x0, y0, x1, y1]. None if neither."""
+    try:
+        pts = [[float(v) for v in p] for p in b]
+        xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+        return [min(xs), min(ys), max(xs), max(ys)]
+    except (TypeError, IndexError, ValueError):
+        try:
+            flat = [float(v) for v in b]
+        except (TypeError, ValueError):
+            return None
+        return flat if len(flat) == 4 else None
+
+
+def _run_ocr_detailed(engine, image) -> list[dict]:
+    """Recognise one image with the "ocr" pipeline, keeping what the plain-text
+    answer drops: [{"text", "score", "box": [x0, y0, x1, y1] | None}, ...].
+
+    The two majors return genuinely different structures:
+
+      2.x  [[ [box, (text, confidence)], ... ]]   nested tuples, one list per
+                                                  image, [[None]] for a blank
+                                                  page
+      3.x  [ {"rec_texts": [...], "rec_scores": [...], "rec_boxes": [...]} ]
+                                                  one dict-like result per image
+
+    Both are read defensively, so a point release that reshuffles a key returns
+    a sparse page (or no boxes) rather than a 500.
+    """
+    out: list[dict] = []
     if _paddleocr_major() >= 3:
         # predict() is the 3.x entry point; ocr() survives as a deprecated
         # alias that emits a warning on every call.
-        result = engine.predict(image)
-        lines: list[str] = []
-        for page in (result or []):
-            texts = None
-            if isinstance(page, dict) or hasattr(page, "get"):
-                texts = page.get("rec_texts")
-            if texts is None:
-                texts = getattr(page, "rec_texts", None)
-            for text in (texts or []):
+        for page in (engine.predict(image) or []):
+            texts = _field(page, "rec_texts")
+            scores = _field(page, "rec_scores")
+            boxes = _field(page, "rec_boxes")
+            if boxes is None:
+                boxes = _field(page, "rec_polys")
+            scores = [] if scores is None else list(scores)
+            boxes = [] if boxes is None else list(boxes)
+            for i, text in enumerate([] if texts is None else list(texts)):
                 if text and str(text).strip():
-                    lines.append(str(text).strip())
-        return lines
+                    out.append({"text": str(text).strip(),
+                                "score": float(scores[i]) if i < len(scores) else None,
+                                "box": _box(boxes[i]) if i < len(boxes) else None})
+        return out
 
-    result = engine.ocr(image, cls=True)
-    lines = []
-    for page in (result or []):
+    for page in (engine.ocr(image, cls=True) or []):
         for entry in (page or []):
             try:
                 text = entry[1][0]
             except (TypeError, IndexError):
                 continue
             if text and str(text).strip():
-                lines.append(str(text).strip())
-    return lines
+                try:
+                    score = float(entry[1][1])
+                except (TypeError, IndexError, ValueError):
+                    score = None
+                out.append({"text": str(text).strip(), "score": score, "box": _box(entry[0])})
+    return out
 
 
 # Whether `import paddle` works AT ALL in this image. Checked once, then cached
@@ -427,6 +474,10 @@ class OCRIn(BaseModel):
     lang: str | None = None
     # Optional per-request engine choice. Omitted = PADDLE_OCR_PIPELINE.
     pipeline: str | None = None
+    # Also return per-line boxes and recognition scores ("ocr" pipeline only;
+    # VL emits page markdown, not lines). Off by default so the ingest lane's
+    # answers stay the size they were.
+    return_boxes: bool = False
 
 
 @app.get("/health")
@@ -514,13 +565,23 @@ def ocr(body: OCRIn):
         from PIL import Image
 
         img = Image.open(io.BytesIO(raw)).convert("RGB")
-        lines = _run_ocr(_engine(pipeline, lang), np.array(img), pipeline)
+        engine = _engine(pipeline, lang)
+        if pipeline == "vl":
+            lines, detail = _run_vl(engine, np.array(img)), None
+        else:
+            detail = _run_ocr_detailed(engine, np.array(img))
+            lines = [d["text"] for d in detail]
     except Exception as e:
         log.exception("OCR failed")
         return JSONResponse({"error": f"{type(e).__name__}: {e}",
                              "pipeline": pipeline}, status_code=500)
 
-    return {"text": "\n".join(lines), "lines": len(lines),
+    extra: dict = {}
+    if body.return_boxes and detail is not None:
+        scores = [d["score"] for d in detail if d["score"] is not None]
+        extra = {"boxes": detail,
+                 "confidence": round(sum(scores) / len(scores), 4) if scores else None}
+    return {**extra, "text": "\n".join(lines), "lines": len(lines),
             "lang": lang, "ms": int((time.time() - t0) * 1000),
             # Which ENGINE produced this. The two return different KINDS of
             # text — plain lines from "ocr", markdown with LaTeX from "vl" —

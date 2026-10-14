@@ -130,6 +130,12 @@ class PaddleOCRClient(VLMOCR):
         Raises on transport/HTTP errors so the inherited driver can count the
         page as failed and, for a connection error, stop early.
         """
+        return str(self.ocr_response(png_bytes).get("text") or "").strip()
+
+    def ocr_response(self, png_bytes: bytes, boxes: bool = False) -> dict:
+        """The sidecar's whole /ocr answer. `boxes` asks for per-line boxes and
+        scores (OCR Studio); a sidecar older than that flag ignores it and the
+        answer simply has no `boxes` key."""
         import requests
 
         payload = {
@@ -138,6 +144,8 @@ class PaddleOCRClient(VLMOCR):
         }
         if self.pipeline:
             payload["pipeline"] = self.pipeline
+        if boxes:
+            payload["return_boxes"] = True
         r = requests.post(f"{self.base_url}/ocr", json=payload,
                           timeout=self.timeout)
         # A sidecar that cannot serve the requested engine answers 501. Let it
@@ -151,4 +159,4 @@ class PaddleOCRClient(VLMOCR):
             raise ValueError(f"unexpected /ocr response type: {type(data).__name__}")
         if data.get("error"):
             raise RuntimeError(str(data["error"]))
-        return str(data.get("text") or "").strip()
+        return data

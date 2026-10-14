@@ -105,18 +105,35 @@ def _cmd_run(args) -> None:
             _fail(str(e))
     from eval.bench import runner
 
+    llm = None
+    if args.llm:
+        from src.llm.replay import MODES, ReplayLLM
+        mode, _, store = args.llm.partition(":")
+        if mode not in MODES or not store:
+            _fail(f"--llm must be record:<store> or replay:<store>, got {args.llm!r}")
+        try:
+            llm = ReplayLLM(store, mode=mode)
+        except ValueError as e:
+            _fail(str(e))
     print(f"bench run: split {args.split}, {len(configs)} configuration(s), questions from {sets}")
     try:
         run_dir = runner.run_bench(
             cfg, questions, configs, split=args.split, unseal_test=args.unseal_test,
             out_root=Path(args.out_root) if args.out_root else runner.DEFAULT_RUNS,
             ledger=runner.DEFAULT_LEDGER, limit=args.limit,
-            quiet_logs=not args.verbose, warmup=True)
+            quiet_logs=not args.verbose, warmup=True, llm=llm, answers=args.answers)
     except (runner.SealedSplitError, runner.RunSetupError) as e:
         _fail(str(e))
     summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
     errors = sum(c["errors"] for c in summary.values())
     print(f"\nRun record: {run_dir}\nReport:     {run_dir / 'report.md'}")
+    if llm is not None and llm.mode == "record":
+        # A record pass is not a scoring run: its LLM rows fail by design.
+        n = sum(1 for line in llm.pending.read_text(encoding="utf-8").splitlines()
+                if line.strip()) if llm.pending.exists() else 0
+        print(f"Recorded: {n} pending prompt(s) in {llm.pending}; fill them into {llm.store}, "
+              f"then run again with --llm replay:{llm.store}")
+        return
     if errors:
         print(f"ERROR: {errors} question row(s) failed; see \"error\" in "
               f"{run_dir / 'per_query.jsonl'}", file=sys.stderr)
@@ -260,10 +277,42 @@ def _cmd_draft(args) -> None:
         sys.exit(1)
 
 
+def _cmd_judge(args) -> None:
+    from eval.bench.judge import judge_run
+    from src.llm.replay import MODES, ReplayLLM
+    mode, _, store = args.llm.partition(":")
+    if mode not in MODES or not store:
+        _fail(f"--llm must be record:<store> or replay:<store>, got {args.llm!r}")
+    run_dir = Path(args.run_dir)
+    if not (run_dir / "per_query.jsonl").is_file():
+        _fail(f"{run_dir} is not a bench run (no per_query.jsonl)")
+    try:
+        llm = ReplayLLM(store, mode=mode)
+    except ValueError as e:
+        _fail(str(e))
+    questions = {q.id: q for q in _load(_sets_dir(args))}
+    try:
+        summary = judge_run(run_dir, questions, llm, _data_dir(args))
+    except ValueError as e:
+        _fail(str(e))
+    print(f"Report: {run_dir / 'judge.md'}")
+    if mode == "record":
+        n = (sum(1 for line in llm.pending.read_text(encoding="utf-8").splitlines() if line.strip())
+             if llm.pending.exists() else 0)
+        print(f"Recorded: {n} pending judge prompt(s) in {llm.pending}; fill them into {llm.store}, "
+              f"then run again with --llm replay:{llm.store}")
+        return
+    errors = sum(s["errors"] for s in summary.values())
+    if errors:
+        print(f"ERROR: {errors} answer(s) could not be judged; see \"error\" in "
+              f"{run_dir / 'judge.jsonl'}", file=sys.stderr)
+        sys.exit(1)
+
+
 def bench_cmd(args) -> None:
     {"run": _cmd_run, "report": _cmd_report, "split": _cmd_split,
      "validate": _cmd_validate, "sample": _cmd_sample,
-     "draft": _cmd_draft}[args.bench_command](args)
+     "draft": _cmd_draft, "judge": _cmd_judge}[args.bench_command](args)
 
 
 def add_bench_parser(subparsers) -> None:
@@ -284,7 +333,7 @@ def add_bench_parser(subparsers) -> None:
     r.add_argument("--unseal-test", action="store_true", dest="unseal_test",
                    help="allow a sealed split; every opening is appended to eval/test_ledger.jsonl")
     r.add_argument("--configs", default="ladder", metavar="SPEC",
-                   help="ladder | loo | factorial | routing | hyde, or comma-separated names from "
+                   help="ladder | loo | factorial | routing | hyde | diversity | decompose, or comma-separated names from "
                         "eval/configs.yaml (default: ladder)")
     r.add_argument("--limit", type=int, default=None, metavar="N",
                    help="run only the first N questions of the split (smoke runs)")
@@ -298,6 +347,25 @@ def add_bench_parser(subparsers) -> None:
     r.add_argument("--verbose", action="store_true",
                    help="keep the pipeline's INFO logging during the run (silenced by default: "
                         "it is a block of lines per search)")
+    r.add_argument("--llm", default=None, metavar="MODE:STORE",
+                   help="answer every LLM call (HyDE, generation) from a replay store instead "
+                        "of the configured provider: record:<store.jsonl> writes the prompts to "
+                        "<store>.pending.jsonl, replay:<store.jsonl> answers from the store and "
+                        "fails a row on any miss (see src/llm/replay.py)")
+    r.add_argument("--answers", action="store_true",
+                   help="also generate an answer per row from the first retrieval.rerank_top_k "
+                        "chunks, for `bench judge` to grade")
+
+    j = sub.add_parser("judge", help="Grade the answers of a `run --answers` (nuggets, citations, "
+                                     "abstention); writes judge.jsonl / judge.md beside the run")
+    j.add_argument("run_dir", metavar="RUN_DIR", help="a directory under eval/runs")
+    j.add_argument("--llm", required=True, metavar="MODE:STORE",
+                   help="the judge's replay store: record:<store.jsonl> or replay:<store.jsonl> "
+                        "(use a different model from the one that wrote the answers)")
+    j.add_argument("--sets", default=None, metavar="DIR", help=sets_help)
+    j.add_argument("--data-dir", default=None, metavar="DIR", dest="data_dir",
+                   help="folder holding the *chunks.jsonl files (default: the folder of "
+                        "paths.chunks_file)")
 
     rp = sub.add_parser("report", help="Re-render report.md of a finished run")
     rp.add_argument("run_dir", metavar="RUN_DIR", help="a directory under eval/runs")

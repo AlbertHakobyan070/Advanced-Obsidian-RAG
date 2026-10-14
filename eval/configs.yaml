@@ -30,3 +30,14 @@ configs:
   laya-rerank:          # EXPERIMENTAL fine-tuned Laya reranker: needs retrieval.laya.enabled + a checkpoint
     top_k: 10
     rerank: laya
+  # The free kill gate of docs/laya-finetune.md §2 (step 0): does the teacher
+  # beat the shipped reranker at all? The shipped pipeline with HyDE off (so no
+  # LLM is in the loop), and ONLY the reranker differs. The report pairs them.
+  rr-minilm:            # the shipped MiniLM cross-encoder, in process
+    top_k: 10
+    hyde: false
+    rerank: cross_encoder
+  rr-bge-m3-http:       # bge-reranker-v2-m3 behind retrieval.rerank_http (embed-sidecar, SIDECAR_TASK=rerank)
+    top_k: 10
+    hyde: false
+    rerank: http

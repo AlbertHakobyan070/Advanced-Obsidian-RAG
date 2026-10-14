@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from src.embeddings.embedder import Embedder, _tokenize
+from src.retrieval import sparse_tantivy
 from src.embeddings.sidecar import (
     check_collection, sidecar_label, sidecar_path, unstamped_warning)
 from src.utils.chroma_client import persistent_client
@@ -174,7 +175,18 @@ class HybridRetriever:
         hype_collection: str = "hype_questions",
         hype_top_k: int = 15,
         lane_weights: dict[str, float] | None = None,
+        sparse_backend: str = "bm25s",
+        tantivy_filter_pool: int = 2000,
     ):
+        # Which engine ranks the BM25 lanes (see sparse_tantivy.py). The pickle
+        # supplies every row's text and metadata either way.
+        self.sparse_backend = sparse_tantivy.check_backend(sparse_backend)
+        if isinstance(tantivy_filter_pool, bool) or not isinstance(tantivy_filter_pool, int) \
+                or tantivy_filter_pool < 1:
+            raise ValueError("retrieval.tantivy_filter_pool must be a positive integer, "
+                             f"got {tantivy_filter_pool!r}")
+        self.tantivy_filter_pool = tantivy_filter_pool
+        self._tantivy = None
         self.embedder = embedder
         self.chroma_dir = chroma_dir
         self.bm25_index = bm25_index
@@ -220,7 +232,18 @@ class HybridRetriever:
             hype_collection=cfg.get("retrieval.hype.collection", "hype_questions"),
             hype_top_k=int(cfg.get("retrieval.hype.top_k", 15)),
             lane_weights=cfg.get("retrieval.lane_weights", None),
+            sparse_backend=cfg.get("retrieval.sparse_backend", "bm25s"),
+            tantivy_filter_pool=cfg.get("retrieval.tantivy_filter_pool", 2000),
         )
+        # A tantivy backend with no index fails the build here, so /health says
+        # why, instead of the first query failing. The rows are checked against
+        # the pickle on first use (that needs the pickle loaded).
+        if (retriever.sparse_backend == "tantivy" and not
+                (sparse_tantivy.index_dir(retriever.bm25_index) / "noetrix_meta.json").is_file()):
+            raise sparse_tantivy.TantivyIndexError(
+                f"retrieval.sparse_backend is tantivy but there is no index at "
+                f"{sparse_tantivy.index_dir(retriever.bm25_index)}: run the "
+                "build_tantivy job (python build_tantivy.py) or set it back to bm25s")
         # The fingerprint guard. Vectors from another embedder are searched
         # without complaint and rank nonsense, so a mismatch raises HERE: the
         # service comes up failed (and says why) instead of answering wrongly.
@@ -309,6 +332,18 @@ class HybridRetriever:
     ) -> list[tuple[str, str, dict]]:
         """predicate(meta) -> bool restricts the ranked list (code/scope lanes)."""
         payload = self._get_bm25()
+        if self.sparse_backend == "tantivy":
+            if self._tantivy is None:
+                self._tantivy = sparse_tantivy.TantivySparse(self.bm25_index, payload["ids"])
+            # ponytail: a filtered lane ranks the best `tantivy_filter_pool` hits
+            # and filters those (bm25s filters the whole ranking); raise the pool,
+            # or push the filter into the query, if a filtered lane comes up short.
+            pool = top_k if predicate is None else max(top_k, self.tantivy_filter_pool)
+            rows = [r for r, s in self._tantivy.search(_tokenize(query), pool) if s > 0]
+            if predicate is not None:
+                rows = [r for r in rows if predicate(payload["metadatas"][r])]
+            return [(payload["ids"][i], payload["documents"][i], payload["metadatas"][i])
+                    for i in rows[:top_k]]
         bm25 = payload["bm25"]
         scores = bm25.get_scores(_tokenize(query))
         ranked = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
@@ -493,8 +528,10 @@ class HybridRetriever:
         if hype_on and want("hype"):
             with tr.span("lane.hype"):
                 active_lanes.append(("hype", self._hype_search(qvec, self.hype_top_k)))
+        # Accumulates, like the span timings: a decomposed search runs one
+        # retrieve() per branch on the same trace.
         for lane_name, results in active_lanes:
-            tr.lanes[lane_name] = len(results)
+            tr.lanes[lane_name] = tr.lanes.get(lane_name, 0) + len(results)
 
         # Per-call weights override the configured ones LANE BY LANE, so
         # {"sparse": 1.5} changes sparse and leaves the other seven alone.

@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: noetrix
+  labels:
+    app.kubernetes.io/name: noetrix
+    # The images run as a non-root user with the cluster's default seccomp profile
+    # and no added capabilities, which is what the `restricted` Pod Security
+    # Standard asks for -- except the upstream FreeLLMAPI image (root), so only
+    # `baseline` is enforced; `restricted` is reported so a violation is visible.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted

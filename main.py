@@ -295,6 +295,26 @@ def cmd_ingest_canvas(args):
     print(f"   Now run: python main.py index --append {out}")
 
 
+def cmd_ocr_studio_ingest(args):
+    """OCR Studio pages of ONE document -> its own chunk file (never a lane's
+    canonical one). The console queues `index --append` of it next."""
+    cfg = load_config(args.config)
+    _bootstrap_logging(cfg)
+    from src.ocr_studio.ingest import build_chunks, write_chunks
+
+    vault = Path(cfg.get("pdf.vault_path") or cfg.get("parser.vault_path"))
+    chunks, info = build_chunks(cfg, vault, args.doc, args.pages)
+    print(f"{args.doc}: {info['pages_selected']} of {info['pages_saved']} saved page(s) "
+          f"selected ({args.pages}), {info['pages_with_text']} with text, "
+          f"{info['chunks']} chunk(s)")
+    if not chunks:
+        print("\n❌ 0 chunks produced — mark pages done (or ingest --pages all) and "
+              "make sure their regions hold text.")
+        sys.exit(3)
+    out = write_chunks(chunks, Path(args.output))
+    print(f"\n✅ OCR Studio chunks written to {out}")
+
+
 def cmd_ingest_md(args):
     """Scoped markdown parse (inbox md lane). Unlike the vault-wide parser
     run, this REQUIRES an include filter + its own output so the canonical
@@ -660,6 +680,17 @@ def build_parser() -> argparse.ArgumentParser:
     mdp.add_argument("--force-tags", default=None, metavar="TAG,TAG",
                      help="Stamp these #tags on every chunk (metadata only)")
     mdp.set_defaults(func=cmd_ingest_md)
+
+    osi = sub.add_parser("ocr-studio-ingest",
+                         help="Chunk one document's OCR Studio pages into its own "
+                              "chunk file (the console then appends it)")
+    osi.add_argument("--doc", required=True, metavar="REL",
+                     help="Vault-relative path of the PDF or image")
+    osi.add_argument("--output", required=True, metavar="JSONL",
+                     help="Chunk file to write (data/ocrstudio_*_chunks.jsonl)")
+    osi.add_argument("--pages", default="done", choices=("done", "all"),
+                     help="done = pages marked done (default); all = every saved page")
+    osi.set_defaults(func=cmd_ocr_studio_ingest)
 
     fw = sub.add_parser("fetch-web",
                         help="Fetch web pages to markdown (inbox _converted "

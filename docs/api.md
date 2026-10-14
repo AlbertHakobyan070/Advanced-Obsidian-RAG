@@ -109,13 +109,13 @@ duplicate branch ids or too many query-mode branches. A generation failure on
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /health` | `{ready, state, uptime_s, error?}`. `state` is `ready`, `loading`, or `failed` — see [Readiness](#readiness-and-failure). |
+| `GET /health` | `{ready, state, uptime_s, version, commit, error?}`. `version` is the product version; `commit` the git commit the process started from (null outside a git checkout). `state` is `ready`, `loading`, or `failed` — see [Readiness](#readiness-and-failure). |
 | `GET /schema` | Machine-readable capability map: request fields, branch limits, the live preset registry, and the endpoint map. |
 | `GET /config` | Live retrieval defaults, the preset registry, the active reranker, and generation provenance. |
 | `POST /config` | Change retrieval defaults on the **warm** pipeline with no restart. `persist: true` also rewrites `config.yaml` and requires operator authorization. |
 | `GET /providers` | Configured generation backends: protocol, endpoint, default model, the *name* of the environment variable holding each key, and readiness flags. Never returns a secret value. |
 | `GET /chunks/{chunk_id}` | Fetch the current evidence record behind a stable id returned by `/search`, `/query` or `/compare`. |
-| `GET /stats` | Corpus size with per-domain and per-file-type breakdown. |
+| `GET /stats` | Corpus size with per-domain and per-file-type breakdown, plus `latency`: p50/p95 per endpoint, total and per stage, over the recent in-memory calls, so a caller can price a call before making it. |
 | `GET /history` | The last `/search` and `/query` calls (newest first, in-memory): question, the knobs the caller set, the full retrieval echo, confidence, timing. |
 | `GET /omnisearch` | Raw live-vault results, bypassing the index. |
 
@@ -526,7 +526,8 @@ honours. Any agent toolkit driving this API should gate on them.
 | `GET /api/vaults` | Registered vaults and their per-vault index settings. |
 | `GET /api/ocr/status` | What OCR this install can actually do right now, per engine. |
 | `GET /api/service/log` | Tail the query API's startup log. |
-| `GET /api/jobs`, `GET /api/jobs/{id}`, `GET /api/jobs/{id}/log` | Job queue state and output. |
+| `GET /api/releases` | The version on disk (`VERSION`), each part of the install (this console, the query API, the installed agent skills, a packaged bundle) as `current`, `behind`, `missing`, `not running` or `invalid` with what to do, and the release notes from `CHANGELOG.md`. The console's header version chip opens it. |
+| `GET /api/jobs`, `GET /api/jobs/{id}`, `GET /api/jobs/{id}/log` | Job queue state and output. A job record carries `elapsed_s`, `queue_position`, `progress` (the current phase's `{done, total, line}`, read from the log) and an ETA (`typical` over past successful runs of that kind, and `eta_s`; both null without history). The log takes `tail` (last N lines) and `wait` (a long poll of up to 60 s that returns as soon as there is new output or a status change). |
 | `GET /api/inbox`, `GET /api/import/converted`, `GET /api/import/file` | Staged-file listings and raw fetch. |
 | `GET /api/import/ocr_scan` | Which pages of a staged PDF carry no extractable text — run this before OCRing anything. |
 | `POST /api/rerank/check` | Preflight a cross-encoder: reachable? already cached (and where)? within its context limit? Downloads nothing. |

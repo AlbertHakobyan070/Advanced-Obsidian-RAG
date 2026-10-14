@@ -1,0 +1,76 @@
+# Persistent volumes for the RAG. Sizes are the MEASURED footprint of the live
+# corpus on 2026-10-13, rounded up with headroom to grow into:
+#
+#   rag-data      JSONL chunk files       4.0 GB measured  -> 10Gi
+#                 PRIMARY data. The corpus has no recorded ingest command, so these
+#                 files cannot be regenerated; back this volume up first.
+#   rag-indexes   ChromaDB + bm25 pickle  8.0 GB + 0.54 GB -> 20Gi
+#                 (the 8 GB is every collection on the box, including re-embed
+#                 experiments). Derived from rag-data, so rebuildable, but a full
+#                 re-embed costs 30+ minutes of CPU.
+#   rag-hf-cache  embedder + cross-encoder 7.3 GB measured with every model ever
+#                 tried; the default pipeline needs about 0.3 GB -> 10Gi
+#   rag-logs      job logs + provenance   small -> 1Gi
+#   rag-vault     the documents to ingest -> 5Gi (size to the vault)
+#
+# No storageClassName: the cluster default is used. The cloud overlay names one.
+# All ReadWriteOnce; the Deployment is single-replica (see rag.yaml).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rag-data
+  labels:
+    app.kubernetes.io/name: rag
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rag-indexes
+  labels:
+    app.kubernetes.io/name: rag
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rag-hf-cache
+  labels:
+    app.kubernetes.io/name: rag
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rag-logs
+  labels:
+    app.kubernetes.io/name: rag
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rag-vault
+  labels:
+    app.kubernetes.io/name: rag
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 5Gi

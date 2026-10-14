@@ -83,6 +83,24 @@ The two shipped registry entries (`config.yaml`, `config.example.yaml`):
 Run one sidecar per cap (two ports), on two cards at once if you like, or one
 after the other on the same port with the other `EMBED_MAX_SEQ_LENGTH`.
 
+## In a container
+
+`Dockerfile` here builds the sidecar as an image: **GPU-only and linux/amd64 only**
+(the CUDA 12.6 torch wheels are x86_64 builds, and an Apple Silicon host has no
+NVIDIA runtime to run them on). It runs as a non-root user, listens on
+`0.0.0.0:8104`, keeps the weights in `/hf_cache` (a volume), and reads the same
+variables as the table above. `HF_TOKEN` is passed through for a gated model.
+
+```bash
+docker build -t noetrix-embed:local embed-sidecar/
+docker run --rm --gpus all -p 127.0.0.1:8104:8104 -v embed-hf:/hf_cache noetrix-embed:local
+```
+
+Inside the compose stack and the Kubernetes manifests it answers to the service
+name `embed` (and `embed-l512` for the 512-token entry), which is what
+`config.example.yaml`'s container rewrite points `eg2` / `eg2_l512` at. See
+`deploy/README.md`.
+
 ## Building a collection with it
 
 The sidecar only embeds. Collections are built by the project, into a NEW
@@ -106,3 +124,32 @@ POST /v1/embeddings   {"model", "input": str | [str], "dimensions"?, "encoding_f
 ```
 
 `usage` token counts are not computed (always 0).
+
+## Rerank mode
+
+`SIDECAR_TASK=rerank` makes the same server load a cross-encoder instead
+(`RERANK_MODEL`, default `BAAI/bge-reranker-v2-m3`, fp32, checked after the load)
+and answer `POST /v1/rerank` in the shape the project's `rerank_mode: http` client
+reads, so the bench and `/search` can use a big reranker on a GPU while the project
+venv stays CPU-only. `config.yaml`'s `retrieval.rerank_http` already points at
+`http://127.0.0.1:8101/v1` with model `bge-reranker-v2-m3`, which the server accepts
+as the bare name of its id.
+
+```powershell
+$env:SIDECAR_TASK         = "rerank"
+$env:CUDA_VISIBLE_DEVICES = "1"            # the headless card
+$env:EMBED_PORT           = "8101"         # retrieval.rerank_http.base_url
+$env:HF_HOME      = "<runtime-dir>\.cache\huggingface"
+$env:HF_HUB_CACHE = "<runtime-dir>\.cache\huggingface\hub"
+G:\eg2_bench\gpu_venv\Scripts\python.exe embed-sidecar\server.py
+```
+
+```
+GET  /health      -> {"ok", "task": "rerank", "model", "device", "dtype", "max_seq_length", "batch_size", "versions"}
+POST /v1/rerank   {"model", "query", "documents": [str], "top_n"?}
+                  -> {"model", "results": [{"index", "relevance_score"}]}, best first
+```
+
+`relevance_score` is the raw logit. `EMBED_MAX_SEQ_LENGTH` (default 512, as the
+in-process `cross_encoder_max_length`) caps each (query, document) pair, and
+`EMBED_BATCH_SIZE`, `EMBED_DEVICE`, `EMBED_HOST` work as in embed mode.

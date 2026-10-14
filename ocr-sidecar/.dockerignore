@@ -1,0 +1,5 @@
+# Allowlist: the image needs server.py and nothing else in this folder. (The
+# Dockerfile itself is always sent.) A new file here stays out of the build context
+# until someone says it belongs in the image.
+*
+!server.py

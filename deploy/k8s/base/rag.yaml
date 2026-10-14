@@ -1,0 +1,206 @@
+# The RAG: query API (:8051) and management console (:8052) in ONE pod, one
+# container. They stay together because the console's "restart :8051" button
+# signals a pid in a shared process namespace (see deploy/docker/docker-entrypoint.sh).
+#
+# replicas stays 1 and the strategy is Recreate, both on purpose:
+#   * ChromaDB's on-disk store has one writer. Two pods on the same index, or a
+#     rolling update that briefly runs old and new side by side, corrupts it.
+#   * the PVCs are ReadWriteOnce.
+# Scaling reads out means a second, read-only deployment of the same image over a
+# ReadOnlyMany copy of the indexes; that is not built here.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rag
+  labels:
+    app.kubernetes.io/name: rag
+    app.kubernetes.io/component: rag
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rag
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rag
+        app.kubernetes.io/component: rag
+    spec:
+      # Non-root is the image's own default (USER 10001); this makes the cluster
+      # enforce it, and fsGroup hands every mounted volume to that user.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # A restart reloads both indexes (minutes), so the ordinary shutdown just
+      # needs time to let a running job notice SIGTERM.
+      terminationGracePeriodSeconds: 60
+      # REQUIRED, not tidiness. For every Service in the namespace Kubernetes injects
+      # docker-link style variables into each pod: the Services `rag` and
+      # `rag-console` would set RAG_PORT=tcp://10.x.x.x:8051 and
+      # RAG_CONSOLE_PORT=tcp://10.x.x.x:8052 -- the very variables the entrypoint and
+      # healthcheck.sh read as port NUMBERS. The pod would crash on `--port tcp://...`.
+      enableServiceLinks: false
+      containers:
+        - name: rag
+          # No tag here: each overlay sets name and tag through `images:`.
+          image: noetrix-rag
+          ports:
+            - name: api
+              containerPort: 8051
+            - name: console
+              containerPort: 8052
+          env:
+            - name: RAG_SERVE_PID_FILE
+              value: /tmp/serve_api.pid
+            - name: RAG_LOG_DIR
+              value: /app/logs
+            # config.docker.yaml expands ${RAG_HOST_HOME} into parser.vault_path.
+            # Here it is the mount point of the vault volume.
+            - name: RAG_HOST_HOME
+              value: /vault
+          envFrom:
+            # Provider keys (OPENAI_API_KEY, HF_TOKEN, ...). Optional: retrieval
+            # needs none, and the FreeLLMAPI proxy holds its own keys. Create it
+            # with `kubectl create secret generic noetrix-provider-keys`; see
+            # secret.template.yaml. The ENCRYPTION_KEY is NOT in this secret.
+            - secretRef:
+                name: noetrix-provider-keys
+                optional: true
+          volumeMounts:
+            # The generated config, mounted as a single file. A ConfigMap mount is
+            # read-only, so the console's Settings tab cannot save here: change the
+            # config by regenerating it (deploy/README.md), which also rolls the pod.
+            - name: config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            - name: data
+              mountPath: /app/data       # JSONL chunk files: PRIMARY data
+            - name: indexes
+              mountPath: /rag_data       # ChromaDB + bm25 pickle: derived from data
+            - name: hf-cache
+              mountPath: /hf_cache
+            - name: logs
+              mountPath: /app/logs       # job logs + provenance records
+            - name: vault
+              mountPath: /vault          # the documents to ingest
+            - name: tmp
+              mountPath: /tmp            # pid file, scratch
+          # Measured 2026-10-13 on the live stack (Windows host, same code): the
+          # query API held 3.26 GB private bytes with the real corpus loaded
+          # (peak working set 2.6 GB), the console 0.92 GB. Together ~4.2 GB, so
+          # the request is 4.5 GiB. The limit leaves room for ingest jobs, which
+          # run as subprocesses of the console inside this container and load an
+          # embedder of their own. A tiny index needs far less: see overlays/local.
+          resources:
+            requests:
+              cpu: "1"
+              memory: 4608Mi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          # Three probes, three different questions:
+          #
+          #  startup   Has the first boot FINISHED? Uvicorn does not open :8051 until
+          #            the pipeline build (indexes + models) is done -- whether it
+          #            succeeded or failed -- so "answers HTTP" means "boot is over".
+          #            Generous: a cold model cache is a download.
+          #  liveness  Are both servers still answering? Says nothing about the index.
+          #  readiness Can it answer a query? True only when /health says
+          #            "ready":true. A pipeline that failed to build is Running but
+          #            NOT Ready: it gets no API traffic, and is not restarted for it.
+          #            (An empty index is NOT a failure: measured, the pipeline builds
+          #            against an empty volume and reports ready.)
+          startupProbe:
+            exec:
+              command: ["healthcheck.sh", "live"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 90
+          livenessProbe:
+            exec:
+              command: ["healthcheck.sh", "live"]
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            exec:
+              command: ["healthcheck.sh"]
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            # Not read-only: the app writes under /app (bytecode, eval sets) as well
+            # as to the volumes above. Everything it writes is on a volume or /tmp.
+            readOnlyRootFilesystem: false
+      volumes:
+        - name: config
+          configMap:
+            name: noetrix-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: rag-data
+        - name: indexes
+          persistentVolumeClaim:
+            claimName: rag-indexes
+        - name: hf-cache
+          persistentVolumeClaim:
+            claimName: rag-hf-cache
+        - name: logs
+          persistentVolumeClaim:
+            claimName: rag-logs
+        - name: vault
+          persistentVolumeClaim:
+            claimName: rag-vault
+        - name: tmp
+          emptyDir: {}
+---
+# The query API. ClusterIP only: it has no authentication (it was built to listen
+# on localhost), so anything that exposes it beyond the cluster must add its own.
+apiVersion: v1
+kind: Service
+metadata:
+  name: rag
+  labels:
+    app.kubernetes.io/name: rag
+    app.kubernetes.io/component: rag
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: rag
+  ports:
+    - name: api
+      port: 8051
+      targetPort: api
+---
+# The management console, as its own Service so it can be reached while the pod is
+# NOT Ready. publishNotReadyAddresses is the point: the console is the tool that
+# fixes a pipeline that failed to build, ingests into a fresh install, and presses
+# restart. Behind the readiness-gated Service above it would vanish exactly when it
+# is needed. Same authentication caveat as the API; for access use
+# `kubectl port-forward svc/rag-console 8052:8052`.
+apiVersion: v1
+kind: Service
+metadata:
+  name: rag-console
+  labels:
+    app.kubernetes.io/name: rag
+    app.kubernetes.io/component: console
+spec:
+  type: ClusterIP
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: rag
+  ports:
+    - name: console
+      port: 8052
+      targetPort: console

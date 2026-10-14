@@ -62,12 +62,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import time
 import traceback
 from collections import Counter, deque
 from contextlib import asynccontextmanager
-from typing import Any, Literal
+from typing import Any, Iterator, Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -80,6 +81,7 @@ from src.retrieval.retriever import LANES, RetrievedDoc
 from src.retrieval.reranker import RERANK_MODES, RerankerExecutionError
 from src.utils.config_loader import load_config, persist_config_values
 from src.utils.branding import QUERY_API_TITLE, QUERY_SERVICE
+from src.utils.release import PRODUCT_VERSION, git_head
 from src.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -153,7 +155,10 @@ async def lifespan(app: FastAPI):
     _STATE.clear()
 
 
-app = FastAPI(title=QUERY_API_TITLE, version="0.4.0", lifespan=lifespan)
+app = FastAPI(title=QUERY_API_TITLE, version=PRODUCT_VERSION, lifespan=lifespan)
+# The commit this process started from: the console compares it with the
+# checkout to tell a service that needs a restart (None outside a git checkout).
+_STARTED_COMMIT = (git_head() or {}).get("commit")
 
 # The management web UI (manage_api.py, default :8052) calls this API from the
 # browser; same-machine, different port = CORS. Localhost-only origins.
@@ -226,6 +231,12 @@ class QueryIn(BaseModel):
     # Force the scope lanes (dense_scope / sparse_scope) on or off for this
     # call; the scope is still detected and echoed. Unset = retrieval.scope_lanes.
     scope_lanes: bool | None = None
+    # At most this many chunks of one source file in the final list (0 = no
+    # cap; unset = retrieval.max_per_file). Part of the retrieval key.
+    max_per_file: int | None = Field(default=None, ge=0, le=50)
+    # Query decomposition on or off for this call (one LLM call; LLM errors
+    # are reported, never hidden). Unset = retrieval.decompose.enabled.
+    decompose: bool | None = None
     # Post-rerank relevance gate for this call: chunks scoring below
     # gate_threshold are dropped BEFORE generation (and before parent/neighbor
     # expansion), and when none survive the answer is the fixed "nothing
@@ -307,6 +318,12 @@ class SearchIn(BaseModel):
     # Force the scope lanes (dense_scope / sparse_scope) on or off for this
     # call; the scope is still detected and echoed. Unset = retrieval.scope_lanes.
     scope_lanes: bool | None = None
+    # At most this many chunks of one source file in the final list (0 = no
+    # cap; unset = retrieval.max_per_file). Part of the retrieval key.
+    max_per_file: int | None = Field(default=None, ge=0, le=50)
+    # Query decomposition on or off for this call (one LLM call; LLM errors
+    # are reported, never hidden). Unset = retrieval.decompose.enabled.
+    decompose: bool | None = None
     # Post-rerank relevance gate, as on /query: drops chunks scoring below
     # gate_threshold before they are returned (and before parent/neighbor
     # expansion). Unset = retrieval.relevance_gate.enabled. The default scorer
@@ -375,6 +392,12 @@ class CompareBranchIn(BaseModel):
     lanes: list[str] | None = None
     metadata_boost: bool | None = None
     scope_lanes: bool | None = None
+    # At most this many chunks of one source file in the final list (0 = no
+    # cap; unset = retrieval.max_per_file). Part of the retrieval key.
+    max_per_file: int | None = Field(default=None, ge=0, le=50)
+    # Query decomposition on or off for this call (one LLM call; LLM errors
+    # are reported, never hidden). Unset = retrieval.decompose.enabled.
+    decompose: bool | None = None
     # The relevance gate (see QueryIn). Part of the retrieval key, so branches
     # that differ only by gate do not share one evidence set.
     gate: bool | None = None
@@ -539,7 +562,7 @@ _RETRIEVAL_FIELDS = (
     "preset", "auto_preset", "top_k", "dense_top_k", "sparse_top_k",
     "hyde", "omnisearch", "parent_context", "neighbor_context", "hype",
     "rerank", "rerank_instruction", "lane_weights", "lanes", "metadata_boost",
-    "scope_lanes", "gate", "gate_threshold", "gate_scorer",
+    "scope_lanes", "gate", "gate_threshold", "gate_scorer", "max_per_file", "decompose",
 )
 
 
@@ -751,6 +774,8 @@ def health() -> dict:
         "state": "ready" if ready else ("failed" if err else "loading"),
         "uptime_s": int(time.time() - _STATE["started_at"])
                     if _STATE.get("started_at") else None,
+        "version": PRODUCT_VERSION,
+        "commit": _STARTED_COMMIT,
     }
     if err:
         out["error"] = err
@@ -1461,21 +1486,58 @@ def omnisearch(q: str, k: int = 8) -> dict:
     }
 
 
+def _latency() -> dict:
+    """p50/p95 per endpoint and per stage over the calls in _HISTORY, so an
+    agent can price a call before making it. Stages nested under /query's
+    retrieval/generation blocks are flattened as "retrieval.rerank"."""
+    def pct(xs: list[float], q: float) -> float:
+        xs = sorted(xs)                                     # nearest rank
+        return xs[min(len(xs) - 1, max(0, math.ceil(q * len(xs)) - 1))]
+
+    def flat(t: dict, prefix: str = "") -> Iterator[tuple[str, float]]:
+        for k, v in (t or {}).items():
+            if isinstance(v, dict):
+                yield from flat(v, f"{prefix}{k}.")
+            elif isinstance(v, (int, float)) and not isinstance(v, bool):
+                yield prefix + k, v
+
+    totals: dict[str, list] = {}
+    stages: dict[str, dict[str, list]] = {}
+    for row in _HISTORY:
+        ep = row["endpoint"]
+        totals.setdefault(ep, []).append(row["ms"])
+        for stage, ms in flat(row.get("timings") or {}):
+            stages.setdefault(ep, {}).setdefault(stage, []).append(ms)
+    return {
+        "by_endpoint": {
+            ep: {"calls": len(ms),
+                 "total_ms": {"p50": pct(ms, .5), "p95": pct(ms, .95)},
+                 "stages_ms": {s: {"p50": pct(v, .5), "p95": pct(v, .95)}
+                               for s, v in stages.get(ep, {}).items()}}
+            for ep, ms in totals.items()},
+        "note": f"over the last {len(_HISTORY)} call(s) held in memory since the "
+                "last :8051 restart (at most 50); a p95 over a handful of calls "
+                "is a rough guide. Stages are in ms.",
+    }
+
+
 @app.get("/stats")
 def stats() -> dict:
     """
     Corpus overview computed from the warm BM25 payload's metadata (already in
     memory once the first query has run). Cached after first build. Gives an
-    agent/UI the domain map without a 168K-row ChromaDB scan.
+    agent/UI the domain map without a 168K-row ChromaDB scan. `latency` is
+    recomputed per call from the recent-call history and never cached.
     """
     if "stats" in _STATE:
-        return _STATE["stats"]
+        return {**_STATE["stats"], "latency": _latency()}
     rag = _rag()
     try:
         payload = rag.retriever._get_bm25()
         metas = payload.get("metadatas", [])
     except Exception as e:
-        return {"error": f"BM25 payload unavailable ({type(e).__name__}: {e})"}
+        return {"error": f"BM25 payload unavailable ({type(e).__name__}: {e})",
+                "latency": _latency()}
 
     by_domain: Counter = Counter()
     by_type: Counter = Counter()
@@ -1495,7 +1557,7 @@ def stats() -> dict:
         "config": _current_config(),
     }
     _STATE["stats"] = out
-    return out
+    return {**out, "latency": _latency()}
 
 
 @app.get("/schema")
@@ -1570,6 +1632,16 @@ def schema() -> dict:
         "scope_lanes": "bool? (force the dense_scope/sparse_scope lanes on or "
                        "off for this call; the scope is still detected and "
                        "echoed. Unset follows retrieval.scope_lanes)",
+        "max_per_file": "int? 0..50 (at most this many chunks of one source "
+                        "file in the final list, best first, backfilled if the "
+                        "cap leaves fewer than top_k; 0 = no cap. Unset follows "
+                        "retrieval.max_per_file)",
+        "decompose": "bool? (query decomposition: one LLM call splits a multi-part "
+                     "question into sub-queries, each retrieved and reranked on "
+                     "its own, merged by reciprocal rank; an atomic question runs "
+                     "unchanged. LLM errors are returned, not hidden; cannot be "
+                     "combined with the gate. Unset follows "
+                     "retrieval.decompose.enabled; the echo's decompose says what ran)",
         "gate": "bool? (force the post-rerank relevance gate on or off for this "
                 "call; unset follows retrieval.relevance_gate.enabled. Chunks "
                 "scoring below gate_threshold are dropped before generation, "
@@ -1608,7 +1680,9 @@ def schema() -> dict:
                                                        "id returned by /search, "
                                                        "/query or /compare when "
                                                        "lookup_available=true",
-            "GET /stats": "corpus size + per-domain/file-type breakdown",
+            "GET /stats": "corpus size + per-domain/file-type breakdown, and "
+                          "`latency`: p50/p95 total and per stage for each "
+                          "endpoint over the recent calls (price a call first)",
             "GET /omnisearch?q=&k=": "raw live-vault results (Obsidian must be open)",
             "POST /search": {
                 "purpose": "retrieval only — chunks + labels + text; no LLM needed",

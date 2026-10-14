@@ -1,0 +1,83 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# LOCAL: kind or k3d on a laptop, to prove the manifests and try the stack. Not a
+# sizing for a real corpus -- the base is that.
+#
+#   # 1. config + images (from the repo root)
+#   python deploy/docker/make_docker_config.py config.example.yaml deploy/k8s/base/config.docker.yaml
+#   docker build -f deploy/docker/Dockerfile -t noetrix-rag:local .
+#   kind load docker-image noetrix-rag:local          # k3d: k3d image import noetrix-rag:local
+#
+#   # 2. secrets (never in a file here; see ../../base/secret.template.yaml)
+#   kubectl create namespace noetrix
+#   kubectl -n noetrix create secret generic noetrix-proxy --from-literal=ENCRYPTION_KEY="$(openssl rand -hex 32)"
+#
+#   # 3. apply, then reach the console
+#   kubectl apply -k deploy/k8s/overlays/local
+#   kubectl -n noetrix port-forward svc/rag-console 8052:8052
+#
+# The images are loaded into the cluster's nodes, never pulled, hence
+# IfNotPresent. To try OCR, uncomment the component below and load that image too.
+resources:
+  - ../../base
+
+# components:
+#   - ../../components/paddleocr
+#   - ../../components/rerank
+
+images:
+  - name: noetrix-rag
+    newTag: local
+  - name: noetrix-paddleocr
+    newTag: local
+
+patches:
+  # A laptop cluster usually has the default `standard` class and no spare disk:
+  # shrink the claims. A small test corpus needs a few hundred MB.
+  - target:
+      kind: PersistentVolumeClaim
+      name: rag-data
+    patch: |-
+      - op: replace
+        path: /spec/resources/requests/storage
+        value: 1Gi
+  - target:
+      kind: PersistentVolumeClaim
+      name: rag-indexes
+    patch: |-
+      - op: replace
+        path: /spec/resources/requests/storage
+        value: 2Gi
+  - target:
+      kind: PersistentVolumeClaim
+      name: rag-hf-cache
+    patch: |-
+      - op: replace
+        path: /spec/resources/requests/storage
+        value: 3Gi
+  - target:
+      kind: PersistentVolumeClaim
+      name: rag-vault
+    patch: |-
+      - op: replace
+        path: /spec/resources/requests/storage
+        value: 1Gi
+  # Smaller requests so it schedules on a 4-6 GB kind node: an EMPTY or tiny index
+  # loads a fraction of the real corpus's ~3.3 GB. Measured with a ready pipeline on
+  # an empty index (docker stats, 2026-10-13): 448 MiB for the whole container, query
+  # API and console together, so 1.5 GiB leaves room for a first ingest. See the base
+  # for the sizing that a real corpus needs.
+  - target:
+      kind: Deployment
+      name: rag
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: 1536Mi
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: 4Gi
+      - op: add
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: IfNotPresent

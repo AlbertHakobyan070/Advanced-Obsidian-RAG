@@ -1,8 +1,11 @@
 # Docker deployment
 
 Run the whole system on another machine from the packaged `rag-docker-bundle`
-tree with **two commands** — no Python, no venv, no path surgery. A plain source
-clone does not contain the Compose/Dockerfile scaffold.
+tree with **two commands** — no Python, no venv, no path surgery. The same
+Dockerfiles and Compose files are versioned in the repository under `deploy/`,
+which also carries a Kubernetes (kustomize) path; its README explains how a
+checkout, the archives and the cluster manifests relate. This page describes
+the packaged archive.
 
 Everything binds to `127.0.0.1`. Nothing is exposed to your network.
 
@@ -16,28 +19,54 @@ Everything binds to `127.0.0.1`. Nothing is exposed to your network.
 ## What's in the bundle
 
 ```
+start.sh, start.ps1       # the launcher: checks Docker, sets up .env, starts, waits until ready
+INSTALL.md                # the same walk-through for macOS, Windows and Linux
+BUILD_INFO.txt            # exactly what this archive is: version, commit, skills' hashes
 docker-compose.yml        # the services, 127.0.0.1-bound, with opt-in profiles
-Dockerfile                # CPU-only PyTorch, both APIs in one container
-config.docker.yaml        # container config (Linux paths); copied to config.yaml in the image
+docker-compose.override.yml  # re-points the build contexts for this flat layout
+Dockerfile                # CPU-only PyTorch, both APIs in one container, non-root
+constraints.txt           # pins for the transitive ML packages
+config.docker.yaml        # container config (Linux paths); GENERATED, mounted at /app/config.yaml
 docker-entrypoint.sh      # supervises serve_api (:8051) alongside manage_api (:8052)
+healthcheck.sh            # the readiness/liveness probe the image and Compose use
 paddleocr/                # the OCR sidecar image + its tiny HTTP service
                           # (a shipping copy of the repo's ocr-sidecar/)
+skills/                   # the two agent skills: personal-rag (ask) and rag-ops (operate)
 .env.example              # settings + provider-key template
 app/                      # the application source
 data/                     # JSONL chunk files (the source of truth)
-rag_data/                 # prebuilt ChromaDB + BM25 indexes
+rag_data/                 # prebuilt ChromaDB + BM25 indexes (only in a corpus archive)
 ```
 
 The image installs **CPU-only PyTorch first**, so it never drags in
-multi-gigabyte GPU wheels. Data and indexes are mounted as volumes rather than
-baked into the image, so `docker compose build` stays fast.
+multi-gigabyte GPU wheels, and runs as a non-root user. The base images and the
+dependency stack are pinned (see `constraints.txt` and the Dockerfile). The
+configuration is a **mounted file** and is never baked in; data and indexes are
+volumes too, so `docker compose build` stays fast and an image can be shared
+without sharing a corpus. The `rag` container reports healthy only when
+`/health` says `"ready":true`, not merely when the server answers. A fresh install
+with nothing ingested builds against an empty index and goes healthy after the
+models load; a pipeline that fails to build stays unhealthy, with the reason in
+`/health`.
 
 ## Prerequisite
 
-Install **Docker Desktop**, start it once, and unpack a bundle produced by the
-release packaging workflow.
+Install **Docker Desktop** (macOS, Windows) or **Docker Engine with the compose
+plugin** (Linux), start it once, and unpack a bundle produced by the release packaging
+workflow. The image is built on the machine that unpacks it, so the same bundle works on
+Apple Silicon, Intel, Windows and Linux hosts.
 
 ## Start it
+
+One command checks Docker, fills in `.env`, builds, starts, and waits until the query API
+is ready, stopping with a plain explanation at the first thing that is wrong:
+
+```bash
+sh start.sh                                            # macOS, Linux
+powershell -ExecutionPolicy Bypass -File start.ps1     # Windows
+```
+
+It automates exactly this, which you can also run yourself:
 
 ```bash
 docker compose up --build -d
@@ -69,6 +98,24 @@ selectable from the console's vault switcher with no further edits.
     The console can only offer paths the **container** can see. A collection on
     an external drive needs its own entry in the `volumes:` list of the `rag`
     service.
+
+!!! note "Windows"
+    A Linux container cannot mount onto a drive letter, so a second line names where
+    your home folder appears inside it: `RAG_HOST_HOME=C:/Users/you` together with
+    `RAG_CONTAINER_HOME=/c/Users/you`. `start.ps1` writes both. Leave
+    `RAG_CONTAINER_HOME` unset on macOS and Linux.
+
+## Agent skills
+
+`skills/` holds the two skills that let a coding agent drive the stack: **personal-rag**
+(ask, search, compare, inspect evidence on `:8051`) and **rag-ops** (ingest, OCR, settings,
+jobs, the evaluation bench on `:8052`). One command installs both for Claude Code, and is
+safe to repeat after a newer archive:
+
+```bash
+sh start.sh skills                    # PowerShell: start.ps1 skills
+sh start.sh skills --dest FOLDER      # another agent's skills folder (PowerShell: -Dest)
+```
 
 ## Point it at a model
 
@@ -247,7 +294,8 @@ the two things that make the following restart fail.
   refuses to guess where your home folder is. See [One path to set](#one-path-to-set).
 - **Ask returns a generation error** — the backend has no key yet, or a free
   quota is exhausted. `/search` and evidence comparison trees still work.
-- **Port already in use** — change the left-hand host port in
-  `docker-compose.yml` (e.g. `"127.0.0.1:9051:8051"`).
+- **Port already in use** — set the host port in `.env`, e.g.
+  `NOETRIX_API_PORT=9051` (also `NOETRIX_CONSOLE_PORT`, `NOETRIX_PROXY_PORT`).
+  The container-side ports do not change.
 - **Model download is slow the first time** — expected; it is cached in a named
   volume afterwards.

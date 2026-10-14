@@ -159,3 +159,96 @@ def test_a_non_integer_environment_value_is_an_error(monkeypatch):
         server._env_int("EMBED_MAX_SEQ_LENGTH", 512)
     monkeypatch.delenv("EMBED_MAX_SEQ_LENGTH")
     assert server._env_int("EMBED_MAX_SEQ_LENGTH", 512) == 512         # the bounded default
+
+
+# --- rerank mode (SIDECAR_TASK=rerank) ------------------------------------------------
+
+RERANKER = "BAAI/bge-reranker-v2-m3"
+
+
+class FakeCrossEncoder:
+    """Scores each (query, document) pair by the document's length, and records the pairs."""
+
+    def __init__(self):
+        self.calls = []
+
+    def predict(self, pairs, batch_size, show_progress_bar):
+        self.calls.append({"pairs": list(pairs), "batch_size": batch_size})
+        return np.array([float(len(d)) for _, d in pairs], dtype=np.float32)
+
+
+@pytest.fixture
+def live_rerank():
+    """(model, base_url, call) with a rerank server on a free port."""
+    model = FakeCrossEncoder()
+    service = server.RerankService(model, RERANKER, "cuda", max_seq_length=512, batch_size=16)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.make_handler(service))
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+
+    def call(path, body=None):
+        req = urllib.request.Request(base + path, method="GET" if body is None else "POST",
+                                     data=None if body is None else json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, json.load(r)
+        except urllib.error.HTTPError as e:
+            return e.code, json.load(e)
+
+    yield model, base, call
+    httpd.shutdown()
+    httpd.server_close()
+
+
+def test_rerank_returns_every_document_best_first_with_its_index(live_rerank):
+    model, _, call = live_rerank
+    status, body = call("/v1/rerank", {"model": RERANKER, "query": "q", "documents": ["bb", "a", "cccc"]})
+    assert status == 200 and body["model"] == RERANKER
+    assert body["results"] == [{"index": 2, "relevance_score": 4.0}, {"index": 0, "relevance_score": 2.0},
+                               {"index": 1, "relevance_score": 1.0}]
+    assert model.calls[0] == {"pairs": [("q", "bb"), ("q", "a"), ("q", "cccc")], "batch_size": 16}
+    assert call("/health")[1]["task"] == "rerank"
+
+
+def test_rerank_top_n_keeps_the_best_n_and_the_bare_model_name_is_accepted(live_rerank):
+    _, _, call = live_rerank
+    status, body = call("/v1/rerank", {"model": "bge-reranker-v2-m3", "query": "q",
+                                       "documents": ["bb", "a", "cccc"], "top_n": 1})
+    assert status == 200 and [r["index"] for r in body["results"]] == [2]
+
+
+@pytest.mark.parametrize("body, fragment", [
+    ({"model": "cross-encoder/ms-marco-MiniLM-L-6-v2", "query": "q", "documents": ["a"]}, "serves"),
+    ({"model": RERANKER, "query": " ", "documents": ["a"]}, "query"),
+    ({"model": RERANKER, "query": "q", "documents": []}, "non-empty list of strings"),
+    ({"model": RERANKER, "query": "q", "documents": [3]}, "non-empty list of strings"),
+    ({"model": RERANKER, "query": "q", "documents": ["a"], "top_n": 0}, "top_n"),
+    ({"model": RERANKER, "query": "q", "documents": ["a"], "top_n": True}, "top_n"),
+])
+def test_a_bad_rerank_request_is_a_400_and_scores_nothing(live_rerank, body, fragment):
+    model, _, call = live_rerank
+    status, err = call("/v1/rerank", body)
+    assert status == 400 and fragment in err["error"]["message"]
+    assert model.calls == []
+
+
+def test_a_rerank_server_has_no_embeddings_route_and_a_short_score_list_is_a_500(live_rerank):
+    model, _, call = live_rerank
+    assert call("/v1/embeddings", {"model": RERANKER, "input": ["a"]})[0] == 404
+    model.predict = lambda pairs, **k: np.array([1.0])          # one score for two documents
+    status, err = call("/v1/rerank", {"model": RERANKER, "query": "q", "documents": ["a", "b"]})
+    assert status == 500 and "refusing to rank" in err["error"]["message"]
+
+
+def test_the_projects_http_reranker_reads_this_server(live_rerank):
+    """The contract end to end: rerank_mode http, configured as config.yaml names the model."""
+    from src.retrieval.reranker import Reranker
+    from src.retrieval.retriever import RetrievedDoc
+
+    _, base, _ = live_rerank
+    rr = Reranker(model_name="cross-encoder/ms-marco-MiniLM-L-6-v2", mode="http",
+                  http_url=base + "/v1", http_model="bge-reranker-v2-m3")
+    docs = [RetrievedDoc(id=i, text=t, metadata={}) for i, t in (("a", "xx"), ("b", "x"), ("c", "xxx"))]
+    top = rr.rerank("q", docs, top_k=2)
+    assert [d.id for d in top] == ["c", "a"] and top[0].rerank_score == 3.0

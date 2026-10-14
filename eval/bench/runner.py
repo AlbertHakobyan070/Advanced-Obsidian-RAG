@@ -120,7 +120,13 @@ def _write_json(path: Path, obj) -> None:
     os.replace(tmp, path)
 
 
-def _run_one(rag, q, name: str, overrides: dict) -> dict:
+def _run_one(rag, q, name: str, overrides: dict, *, answer_k: int | None = None,
+             strict_llm: bool = False) -> dict:
+    """One question under one configuration. `answer_k` set = also generate an
+    answer from the first answer_k chunks of the final list. `strict_llm` = the
+    LLM is a replay store (--llm): HyDE swallows LLM errors by design and falls
+    back to the raw question, which under a fixed LLM is a broken run, not a
+    degraded one, so that row becomes an error."""
     row = {"qid": q.id, "config": name, "suite": q.suite, "tier": q.tier, "split": q.split,
            "author": q.provenance.get("author"), "answerable": q.answerable,
            "ids": [], "files": [], "match": [], "doc_match": [],
@@ -142,6 +148,19 @@ def _run_one(rag, q, name: str, overrides: dict) -> dict:
                match=[sorted(s) for s in j.matches], doc_match=[sorted(s) for s in j.doc_matches],
                timings=info["timings"], lanes_run=info["lanes_run"], cold=info["cold"],
                hyde_cache=info["hyde_cache"])
+    if info.get("decompose"):
+        row["decompose"] = info["decompose"]
+    if strict_llm and info["hyde_cache"] == "error":
+        row["error"] = "HyDE got no draft from the replay store (ReplayMiss); the row is not scored"
+        return row
+    if answer_k:
+        try:
+            ans = rag.generator.generate(q.question, docs[:answer_k])
+        except Exception as e:
+            row["error"] = f"answer: {type(e).__name__}: {e}"
+            return row
+        row["answer"] = {"text": ans.text, "confidence": ans.confidence,
+                         "cited": [c.number for c in ans.citations], "k": len(docs[:answer_k])}
     if q.answerable:
         row["metrics"] = retrieval_metrics(j, q.gold)
     return row
@@ -241,11 +260,14 @@ def _warm_up(rag, configs) -> None:
 def run_bench(cfg, questions, configs, *, split: str = "dev", unseal_test: bool = False,
               out_root: Path = DEFAULT_RUNS, rag=None, ledger: Path = DEFAULT_LEDGER,
               progress=print, limit: int | None = None, quiet_logs: bool = True,
-              warmup: bool = False) -> Path:
+              warmup: bool = False, llm=None, answers: bool = False) -> Path:
     """Run `configs` ([(name, search-overrides)]) over the selected `questions`
     and return the run directory. `split` is dev | test | all; test and all need
     `unseal_test`. `limit` keeps the first N questions AFTER the split filter.
     `progress` is called once per finished configuration with one line of text.
+    `llm` (a ReplayLLM) replaces the LLM of HyDE and the generator for the whole
+    run. `answers` also generates an answer per row from the production number
+    of chunks (retrieval.rerank_top_k), for the judge to grade.
     """
     if split not in SPLITS:
         raise RunSetupError(f"split must be one of {', '.join(SPLITS)}, got {split!r}")
@@ -279,6 +301,11 @@ def run_bench(cfg, questions, configs, *, split: str = "dev", unseal_test: bool 
         rag = RAGPipeline.from_config(cfg)
     if rag.hyde.cache is None:
         rag.hyde.cache = HydeCache(cfg.path("retrieval.hyde_cache.path", "data/cache/hyde.sqlite"))
+    if llm is not None:
+        rag.hyde.llm = rag.generator.llm = llm
+        if getattr(rag, "decomposer", None) is not None:
+            rag.decomposer.llm = llm
+    answer_k = rag.rerank_top_k if answers else None
     meta = {
         "run_id": run_id, "status": "running", "started_at": started.isoformat(timespec="seconds"),
         "git": git, "config_digest": config_digest(cfg), "index": index_fingerprint(cfg, rag),
@@ -286,6 +313,9 @@ def run_bench(cfg, questions, configs, *, split: str = "dev", unseal_test: bool 
         "suites": [s for s in SUITES if any(q.suite == s for q in selected)],
         "n_questions": len(selected), "limit": limit, "seed": SEED,
         "configs": {name: dict(overrides) for name, overrides in configs},
+        "llm": ({"mode": llm.mode, "store": str(llm.store), "model": llm.model}
+                if llm is not None else None),
+        "answers": {"k": answer_k} if answers else None,
     }
 
     run_dir = Path(out_root) / run_id
@@ -309,7 +339,8 @@ def run_bench(cfg, questions, configs, *, split: str = "dev", unseal_test: bool 
                 t_cfg = time.perf_counter()
                 rows = rows_by_config[name] = []
                 for q in selected:
-                    row = _run_one(rag, q, name, overrides)
+                    row = _run_one(rag, q, name, overrides, answer_k=answer_k,
+                                   strict_llm=llm is not None)
                     rows.append(row)
                     out.write(json.dumps(row, ensure_ascii=False) + "\n")
                     out.flush()

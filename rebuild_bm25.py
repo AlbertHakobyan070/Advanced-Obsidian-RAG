@@ -37,7 +37,8 @@ def main():
     cfg = load_config(None)
     chunks_file = cfg.path("paths.chunks_file")
     bm25_index = cfg.path("paths.bm25_index")
-    n = build_sparse_union(chunks_file, bm25_index)
+    n = build_sparse_union(chunks_file, bm25_index,
+                           tantivy=cfg.get("retrieval.sparse_backend", "bm25s") == "tantivy")
     if n == 0:
         log.error("No chunks found under %s — nothing indexed.", Path(chunks_file).parent)
         sys.exit(3)

@@ -73,6 +73,7 @@ do this — follow the same pattern for any new one.
 | Script | Purpose |
 |---|---|
 | `rebuild_bm25.py` | Rebuild only the sparse index after metadata changes / deletions. |
+| `build_tantivy.py` | EXPERIMENTAL. Build the tantivy index beside the BM25 pickle (optional `tantivy` package), so `retrieval.sparse_backend: tantivy` can rank the BM25 lanes; restart the query API after switching. While that backend is set, every sparse rebuild rebuilds it too, and a stale index is refused rather than searched. |
 | `recalibrate_courses.py` | Re-tag the grouping label in place without re-embedding. |
 | `delete_doc.py` | Preview only: lists what a removal would touch and prints the console's `POST /api/documents/delete` call, which removes it from both indexes. |
 | `dedup_jsonl.py` | Drop duplicate `doc_id`s from a chunk file. |

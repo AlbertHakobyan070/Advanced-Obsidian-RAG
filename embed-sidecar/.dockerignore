@@ -1,0 +1,5 @@
+# Allowlist: the image needs server.py and requirements.txt and nothing else in
+# this folder. (The Dockerfile itself is always sent.)
+*
+!server.py
+!requirements.txt
