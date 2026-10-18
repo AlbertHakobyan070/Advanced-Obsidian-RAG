@@ -142,6 +142,12 @@ embedding:
 #
 # Nothing here costs anything or runs until you select it as
 # generation.provider AND its key is present.
+#
+# `vision: true` on an entry says its model reads images. The Graph tab's
+# suggest-label attaches an image file node only for such an entry, and the
+# LLM client refuses to send images to any other. Absent = false. Set it only
+# after checking the endpoint's model accepts images, and not on a router
+# whose model can change per request.
 # ---------------------------------------------------------------------------
 providers:
   freellmapi:
@@ -352,8 +358,8 @@ retrieval:
   # other seven where they were. An unknown lane name is an error, not a
   # silent no-op.
   #
-  # Tune these with the eval suite (`main.py eval --retrieval-only`, the 100-Q
-  # golden set) rather than by feel — that loop already exists.
+  # Tune these with the bench (`main.py bench run`, on a labelled question
+  # set) rather than by feel — that loop already exists.
   lane_weights:
     dense: 1.0
     sparse: 1.0
@@ -364,7 +370,7 @@ retrieval:
     omnisearch: 1.0
     hype: 1.0
 
-  use_hyde: true
+  use_hyde: false
   # HyDE cache: the hypothetical answer for a question is generated once and
   # reused, so repeated searches retrieve with identical text (the eval needs
   # that) and skip an LLM round-trip. Keyed by question + prompt + model +
@@ -559,14 +565,11 @@ retrieval:
   # (presets may also set `omnisearch: true` to include the live-vault lane)
   presets:
     code:      {rerank_top_k: 10, use_hyde: false, dense_top_k: 40, sparse_top_k: 40, boost_code: true}
-    concept:   {rerank_top_k: 5,  use_hyde: true}
-    synthesis: {rerank_top_k: 10, use_hyde: true, dense_top_k: 30, sparse_top_k: 30}
+    concept:   {rerank_top_k: 5,  use_hyde: false}
+    synthesis: {rerank_top_k: 10, use_hyde: false, dense_top_k: 30, sparse_top_k: 30, parent_context: true, neighbor_context: true}
     fresh:     {rerank_top_k: 8,  omnisearch: true}
 
 
-# Golden-query eval suite (eval/eval_runner.py — `python main.py eval`).
-# Tier 1 (retrieval) and the groundedness floor need nothing but the index;
-# the judge tier reuses the `generation` client above.
 # ---------------------------------------------------------------------------
 # Graph RAG mode — POST /graph/expand + POST /answer.
 #
@@ -585,7 +588,7 @@ retrieval:
 # ---------------------------------------------------------------------------
 graph:
   # EXPERIMENTAL — off by default. This mode works and is tested, but it has
-  # never been scored against the golden set, so it is not part of the default
+  # never been scored on a bench question set, so it is not part of the default
   # workflow yet. The console's Settings > Experimental features panel is the
   # switch; it writes this key. While it is false, /graph/expand and the
   # console's Graph RAG panel are both unavailable, /query and /search are
@@ -598,19 +601,20 @@ graph:
   max_per_hop: 8          # neighbours followed per frontier node
   max_total: 40           # nodes in one traversal, seeds included
   seed_top_k: 5           # seeds taken from a query-seeded run
+  # Which embedder graph mode's QUERY seeding uses. null = the main
+  # collection's own embedder. An embedding.providers name
+  # (or local, when the main embedder is not local) seeds from the collection
+  # <paths.collection_name>__graph instead: only the graph lane's chunks,
+  # embedded by that model and rebuilt from scratch by the graph_embed job
+  # (Graph tab > Graph embedder, or main.py graph-embed), which never writes
+  # the main collection or a chunk file. Read when :8051 starts: if that
+  # collection is missing, unfinished, built by another embedder or out of
+  # step with the main one, query seeding answers with the reason and seeding
+  # by chunk id keeps working.
+  embedding_provider: null
 
 eval:
-  ngram_n: 2                    # content-word n-gram size for the deterministic
-                                # groundedness floor. 1 = lenient (bag of words),
-                                # 3 = strict (near-verbatim). 2 is the balance.
   sets_dir: "eval/sets"         # labelled question sets the Eval tab reviews (local data; relative = from the project root)
-  judge:
-    # Leave empty to reuse the generation client (self-grading — the runner
-    # warns). Name a `providers:` entry to judge with a different backend.
-    provider: null
-    model: null
-    temperature: 0.0
-    max_tokens: 700             # per LLM-as-judge call (rubric JSON is small)
 
 logging:
   level: INFO                               # DEBUG | INFO | WARNING | ERROR
@@ -752,10 +756,10 @@ canvas:
   # Connections block. Measured on the COMPOSED text (context header + node
   # text + Connections footer), not the raw node text.
   min_chunk_size: 50
-  # Split oversized node BODIES. null = OFF, which is how every canvas chunk
-  # currently in the index was produced. Measured over 1600 real chunks the
-  # node bodies run p50 399 / p90 1782 / max 9408 chars, so "canvas nodes are
-  # short" is true of the median and false of the tail.
+  # Split oversized node BODIES. null = OFF. Measured on a real vault, node
+  # bodies are a few hundred characters at the median and thousands in the
+  # tail, so "canvas nodes are short" is true of the median and false of the
+  # tail.
   # The context header and Connections footer ride along on EVERY part —
   # splitting the footer would leave some parts with no graph context, which
   # is the one thing this lane exists to provide. So a part can exceed this
@@ -785,12 +789,40 @@ canvas:
   # Graph tab (console): every save keeps the canvas's previous bytes here,
   # OUTSIDE the vault (a path inside it is refused). Relative = project root.
   backup_dir: logs/canvas_backups
-  # Graph tab "suggest label": the relation vocabulary the generation model
-  # picks from (docs/superpowers/specs/2026-10-04-canvas-augmentation-plan.md).
+  # Graph tab: #tags written in an edge label (Obsidian syntax: `#`, then a
+  # letter) also become `tags` of the chunks of BOTH nodes the edge joins, the
+  # next time that canvas is ingested. Metadata only: chunk text and doc_ids do
+  # not change. false = no canvas chunk carries tags from its edge labels.
+  label_tags: false
+  # Graph tab "suggest label" (docs/superpowers/specs/2026-10-04-canvas-augmentation-plan.md).
   # A suggestion only fills the label box; nothing is written until Save.
   augment:
+    # The relations a suggestion is classified into.
     vocabulary: [is-a, part-of, example-of, prerequisite-of, leads-to, causes,
                  contrasts-with, implements, uses, defines, related-to]
+    # Who suggests. provider null = the generation role's backend and model;
+    # a providers: name (or openai | anthropic | local) pins the backend, and
+    # model null = that backend's own model. The Graph tab overrides both per
+    # request. The plan above asks for a strong pinned model, not a router.
+    provider: null
+    model: null
+    # Room for a model that reasons aloud before its JSON answer (a cap, not
+    # a spend: small reasoning models have used ~1000 tokens on one edge).
+    max_tokens: 4000
+    temperature: 0.0
+    # An endpoint node whose content is longer than node_chars is summarised by
+    # the same model first (summarize: one more call per long node, and a failed
+    # summary is an error, never a silent cut) or cut at node_chars (truncate).
+    # A summary call reads at most summarize_input_chars of the node.
+    node_chars: 2500
+    long_nodes: summarize
+    summarize_input_chars: 20000
+    # Cap on neighbouring labels per node, group names, example labels, and the
+    # tags and alternatives a reply may return.
+    max_items: 12
+    # Image file nodes go only to a providers: entry marked vision: true, up to
+    # this size; otherwise the prompt names the image instead.
+    max_image_mb: 4
 
 # OCR Studio (console OCR tab): hand-guided, region-by-region OCR of one
 # document. Page state lives in <data>/ocr_studio/, never in the vault.
@@ -805,6 +837,14 @@ ocr_studio:
   # would ingest and archive them. Created on the first import.
   upload_dir: "OCR Studio"
   upload_max_mb: 500        # one import's size cap (413 above it)
+
+mcp:
+  # MCP server (mcp_server.py): both services as tools for agents. stdio by
+  # default (`rag mcp`); --http serves streamable HTTP at /mcp on `port`.
+  port: 8053                        # --http only
+  startup_retry_s: 8                # first tools/list wait for a down service; under Codex's 10 s startup budget
+  timeouts_s: {default: 30, query: 180, compare: 240, job_log_margin: 15}
+  search_defaults: {include_text: 700, max_sources: 5}   # noetrix_search fills these only when unset
 
 webui:
   # Management console (manage_api.py) — ingest/index/OCR/delete from a browser.
@@ -837,3 +877,11 @@ webui:
 # manifest_cache travel together, so a second vault never inherits the first
 # one's browse root or cached in-RAG status. Every key it manages must EXIST in
 # this file, or a switch fails with "found 0 matches".
+
+# Request guard on :8051 and :8052 (src/utils/http_guard.py). Loopback Host names
+# and the console's own origin are always allowed, so list only extras here. The
+# optional bearer token is RAG_API_TOKEN in .env. Each service reads these once,
+# on its first request: restart it after a change.
+security:
+  allowed_hosts: []      # extra Host names beyond loopback (a LAN name, a k8s Service)
+  allowed_origins: []    # extra browser origins allowed to POST

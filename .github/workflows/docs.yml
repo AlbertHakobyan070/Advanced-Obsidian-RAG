@@ -10,6 +10,8 @@ on:
     paths:
       - "docs/**"
       - "mkdocs.yml"
+      # docs/release-notes.md includes it, so a release rebuilds that page.
+      - "CHANGELOG.md"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 

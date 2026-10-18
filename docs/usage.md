@@ -14,16 +14,19 @@ They share one pipeline and one config.
 ```bash
 python main.py index                       # build indexes from data/*.jsonl
 python main.py index --append <file>.jsonl # add a source family (auto-rebuilds sparse)
+python main.py index --rebuild-into <name> [--embedding <provider>] [--limit N]  # re-embed the active collection's corpus into a NEW collection; --embedding = an embedding.providers name or local (default embedding.provider); resumable, never writes the active one; --limit N = a smoke build, left unservable
 python main.py stamp [--collection NAME] [--force]  # verify which embedder built a collection (re-embeds a sample), then record it; :8051 refuses a mismatch
 python main.py ingest-pdfs [--pages "1-50,60"] [--chunking heading|fixed|document|none] [--include-files "a.pdf,b.pdf"] [--output data/<name>_chunks.jsonl]
 python main.py ingest-notebooks [--include-path "<scope>"] [--include-files "a.py,b.ipynb"] [--output data/<name>_chunks.jsonl] [--force-domain ml] [--force-tags "a,b"]
 python main.py ingest-code --include-path "<subtree>" --output data/<name>_chunks.jsonl [--include-files "x.sql"] [--force-domain swe] [--force-tags "a,b"]  # a scoped run needs its own output
 python main.py ingest-md --include-path "<scope>" --output data/<name>_chunks.jsonl [--force-domain nlp] [--force-tags "a,b"]  # scoped md parse (guarded)
+python main.py ingest-canvas [--include-path "<scope>" --output data/<name>_chunks.jsonl] [--context-depth 0|1|2] [--max-chunk-size N] [--force-tags "a,b"]  # Obsidian .canvas files; a scoped run needs its own output
+python main.py ocr-studio-ingest --doc "<vault-relative PDF or image>" --output data/ocrstudio_<name>_chunks.jsonl [--pages done|all]  # one document's OCR Studio pages
+python main.py graph-embed [--limit N]     # rebuild graph mode's own seed index from scratch (needs graph.embedding_provider)
 python main.py fetch-web --urls "https://…" [--backend auto|requests|crawl4ai|scrapling|crawlee] [--format md|pdf]
 python main.py convert-files --files "report.docx" [--ocr-pages "1-4,9"]       # markitdown → .md
 python main.py query "<question>" [--preset code|concept|synthesis] [--top-k N] [--max-tokens N]
 python main.py chat                        # interactive REPL
-python main.py eval [--retrieval-only]     # score the golden suite
 python main.py bench run --configs ladder  # score labelled questions per pipeline configuration (also: report | split | validate | sample)
 ```
 
@@ -38,7 +41,7 @@ dependencies never enter the query environment and can be shut down when idle.
 Run `GET /api/import/ocr_scan` (the 🔎 button) first — it reports which pages
 actually lack extractable text, so you only OCR those.
 
-The `paddle` lane itself has two engines, selected with
+The `paddle` lane itself picks its engine with
 `pdf.paddle_ocr.pipeline`: `ocr` (the default — PP-OCRv6 detect-and-recognise,
 plain text, seconds per page) and `vl` (PaddleOCR-VL, a document VLM that
 returns markdown with LaTeX formulas and real tables, at roughly 30x the cost
@@ -50,7 +53,8 @@ returning the other engine's output.
 **Chunking strategies** (`--chunking`, also selectable per run in the console): `heading` —
 paragraph packing that follows the text's structure (default); `fixed` — strict sliding
 window, for OCR'd / wall-of-text sources; `document` — element-aware packing that never
-cuts inside a fenced code block, table, or list; `none` — no splitting at all (one chunk
+cuts inside a fenced code block, table, or list (one element larger than the chunk size
+on its own falls back to the sliding window); `none` — no splitting at all (one chunk
 per section; embedding models truncate very long inputs, so use deliberately). Small
 sections chunk identically under every strategy.
 
@@ -197,8 +201,8 @@ pipeline is never mutated:
 retrieval:
   presets:
     code:      {rerank_top_k: 10, use_hyde: false, dense_top_k: 40, sparse_top_k: 40, boost_code: true}
-    concept:   {rerank_top_k: 5,  use_hyde: true}
-    synthesis: {rerank_top_k: 10, use_hyde: true, dense_top_k: 30, sparse_top_k: 30}
+    concept:   {rerank_top_k: 5,  use_hyde: false}
+    synthesis: {rerank_top_k: 10, use_hyde: false, dense_top_k: 30, sparse_top_k: 30, parent_context: true, neighbor_context: true}
 ```
 
 | Knob | Effect |
@@ -211,6 +215,7 @@ retrieval:
 | `rerank_instruction` | The **ranking criterion** in plain language: "prefer worked procedures over definitions". Applied only to the text the reranker scores against, so it reorders the candidate pool and can never remove from it. Ignored by `lexical` / `none` / `laya`; the retrieval echo reports whether it was actually applied. Config default: `retrieval.rerank_instruction`. |
 | `rerank` | Rerank method for this call: `cross_encoder` (in-process semantic scoring), `http` (configured external `/v1/rerank` service), `lexical` (model-free query-term coverage), `none` (raw fused order), or `laya` (**experimental**: a fine-tuned scorer, refused unless `retrieval.laya.enabled` and never swapped for another method). Config default: `retrieval.rerank_mode`. |
 | `lane_weights` / `lanes` / `metadata_boost` | Fusion controls. `lane_weights` rescales each lane's RRF term; `lanes` restricts the call to a subset of the lanes (one outside the list does not run); `metadata_boost` forces the course/domain/tag boost on or off. See [Lane weights](api.md#lane-weights). |
+| `scope_lanes` / `max_per_file` / `decompose` | `scope_lanes` forces the scope lanes on or off; `max_per_file` caps how many chunks of one source file reach the final list; `decompose` splits a multi-part question into separate searches with one LLM call. See [Ask and search](api.md#ask-and-search). |
 | `gate` / `gate_threshold` / `gate_scorer` | The optional post-rerank relevance gate: chunks scoring below the threshold are dropped, and when none pass `/query` abstains with the fixed "nothing relevant" answer and no LLM call. Off by default. See [Relevance gate](api.md#relevance-gate). |
 | `parent_context` / `neighbor_context` | E2 small-to-big, post-rerank: swap note chunks for their full section / append a PDF hit's adjacent pages. Carried by the `synthesis` preset; per-call override beats preset beats config. |
 | `max_tokens` | Cap the answer length. |
@@ -246,11 +251,23 @@ query runs, rather than silently billing the wrong account. Put a key only in th
 environment variable the registry declares, or store it through the console's
 provider-key API. Restart the query service after changing a provider secret.
 
+An entry marked `vision: true` declares that its model reads images, and only
+such an entry is ever sent one: the Graph tab's suggest-label attaches an image
+file node for it alone, and the LLM client refuses images for any other entry
+rather than letting an endpoint drop them without a word. Set it only after
+checking that the endpoint's model accepts images, and not on a router whose
+model can change from one request to the next.
+
 ## The Corpus Ledger console (`:8052`)
 
-Open **http://127.0.0.1:8052**. Tabs:
+Open **http://127.0.0.1:8052**. Every tab follows one design, drawn from the active
+theme's tokens: panels open with a small kicker line above their heading, actions
+carry icons from one icon set, and every confirmation or prompt is an in-page dialog
+in the theme, never a browser pop-up. Tabs:
 
-- **Query** — Ask / Search with every knob in labeled groups (pool sizes, extra lanes
+- **Ledger** — the corpus at a glance: chunk, document and vector counts, disk use, the
+  **Index health** card (below), each domain's share, every chunk file, and recent jobs.
+- **Query** — Ask / Search with its knobs in labeled groups (pool sizes, extra lanes
   HyDE/HyPE/Omnisearch, rerank method, E2 parents/neighbors), plus copy and `.md` export
   (ready to paste into any Markdown editor). The Markdown + LaTeX **Preview** toggle renders the answer *and every
   source chunk* — math, tables and fenced code included. Its **Query comparison tree**
@@ -258,8 +275,10 @@ Open **http://127.0.0.1:8052**. Tabs:
   built-in rerank baselines, with evidence-only and generated-answer modes.
 - **Documents** — search, `#tag` filter, **retag** (domain / group label / tags —
   metadata-only, no re-embed), and **delete** from the index.
-- **Vault** — browse the mounted vault tree read-only.
-- **Ingest** — a three-step flow: **1 · Add documents** (upload to the inbox; **every
+- **Vault** — browse the mounted vault tree with each file's index status, stage domain
+  and tag edits for indexed files and apply them in one pass (index metadata only, with
+  one BM25 rebuild queued), and find any file by name. Vault files are never modified.
+- **Ingest** — a numbered flow: **1 · Add documents** (upload to the inbox; **every
   routable type — pdf, md, code, notebook — rides a `default | custom` lane**, and every
   file can carry its **own ⚙ settings** — domain and tags for all kinds, chunking for
   pdf/md, OCR engine and page subset for PDFs — plus a **destination folder**: the file
@@ -267,10 +286,13 @@ Open **http://127.0.0.1:8052**. Tabs:
   the final path (blank = stays in the inbox, archives to `_ingested`). The **batch
   defaults** (domain / tags / chunking / destination, each with a 📁 picker) fill in for
   any file without its own ⚙ value. 👁 previews any md/PDF, with PDF page numbers visible
-  for OCR-range picking); **2 · Fetch & convert** (pull web links as `.md` via markitdown
+  for OCR-range picking. An inbox file's **×** asks, then **deletes it from disk for
+  good** — nothing indexed is touched — unlike the OCR tab's ×, which moves a file to the
+  vault's `.trash`); **2 · Fetch & convert** (pull web links as `.md` via markitdown
   **or as a printed `.pdf`** of the rendered page via headless Chromium —
   LaTeX/tables/code intact; convert any upload — pdf/docx/pptx/xlsx/html — to `.md`, with
-  optional per-page OCR; outputs stage in `_converted` with preview until promoted);
+  optional per-page OCR; outputs stage in `_converted` with preview until promoted, and a
+  staged file's × also asks, then deletes it for good);
   **3 · Jobs designer** — one **card per queued job** (kind badge, lane, file chips,
   effective-settings line): files sharing identical effective settings batch together,
   differing ⚙ settings split automatically; then **Queue the plan** (everything shown) or
@@ -278,27 +300,96 @@ Open **http://127.0.0.1:8052**. Tabs:
   **Advanced** in the same panel. Routing is kind-aware: `.py`/`.R`/`.ipynb`/`.Rmd` go to
   the **notebook** lane (`ingest-notebooks` owns them — it has the Python
   `ast`/`# %%` cell splitter), while `.js`/`.ts`/`.sql`/`.go`/… go to the **code** lane.
+  **4 · Graph & canvases** previews and queues the canvas lane for a scope, with its own
+  chunking, node depth and metadata; the preview reports how much text a node depth
+  duplicates before anything is written.
+- **OCR** — hand-guided OCR of one PDF or image from the vault, or an import (a typed
+  page range limits the work, and every page keeps its real number): per-page clean-up
+  (deskew, contrast, threshold, denoise, a healing brush), regions drawn by hand or
+  proposed from the page layout or the PaddleOCR sidecar's lines, each region OCR'd by its
+  own engine and language, a quality report per engine over the pages marked done, ingest
+  of those pages (append, or replace what is indexed), and a zip export of the corrected
+  markdown with its figures. The **×** on an *imported* or *inbox* row asks, then takes
+  the file out of the queue by **moving** it into the vault's `.trash` under its own
+  sub-path, refreshes the list, and closes the document if it was open (its unsaved page
+  edits are saved first). Nothing is deleted: moving it back restores it with its OCR
+  work. While the document is indexed the × is refused, and the message lists the indexed
+  files with a shortcut to them in the Documents tab; remove them from the index first.
+- **Graph** — every `.canvas` in the vault: open one, edit its nodes, edges and labels,
+  and **save** the edits into the file. A save is refused if the file changed on disk
+  since it was opened, and the previous version is kept in `canvas.backup_dir`, outside
+  the vault. **Re-index** removes the canvas's chunks from the index and its chunk files,
+  then ingests it into its own chunk file and appends that (and rebuilds the graph seed
+  index when one is configured). Graph-mode querying is a separate, experimental panel
+  in the Query tab ([Graph mode](api.md#graph-mode)).
+    - **Suggest label**, on a selected edge, asks a language model for that edge's label
+      from the canvas as the editor holds it, unsaved edits included: both endpoint nodes
+      (file nodes read from the vault, long ones summarised first), the arrow's
+      direction, the canvas title, the groups and the labels around the edge. Pick the
+      backend (an entry marked *vision* also sees image nodes; one without a usable key is
+      listed but disabled, naming the missing variable or a wrong key type) and,
+      optionally, a model and a line of guidance; the defaults are
+      `canvas.augment.provider` and `canvas.augment.model`, else the generation backend. The suggestion fills the label
+      box. Beside it: the relation, confidence and reason, alternative labels to apply in
+      one click, tag chips that add or remove a `#tag` in the label, any warnings, the
+      backend and routed model with the calls and tokens used, and *what the model saw*.
+      Every change can be undone. A failed call shows the failing stage, the HTTP status,
+      the backend and model, the error, and the model's raw reply. Only **Save** writes the
+      file ([Suggest label](api.md#suggest-label)).
+    - **`#tags` in labels.** Write them into a label (`#regression`). With
+      `canvas.label_tags: true` (off by default), the next ingest of that canvas also
+      stamps them as `tags` on the chunks of both nodes the edge joins: metadata only,
+      with ids and text unchanged. The edge editor says which applies.
+    - **Remove from index** (shown with nothing selected, when the canvas has indexed
+      chunks) asks first, then deletes its chunks from the index as the Documents tab
+      does and queues the BM25 rebuild, plus `graph_embed` when a graph embedder is set.
+      It then offers a `:8051` restart, which runs only once those jobs have finished.
+      The `.canvas` file is never written, and unsaved edits in the editor survive.
+    - **Graph embedder**, a panel under the canvas list, shows graph mode's own seed
+      index: its verdict and the reason, what it was built with and how complete it is,
+      a note when graph mode itself is off, and the embedders to choose from (an
+      unavailable one is listed with its reason). Its button saves the choice through
+      Settings, builds the index through the job queue (`graph_embed`), follows the job,
+      and then offers the restart. Choosing the main embedder only saves the setting, and
+      no new build starts while one is queued or running.
 - **Jobs** — watch long-running ingest / maintenance jobs.
-- **Settings** — appearance with **dark and light preset shelves**: the built-in themes
-  (the warm Ledger pair + **Material mint** dark/light) plus your own **saved presets** —
-  export the active theme as CSS variables, tweak, save under a name, rename or delete
-  from its chip; **font pickers** for headings / body / mono (system serif and sans
-  choices like Times New Roman, Georgia, Arial — or any installed font by name; applied
-  over every theme, browser-local); a **vault switcher** that remembers
+- **Eval** — the review queue for the bench's question sets
+  ([Eval review queue](api.md#eval-review-queue)): progress per suite against its quota,
+  the questions filtered by suite, status and split, and one question at a time with its
+  gold texts and validator findings, to verify, reject or edit. **Check retrieval** runs
+  the question through `/search` with HyDE off.
+- **Settings** — **appearance**, kept in the browser: **dark and light preset shelves**
+  with the built-in themes (the warm Ledger pair + **Material mint** dark/light) and your
+  own **saved presets**, each renamed or deleted from its chip; the header's theme button
+  cycles through every theme on both shelves. The **theme designer** edits one row per
+  design token (the colours, each with a colour picker; the three fonts; the corner
+  radii), bound both ways to a box of the same CSS variables; **Export current → CSS**
+  writes the active theme into that box. An edit starts from the theme in use and
+  previews on the page at once; nothing is kept until **Save as preset**, under a name,
+  on the dark or light shelf. **Export all themes** and **Import
+  themes…** move every saved preset as one JSON file, and an import merges without
+  overwriting. **Font pickers** for headings / body / mono (system serif and sans
+  choices like Times New Roman, Georgia, Arial — or any installed font by name) apply
+  over every theme. Then a **vault switcher** that remembers
   every vault ever opened together with its own path/index settings and swaps the whole
   set atomically; and the editable config surface with **📁 folder pickers**: vault root,
   Chroma / BM25 / chunks paths, embedding + cross-encoder models, default rerank &
-  chunking, generation endpoint. Saves rewrite `config.yaml` in place (comments
-  preserved); nothing hot-applies — the response says which service to restart.
-  Two panels sit under the fields: **Generation backends**, listing the
+  chunking, generation endpoint, and the Graph tab's suggest-label backend and model,
+  label-tag indexing and graph seed embedder. Saves rewrite `config.yaml` in place
+  (comments preserved); nothing hot-applies — the response says which service to restart.
+  Panels sit under the fields: **Generation backends**, listing the
   `providers:` registry with each backend's endpoint/model and whether its API-key
   environment variable is set and type-compatible (never the value), plus controls
-  to activate a backend or write its declared key to the gitignored `.env`; and
+  to activate a backend or write its declared key to the gitignored `.env`;
   **Reranker**, which suggests known-good cross-encoders with their measured cost and
   states what PyTorch can actually reach — a `cuda` device on a CPU-only torch build
-  would otherwise fail silently into a much slower path.
-- **Info** — an in-app diagram of the whole pipeline with a query/ingestion toggle and a
-  per-knob influence table.
+  would otherwise fail silently into a much slower path; and **OCR**, which reports
+  what each OCR engine can do right now and can warm a vision-OCR model before the
+  first ingest page.
+- **Info** — diagrams of the query and the ingestion pipelines. Hovering, focusing or
+  clicking a stage shows what it does, which `config.yaml` keys control it, and whether
+  it is on in the live config. A **Workspace map** has one card per tab, saying what each
+  is for.
 
 Ops niceties: the header's **⟳ restart** button relaunches the warm query API in one
 click (and `webui.auto_restart_rag` in Settings does it automatically after every
@@ -321,9 +412,14 @@ The complete endpoint listing for both services is the
 [API reference](api.md); the patterns for driving them efficiently from an LLM
 agent are in [Agent integration](agents.md).
 
+Agents that speak MCP can use the [MCP server](mcp.md) instead of raw HTTP. On
+Windows, `rag mcp` starts it over stdio for a client on the same machine (it
+prints nothing, because stdout is the protocol channel); `python mcp_server.py
+--http` serves it over HTTP on `mcp.port`. Start `:8051` and `:8052` first.
+
 ## When the query API will not come back
 
-`GET /health` on `:8051` reports three states, not two:
+`GET /health` on `:8051` reports one of three states:
 
 | `state` | Meaning | What to do |
 |---|---|---|
@@ -397,10 +493,10 @@ uv pip compile requirements.txt --python-version 3.11 -o resolved-linux.txt
 uv pip compile requirements.txt --python-version 3.11 --python-platform windows -o resolved-windows.txt
 ```
 
-The Docker image is updated separately, on the desktop: its Dockerfile lives in the
-packaged `rag-docker-bundle`, not in this repo (see
-[Docker deployment](deployment-docker.md)). It needs the same pins, and
-`python -m patchright install chromium` after its Playwright install. If the container
-runs as root, the opt-in `crawlee` backend also needs `CRAWLEE_DISABLE_BROWSER_SANDBOX=1`
-in its environment: Crawlee, unlike plain Playwright, leaves Chromium's sandbox on, and
-Chromium refuses to start as root with it.
+The Docker image installs the same `requirements.txt`, with
+`deploy/docker/constraints.txt` pinning the transitive ML packages, so a new set reaches
+it on the next image build (see [Docker deployment](deployment-docker.md)). Its
+Dockerfile, `deploy/docker/Dockerfile`, downloads both browsers in the same order and
+sets `CRAWLEE_DISABLE_BROWSER_SANDBOX=1`: Crawlee, unlike plain Playwright, keeps
+Chromium's sandbox on, and the sandbox needs user namespaces that a default container
+does not grant, whether it runs as root or not.

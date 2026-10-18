@@ -6,7 +6,6 @@ generation layer swaps by editing one line in config.yaml.
 
     from src.llm.llm_client import LLMClient
     llm = LLMClient.from_config(cfg)                  # role="generation"
-    judge = LLMClient.from_config(cfg, role="eval.judge")
 
 Two ways to name a backend, and they coexist:
 
@@ -36,8 +35,9 @@ Two ways to name a backend, and they coexist:
    the Docker bundle, depend on them resolving the old way.
 
 Per-role: any config section may carry `provider:` / `temperature:` /
-`max_tokens:`, so generation, HyDE and the eval judge can each run on a
-different backend. `<role>.model` overrides the provider's default model.
+`max_tokens:`, so a role can run on its own backend. Only `generation` is
+used today; HyDE drafts with the generation client. `<role>.model` overrides
+the provider's default model.
 
 Local note (KoboldCPP serving Gemma-4-E4B-it-Q8):
     KoboldCPP exposes an OpenAI-compatible API at /v1, so we reuse the OpenAI
@@ -46,6 +46,7 @@ Local note (KoboldCPP serving Gemma-4-E4B-it-Q8):
 """
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 from typing import Any
 
@@ -53,6 +54,9 @@ from src.utils.config_loader import Config
 from src.utils.logger import get_logger
 
 log = get_logger(__name__)
+
+# The image types complete(images=...) sends. Both wire protocols accept these.
+IMAGE_MIMES = ("image/png", "image/jpeg", "image/gif", "image/webp")
 
 
 @dataclass
@@ -70,6 +74,11 @@ class LLMResponse:
 class LLMClient:
     """Provider-agnostic chat completion wrapper."""
 
+    # True only for a `providers:` entry marked `vision: true`; complete()
+    # refuses images otherwise. A class attribute, so a client built with
+    # __new__ (tests) is text-only too.
+    vision: bool = False
+
     def __init__(
         self,
         provider: str,
@@ -79,6 +88,7 @@ class LLMClient:
         default_temperature: float = 0.1,
         default_max_tokens: int = 1500,
         backend: str | None = None,
+        vision: bool = False,
     ):
         # `provider` is the wire protocol used by complete(); `backend` is the
         # configured registry alias (minimax, freellmapi, ...).  Keeping both
@@ -86,6 +96,7 @@ class LLMClient:
         # OpenAI-compatible service into the label "openai".
         self.provider = provider
         self.backend = backend or provider
+        self.vision = vision
         self.model = model
         self.default_temperature = default_temperature
         self.default_max_tokens = default_max_tokens
@@ -104,7 +115,7 @@ class LLMClient:
     @classmethod
     def from_config(cls, cfg: Config, role: str = "generation") -> "LLMClient":
         """
-        Build a client for a config section: "generation", "eval.judge", ...
+        Build a client for a config section ("generation" by default).
 
         Resolution order: a `providers:` registry entry whose name matches
         `<role>.provider` wins; otherwise the reserved legacy names apply.
@@ -261,6 +272,14 @@ class LLMClient:
                 f"providers.{name}.kind = {kind!r}; expected 'openai' or "
                 f"'anthropic' (the wire protocol, not the vendor)"
             )
+        # Absent (or null) = false. Anything but a real bool is refused, so a
+        # quoted "true" can never send images to a model that drops them.
+        vision = spec.get("vision")
+        if vision is None:
+            vision = False
+        elif not isinstance(vision, bool):
+            raise ValueError(
+                f"providers.{name}.vision = {vision!r} must be true or false")
 
         spec_model = spec.get("model")
         role_model = (
@@ -308,6 +327,7 @@ class LLMClient:
             default_temperature=temperature,
             default_max_tokens=max_tokens,
             backend=name,
+            vision=vision,
         )
 
     def _build_client(self, provider: str, api_key, base_url):
@@ -340,22 +360,42 @@ class LLMClient:
         user: str,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        images: list[tuple[bytes, str]] | None = None,
     ) -> LLMResponse:
-        """Single-turn system+user completion. Synchronous."""
+        """Single-turn system+user completion. Synchronous.
+
+        `images` = [(bytes, mime), ...] go with the user message, and only to a
+        client marked vision: true: some OpenAI-compatible endpoints drop image
+        parts without a word, so anything else is refused before any call."""
         temp = self.default_temperature if temperature is None else temperature
         maxtok = self.default_max_tokens if max_tokens is None else max_tokens
+        if images:
+            if not self.vision:
+                raise ValueError(
+                    f"refusing to send images to {self.backend}: "
+                    f"providers.{self.backend} is not marked vision: true")
+            bad = sorted({mime for _, mime in images if mime not in IMAGE_MIMES})
+            if bad:
+                raise ValueError(f"unsupported image type {', '.join(bad)}; "
+                                 f"expected one of {', '.join(IMAGE_MIMES)}")
 
         if self.provider == "anthropic":
-            return self._complete_anthropic(system, user, temp, maxtok)
-        return self._complete_openai_compatible(system, user, temp, maxtok)
+            return self._complete_anthropic(system, user, temp, maxtok, images=images)
+        return self._complete_openai_compatible(system, user, temp, maxtok, images=images)
 
-    def _complete_anthropic(self, system, user, temp, maxtok) -> LLMResponse:
+    def _complete_anthropic(self, system, user, temp, maxtok, images=None) -> LLMResponse:
+        content: Any = user
+        if images:
+            content = [{"type": "image",
+                        "source": {"type": "base64", "media_type": mime,
+                                   "data": base64.b64encode(data).decode("ascii")}}
+                       for data, mime in images] + [{"type": "text", "text": user}]
         resp = self._client.messages.create(
             model=self.model,
             system=system,
             max_tokens=maxtok,
             temperature=temp,
-            messages=[{"role": "user", "content": user}],
+            messages=[{"role": "user", "content": content}],
         )
         text = "".join(
             block.text for block in resp.content if getattr(block, "type", "") == "text"
@@ -368,14 +408,22 @@ class LLMClient:
             }
         return LLMResponse(text=text, model=self.model, provider=self.provider, usage=usage)
 
-    def _complete_openai_compatible(self, system, user, temp, maxtok) -> LLMResponse:
+    def _complete_openai_compatible(self, system, user, temp, maxtok,
+                                    images=None) -> LLMResponse:
+        content: Any = user
+        if images:
+            # Same part shape as ocr_vlm.py's page OCR.
+            content = [{"type": "text", "text": user}] + [
+                {"type": "image_url", "image_url": {
+                    "url": f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"}}
+                for data, mime in images]
         resp = self._client.chat.completions.create(
             model=self.model,
             temperature=temp,
             max_tokens=maxtok,
             messages=[
                 {"role": "system", "content": system},
-                {"role": "user", "content": user},
+                {"role": "user", "content": content},
             ],
         )
         text = resp.choices[0].message.content or ""

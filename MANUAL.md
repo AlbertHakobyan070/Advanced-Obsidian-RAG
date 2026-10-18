@@ -24,7 +24,7 @@ materials.
   their own workers).
 - OCR-ingesting a scanned book -> **:8100 + the ingest command**, nothing
   else.
-- Avoid: running `main.py eval` while :8051 is up (two full pipelines =
+- Avoid: running `main.py bench run` while :8051 is up (two full pipelines =
   ~5-6 GB). When in doubt, close what you're not using — every server
   restarts warm in <1 min.
 
@@ -70,7 +70,7 @@ Optional knobs (add to either request):
 |---|---|---|
 | `preset` | `"preset": "code"` | `code` = find YOUR scripts/notebooks · `concept` = tight definition lookup · `synthesis` = wide cross-material pull |
 | `top_k` | `"top_k": 10` | how many chunks reach the answer (default 7) |
-| `hyde` | `"hyde": false` | skip the query-expansion LLM call (faster, needs no LLM) |
+| `hyde` | `"hyde": true` | also search with a drafted hypothetical answer (one LLM call per query). Off by default and in every preset |
 | `hype` | `"hype": true` | match the query against pre-generated hypothetical questions (needs a `build_hype.py` run; fails soft) |
 | `max_tokens` | `"max_tokens": 800` | `/query` only: cap the ANSWER's length (default 2500). Small = quick fact, large = full synthesis |
 | `retrieve_only` | `"retrieve_only": true` | `/query` behaves like `/search` |
@@ -133,7 +133,7 @@ python main.py index --append data/code_chunks.jsonl
 | Browse what's in the index | Console -> **Vault** tab (filename, not chunk) |
 | Delete a document | Console -> **Documents** tab -> select rows -> Delete |
 | Track what's running | Console -> **Jobs** tab |
-| Re-run the regression check | `python main.py eval --retrieval-only` |
+| Score retrieval after a change | `python main.py bench run` (needs your own question sets) |
 
 ## 5. OCR (scanned PDFs)
 
@@ -177,24 +177,38 @@ both copies. To *replace* an older OCR file with a fresh pass, use the
 corpus-swap playbook (see [Operations](docs/operations.md)) — the text
 changes, so doc_ids change.
 
+### Taking a file out of the OCR tab's queue
+
+The console's **OCR tab** lists a queue: your imports (`ocr_studio.upload_dir`)
+and the PDFs and images sitting in the inbox. The **×** on an *imported* or
+*inbox* row asks first, then takes that file out of the queue by **moving** it
+into the vault's `.trash` folder, under the same sub-path; the list refreshes,
+and the document closes if it was open. Nothing is deleted: its OCR work
+(regions, clean-up, figure crops) stays, so moving the file back to where it
+was brings it back with that work attached.
+
+- An **indexed** file can't be removed (409): the message lists its indexed
+  files and has a button to find them in the Documents tab. Delete it from the
+  index there, then ×.
+- Not the same as the **Ingest tab's ×** on an inbox file or a staged
+  conversion — those also ask first, then delete the file from disk for good
+  (the index is untouched either way).
+
 ## 6. Eval (health check after changes)
 
+The bench scores retrieval per pipeline configuration against labelled
+questions whose gold is a source locator (a file, plus an optional page
+range or heading). No questions ship: a question set quotes your own notes, so you
+write or draft your own into `eval/sets/` — see
+[Evaluation](docs/evaluation.md) for the schema and the workflow.
+
 ```bash
-python main.py eval --retrieval-only     # minutes, offline - the default check
-python main.py eval                      # full mode, needs generation endpoint up
+python main.py bench validate     # every question against the corpus
+python main.py bench run          # the ladder on the dev split; its HyDE rung calls the LLM
 ```
 
-The shipped suite (`eval/golden_queries.yaml`) is a small illustrative
-example (six queries across three categories). `--retrieval-only` skips
-generation — keyword recall is measured over the retrieved chunks, so it
-runs offline in minutes and is the right regression check after index
-changes. For an apples-to-apples full-mode comparison, pin
-`generation.model` in `config.yaml` first, and revert to `"auto"` after.
-Don't run the full mode while :8051 is up if RAM is tight.
-
-For real regression work, write your own golden set (30-100 queries
-drawn from your actual corpus) — see [Evaluation](docs/evaluation.md)
-for the schema.
+`bench run` builds its own pipeline in process, so don't run it while
+:8051 is up if RAM is tight.
 
 ---
 

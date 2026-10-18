@@ -140,7 +140,7 @@ RERANK_PROFILES = {
         "label": "Higher quality — needs a GPU or patience",
         "detail": "bge-reranker-base: better ordering on public benchmarks at "
                   "roughly 10x the cost. Worth it only if you have measured "
-                  "that it helps YOUR corpus (main.py eval --retrieval-only).",
+                  "that it helps YOUR corpus (main.py bench run).",
         "settings": {
             "retrieval.rerank_mode": "cross_encoder",
             "retrieval.cross_encoder_model": "BAAI/bge-reranker-base",

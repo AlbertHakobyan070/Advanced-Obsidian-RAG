@@ -46,7 +46,7 @@ def sets(tmp_path, monkeypatch, management_module):
 
 @pytest.fixture
 def client(sets, management_module):
-    return TestClient(management_module.app)      # no `with`: no startup hooks to run
+    return TestClient(management_module.app, base_url="http://127.0.0.1")      # no `with`: no startup hooks to run
 
 
 # ---- reading ------------------------------------------------------------------
@@ -70,7 +70,7 @@ def test_progress_counts_per_suite_and_totals(sets, client):
 def test_a_sets_dir_that_does_not_exist_yet_is_an_empty_queue(
         tmp_path, monkeypatch, management_module):
     monkeypatch.setattr(management_module, "EVAL_SETS_DIR", tmp_path / "never_made")
-    c = TestClient(management_module.app)
+    c = TestClient(management_module.app, base_url="http://127.0.0.1")
     assert c.get("/api/eval/questions").json() == []
     assert c.get("/api/eval/progress").json()["totals"]["total"] == 0
 
@@ -287,7 +287,7 @@ def test_two_threads_posting_to_one_suite_both_land(sets, management_module, mon
     responses = {}
 
     def post(qid, action):
-        c = TestClient(management_module.app)                           # one client per thread
+        c = TestClient(management_module.app, base_url="http://127.0.0.1")                           # one client per thread
         barrier.wait()
         responses[qid] = c.post(f"/api/eval/questions/{qid}", json={"action": action})
 

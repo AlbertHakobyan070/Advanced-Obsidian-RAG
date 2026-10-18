@@ -68,7 +68,9 @@ import time
 import traceback
 from collections import Counter, deque
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Iterator, Literal
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -79,7 +81,8 @@ from src.llm.llm_client import LLMClient
 from src.pipeline import RAGPipeline
 from src.retrieval.retriever import LANES, RetrievedDoc
 from src.retrieval.reranker import RERANK_MODES, RerankerExecutionError
-from src.utils.config_loader import load_config, persist_config_values
+from src.utils.config_loader import Config, load_config, persist_config_values
+from src.utils.http_guard import GuardSettings, guard_settings, install_guard
 from src.utils.branding import QUERY_API_TITLE, QUERY_SERVICE
 from src.utils.release import PRODUCT_VERSION, git_head
 from src.utils.logger import get_logger
@@ -142,8 +145,10 @@ async def lifespan(app: FastAPI):
     _STATE["started_at"] = time.time()
     try:
         cfg = load_config()
-        _STATE["rag"] = RAGPipeline.from_config(cfg)
+        # Stored BEFORE the build: the request guard takes its settings from it, so
+        # a pipeline that fails to build is still guarded by the configured ones.
         _STATE["cfg"] = cfg
+        _STATE["rag"] = RAGPipeline.from_config(cfg)
         _STATE["cfg_path"] = cfg.project_root / "config.yaml"
         _STATE["generators"] = {}
         _STATE["ready"] = True
@@ -159,6 +164,22 @@ app = FastAPI(title=QUERY_API_TITLE, version=PRODUCT_VERSION, lifespan=lifespan)
 # The commit this process started from: the console compares it with the
 # checkout to tell a service that needs a restart (None outside a git checkout).
 _STARTED_COMMIT = (git_head() or {}).get("commit")
+
+
+def _guard_settings() -> GuardSettings:
+    """The request guard's settings, from the config the lifespan loaded (it runs
+    before the first request). With none (config.yaml itself failed to load, or a
+    test never entered the lifespan) the guard keeps its built-in defaults,
+    loopback only, so /health can still report why the service is not ready."""
+    cfg = _STATE.get("cfg") or Config({}, Path.cwd())
+    own_port = urlsplit(cfg.get("webui.rag_api", "http://127.0.0.1:8051")).port or 8051
+    return guard_settings(cfg, own_port=own_port)
+
+
+# Installed BEFORE the CORS middleware below, on purpose: Starlette runs the
+# middleware added last outermost, so CORS wraps the guard and its refusals carry
+# CORS headers. Without them the console page could not read a 401 from :8051.
+install_guard(app, _guard_settings)
 
 # The management web UI (manage_api.py, default :8052) calls this API from the
 # browser; same-machine, different port = CORS. Localhost-only origins.
@@ -1560,6 +1581,32 @@ def stats() -> dict:
     return {**out, "latency": _latency()}
 
 
+# The tier of every route above, as GET /schema reports it under `permissions`.
+# Keys are "METHOD /path" exactly as the routes are declared (the `endpoints` map
+# adds query hints such as "?limit="). read: safe to call unprompted. mutating:
+# changes what every client gets, so ask first; POST /config is the only one (it
+# moves the warm defaults, and persist=true rewrites config.yaml). A call that may
+# reach a billed LLM is still read: billing is not a state change.
+# tests/test_route_tiers.py fails when a route is added without a tier here.
+ROUTE_PERMISSIONS = {
+    "GET /health": "read",
+    "GET /schema": "read",
+    "GET /config": "read",
+    "POST /config": "mutating",
+    "GET /providers": "read",
+    "GET /chunks/{chunk_id}": "read",
+    "GET /stats": "read",
+    "GET /omnisearch": "read",
+    "POST /search": "read",
+    "POST /graph/expand": "read",
+    "POST /answer": "read",
+    "POST /query": "read",
+    "POST /compare": "read",
+    "GET /compare/options": "read",
+    "GET /history": "read",
+}
+
+
 @app.get("/schema")
 def schema() -> dict:
     """
@@ -1662,6 +1709,7 @@ def schema() -> dict:
     return {
         "service": QUERY_SERVICE,
         "version": app.version,
+        "permissions": dict(ROUTE_PERMISSIONS),
         "endpoints": {
             "GET /health": "readiness probe -> {ready: bool, state: "
                            "ready|loading|failed, error?}. `failed` means the "
@@ -1826,9 +1874,9 @@ def schema() -> dict:
                     "config_key": "graph.enabled",
                     "enabled": graph_on,
                     "endpoints": ["POST /graph/expand", "POST /answer"],
-                    "unmeasured": "traversal has never been scored against "
-                                  "the golden set — the cost is known, the "
-                                  "retrieval benefit is not",
+                    "unmeasured": "traversal has never been scored on the "
+                                  "bench's labelled question sets — the cost "
+                                  "is known, the retrieval benefit is not",
                     "when_off": "POST /graph/expand answers 503 with the "
                                 "config key to set; /query and /search are "
                                 "unaffected and the "

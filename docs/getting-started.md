@@ -109,6 +109,6 @@ Next: [Usage](usage.md).
 
 ## Prefer containers?
 
-Skip the local Python setup by using the separately packaged Docker bundle. A plain
-source clone does not include the Compose/Dockerfile scaffold. See
+The same stack runs in containers: from a source clone with the Compose files in
+`deploy/docker/`, or from a release archive with no local Python setup at all. See
 [Docker deployment](deployment-docker.md).

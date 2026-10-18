@@ -45,7 +45,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from queue import Queue
-from typing import Annotated, Any, Iterator, Optional
+from typing import Annotated, Any, Iterator, Literal, Optional
 
 import yaml
 from fastapi import FastAPI, Query, UploadFile
@@ -56,10 +56,12 @@ from pydantic import BaseModel, Field
 from eval.bench.questions import (
     STATUSES, SUITES, SchemaError, load_sets, question_from_dict, question_to_dict,
     save_suite, sets_lock)
+from src.retrieval.sparse_tantivy import SPARSE_BACKENDS
 from src.utils.branding import CONSOLE_API_TITLE, CONSOLE_SERVICE
 from src.utils.chroma_client import persistent_client
 from src.utils import release
 from src.utils.config_loader import Config, load_config
+from src.utils.http_guard import guard_settings, install_guard
 from src.utils.release import PRODUCT_VERSION
 from src.utils.logger import configure_logging, get_logger
 
@@ -84,6 +86,12 @@ PAGE = 5000                      # ChromaDB paging batch (see module docstring)
 app = FastAPI(title=CONSOLE_API_TITLE, version=PRODUCT_VERSION)
 # The commit this process started from, for /api/releases (None outside git).
 _STARTED_COMMIT = (release.git_head(ROOT) or {}).get("commit")
+# The request guard goes on BEFORE CORS: Starlette runs the middleware added last
+# outermost, so CORS wraps the guard and its refusals carry CORS headers. CFG is
+# read when the first request arrives, not here. The page shell GET / needs no
+# token: it holds no data, and it must load before it can ask for one.
+install_guard(app, lambda: guard_settings(CFG, own_port=int(CFG.get("webui.port", 8052))),
+              exempt={("GET", "/")})
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
@@ -294,7 +302,7 @@ def _vault_data_path(p: str, *, default_dir: str = "data") -> str:
     `_safe_rel` returns a project-relative "data/x.jsonl", and main.py resolves
     that against its CWD — the project root. That is only correct while the
     active vault's chunks_file also lives under the project. After a vault
-    switch it does not: chunks_file moves (e.g. to G:/ANIMUS/Animus Data), so
+    switch it does not: chunks_file moves (e.g. to <second-vault-data>), so
     DATA_DIR, chunk_files() and the BM25 union all follow it while ingest jobs
     kept writing into the PREVIOUS vault's data folder. Two consequences, both
     silent: the new vault's Ledger showed nothing, and the stray *_chunks.jsonl
@@ -618,15 +626,24 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
         if prm.get("dry_run"):
             argv.append("--dry-run")
         return argv
+    if kind == "graph_embed":
+        # Checked against config.yaml ON DISK at queue time: a null, unknown or
+        # main embedder would otherwise only fail inside the job.
+        from src.embeddings.graph_twin import graph_spec
+        if graph_spec(load_config()) is None:
+            raise ValueError("graph.embedding_provider is null: graph mode seeds from the main "
+                             "collection, so there is no graph index to build")
+        argv = [py, "main.py", "graph-embed"]
+        limit = prm.get("limit")
+        if limit is not None:
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+                raise ValueError(f"limit must be a positive integer, got {limit!r}")
+            argv += ["--limit", str(limit)]
+        return argv
     if kind == "recalibrate":
         argv = [py, "recalibrate_courses.py"]
         if prm.get("dry_run", True):
             argv.append("--dry-run")
-        return argv
-    if kind == "eval":
-        argv = [py, "main.py", "eval"]
-        if prm.get("retrieval_only"):
-            argv.append("--retrieval-only")
         return argv
     raise ValueError(f"unknown job kind {kind!r}")
 
@@ -674,8 +691,10 @@ _FINGERPRINT_KEYS = (
     "notebooks.overlap_size",
     "canvas.chunking", "canvas.max_chunk_size", "canvas.min_chunk_size",
     "canvas.chunk_overlap", "canvas.context_depth",
+    "canvas.label_tags",
     "embedding.local_model", "embedding.provider",
     "paths.collection_name",
+    "graph.embedding_provider",
 )
 
 
@@ -921,7 +940,7 @@ def _worker() -> None:
             # fresh from disk so the Settings toggle applies immediately.
             if (job.status == "done"
                     and job.kind in ("index_append", "index_rebuild",
-                                     "rebuild_bm25")):
+                                     "rebuild_bm25", "graph_embed")):
                 try:
                     auto = load_config().get("webui.auto_restart_rag", False)
                 except Exception:
@@ -1040,6 +1059,9 @@ class InboxIngestIn(BaseModel):
 
 class InboxDeleteIn(BaseModel):
     names: list[str] = Field(min_length=1)   # plain filenames inside the inbox
+    # Which folder holds them. None = whichever does, refused when both hold a
+    # name: the delete is permanent, so a guess must never pick the wrong file.
+    folder: Optional[Literal["inbox", "converted"]] = None
 
 
 class ImportFetchIn(BaseModel):
@@ -1851,23 +1873,29 @@ def _converted_dir() -> Path:
 def inbox_delete(body: InboxDeleteIn) -> dict:
     """Remove added-by-accident files from the inbox (and/or its _converted
     staging). Deletes the FILES ON DISK inside the inbox only — nothing that
-    was already indexed is touched (that's /api/documents/delete)."""
+    was already indexed is touched (that's /api/documents/delete). `folder`
+    says which of the two a name is in; without it, a name both hold is
+    refused before anything is deleted."""
     inbox = _inbox()
     conv = _converted_dir()
+    dirs = {"inbox": (inbox,), "converted": (conv,), None: (inbox, conv)}[body.folder]
+    names = [(n or "").strip() for n in body.names]
+    both = [n for n in names if body.folder is None and n and Path(n).name == n
+            and (inbox / n).is_file() and (conv / n).is_file()]
+    if both:
+        return _refuse(ValueError(f"{', '.join(both)}: in both the inbox and its _converted "
+                                  f"folder; say which with folder (inbox or converted)"))
     removed, missing = [], []
-    for name in body.names:
-        name = (name or "").strip()
+    for name in names:
         if not name or Path(name).name != name:
             missing.append(name)
             continue
-        p = inbox / name
-        if not p.is_file():
-            p = conv / name
-        if p.is_file():
-            p.unlink()
-            removed.append(name)
-        else:
+        p = next((d / name for d in dirs if (d / name).is_file()), None)
+        if p is None:
             missing.append(name)
+            continue
+        p.unlink()
+        removed.append(name)
     return {"ok": True, "removed": removed, "missing": missing}
 
 
@@ -2423,10 +2451,14 @@ class CanvasPathIn(BaseModel):
 
 
 class CanvasLabelIn(BaseModel):
+    # Unknown fields are ignored (pydantic's default; keep it): a pre-v2 client
+    # still sending from_text/to_text/examples is not refused for them.
     path: str
-    from_text: str = Field(max_length=4000)
-    to_text: str = Field(max_length=4000)
-    examples: list[str] = Field(default_factory=list, max_length=30)
+    edge_id: str = Field(min_length=1, max_length=200)
+    data: dict[str, Any]
+    provider: str | None = None
+    model: str | None = Field(default=None, max_length=200)
+    guidance: str | None = Field(default=None, max_length=2000)
 
 
 def _canvas_file(path: str) -> tuple[Path, str]:
@@ -2548,6 +2580,12 @@ def canvas_reindex(body: CanvasPathIn) -> dict:
     from src.ocr_studio.pages import doc_key
     try:
         p, rel = _canvas_file(body.path)
+        # A graph embedder means the twin must follow the append. A broken one
+        # (unknown, or the main embedder) is refused here, before any removal.
+        from src.embeddings.graph_twin import configured_provider
+        graph = configured_provider(load_config()) is not None
+        if graph:
+            _build_argv("graph_embed", {})
         loader = CanvasLoader.from_config(CFG)
         loader.include_path = rel.lower()
         matched = loader.discover_files()
@@ -2582,9 +2620,46 @@ def canvas_reindex(body: CanvasPathIn) -> dict:
     except ValueError as e:
         return _refuse(e)
     j2 = enqueue("index_append", {"file": out})
-    return {"ok": True, "chunks": n, "output": out, "removed": removed,
-            "jobs": [j1.public(), j2.public()],
-            "note": "restart serve_api (:8051) once the append job finishes."}
+    jobs = [j1.public(), j2.public()]
+    if graph:
+        jobs.append(enqueue("graph_embed", {}).public())
+    return {"ok": True, "chunks": n, "output": out, "removed": removed, "jobs": jobs,
+            "note": "restart serve_api (:8051) once the "
+                    + ("graph_embed" if graph else "append") + " job finishes."}
+
+
+@app.get("/api/canvas/embedder")
+def canvas_embedder() -> dict:
+    """Graph mode's seed embedder, from config.yaml on disk: graph.embedding_provider,
+    the <collection>__graph index's fingerprint and freshness against the main
+    collection's graph lane (a verdict and why), and the embedders it can be built
+    with. Reads only: a missing store or collection is reported, never created."""
+    from src.embeddings.graph_twin import embedder_choices, twin_status
+    cfg = load_config()
+    try:
+        choices = embedder_choices(cfg)          # resolves the main embedder: a broken one is a 400
+    except ValueError as e:
+        return _refuse(e)
+    try:
+        status = twin_status(cfg)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"ChromaDB read failed: {type(e).__name__}: {e}"},
+                            status_code=500)
+    twin = status["twin"]
+    if twin is not None:
+        # :8051's startup check compares ids. Node text edited under a kept id (a
+        # whole-lane re-ingest) shows only as a chunk file written after the build.
+        twin["files_newer"] = []
+        if twin["completed_at"]:
+            built = time.mktime(time.strptime(twin["completed_at"], "%Y-%m-%dT%H:%M:%S"))
+            lane = {j for d in build_manifest().values()
+                    if status["file_type"] in d["file_types"] for j in d["jsonls"]}
+            twin["files_newer"] = sorted(n for n in lane if (DATA_DIR / n).stat().st_mtime > built)
+        if status["verdict"] == "ready" and twin["files_newer"]:
+            status["reason"] += (f". Chunk files written since the build: "
+                                 f"{', '.join(twin['files_newer'])}; rebuild it (graph_embed) in "
+                                 f"case node text changed, which the id check cannot see")
+    return {"ok": True, **status, "choices": choices}
 
 
 _DEFAULT_RELATIONS = ["is-a", "part-of", "example-of", "prerequisite-of", "leads-to",
@@ -2594,40 +2669,142 @@ _DEFAULT_RELATIONS = ["is-a", "part-of", "example-of", "prerequisite-of", "leads
 
 @app.post("/api/canvas/suggest_label")
 def canvas_suggest_label(body: CanvasLabelIn) -> dict:
-    """Ask the generation model for an edge label. Writes nothing: the label is
-    put in the editor's label box and only reaches the file on Save, so a human
-    reviews every one (the canvas-augmentation plan's rule)."""
+    """Ask a language model for one edge's label, relation, tags, alternatives,
+    confidence and reason. What it is shown is built from the POSTED canvas, so
+    unsaved edits count (src/ingestion/canvas_label.py); file nodes are read from
+    the vault, read-only. Writes nothing: the label is put in the editor's label
+    box and only reaches the file on Save, so a human reviews every one (the
+    canvas-augmentation plan's rule)."""
+    from src.ingestion.canvas_label import (LONG_NODES, context_out, edge_context, fit_node,
+                                            parse_reply, render_prompt)
     from src.llm.llm_client import LLMClient
+    from src.prompts.loader import load_prompt
     try:
-        _canvas_file(body.path)
+        _, rel = _canvas_file(body.path)
     except (ValueError, FileNotFoundError) as e:
         return _refuse(e)
     cfg = load_config()
     vocab = list(cfg.get("canvas.augment.vocabulary") or _DEFAULT_RELATIONS)
-    examples = "\n".join(f"- {x}" for x in body.examples if x.strip()) or "(none)"
-    system = ("You label the edges of a student's concept map. Reply with ONE JSON object "
-              '{"relation": "<one of the vocabulary>", "label": "<2-5 word label in the '
-              "map's own language and voice>\"} and nothing else.")
-    user = (f"Vocabulary: {', '.join(vocab)}\n"
-            f"Labels already on this canvas (style examples):\n{examples}\n\n"
-            f"FROM node:\n{body.from_text[:2000]}\n\nTO node:\n{body.to_text[:2000]}")
+    max_tokens = cfg.get("canvas.augment.max_tokens", 4000)
+    temperature = cfg.get("canvas.augment.temperature", 0.0)
+    node_chars = cfg.get("canvas.augment.node_chars", 2500)
+    long_nodes = cfg.get("canvas.augment.long_nodes", "summarize")
+    input_chars = cfg.get("canvas.augment.summarize_input_chars", 20000)
+    max_items = cfg.get("canvas.augment.max_items", 12)
+    max_image_mb = cfg.get("canvas.augment.max_image_mb", 4)
+    if long_nodes not in LONG_NODES:
+        return _refuse(ValueError(f"canvas.augment.long_nodes must be one of {LONG_NODES}, "
+                                  f"got {long_nodes!r}"))
+
+    # Who answers: the request, then canvas.augment, then the generation role.
+    # With none of them set this is exactly the generation client. A backend
+    # that cannot be built is refused here; nothing ever falls back to another.
+    provider = body.provider or cfg.get("canvas.augment.provider")
+    model = body.model or cfg.get("canvas.augment.model") or None     # blank = unset
+    registry = cfg.get("providers", {}) or {}
+    known = ([n for n in registry if n not in LLMClient.RESERVED_PROVIDERS]
+             + list(LLMClient.RESERVED_PROVIDERS))
+    if provider and provider not in known:
+        source = "provider" if body.provider else "canvas.augment.provider"
+        return JSONResponse({"ok": False, "stage": "client",
+                             "error": f"{source} = {provider!r} is not a providers: entry or "
+                                      f"one of {', '.join(LLMClient.RESERVED_PROVIDERS)} "
+                                      f"(known: {', '.join(known)})"}, status_code=400)
     try:
-        client = LLMClient.from_config(cfg)
-        reply = client.complete(system, user, temperature=0.0, max_tokens=120).text
-    except Exception as e:
-        return JSONResponse({"ok": False, "error": f"the generation model is unavailable: "
-                             f"{type(e).__name__}: {e}"}, status_code=502)
-    m = re.search(r"\{.*\}", reply or "", re.S)
+        if provider or model:
+            client = LLMClient.from_provider_override(
+                cfg, provider or cfg.get("generation.provider", "anthropic"), model=model)
+        else:
+            client = LLMClient.from_config(cfg)
+    except (ValueError, RuntimeError, ImportError) as e:
+        return JSONResponse({"ok": False, "stage": "client",
+                             "error": f"{type(e).__name__}: {e}"}, status_code=400)
+
     try:
-        got = json.loads(m.group(0)) if m else {}
-    except ValueError:
-        got = {}
-    relation, label = str(got.get("relation") or ""), str(got.get("label") or "").strip()
-    if relation not in vocab or not label:
-        return JSONResponse({"ok": False, "reply": (reply or "")[:500],
-                             "error": "the model's reply was not a label from the vocabulary"},
+        ctx = edge_context(body.data, body.edge_id, rel, _vault_root(),
+                           read_chars=max(node_chars, input_chars), max_items=max_items,
+                           images=client.vision,
+                           max_image_bytes=int(max_image_mb * 1024 * 1024))
+    except ValueError as e:
+        return _refuse(e)
+
+    responses = []                                  # every call, for `usage`
+
+    def call(system: str, user: str, **kw):
+        resp = client.complete(system, user, temperature=temperature, max_tokens=max_tokens, **kw)
+        responses.append(resp)
+        return resp
+
+    def failed(stage: str, e: Exception) -> JSONResponse:
+        return JSONResponse({"ok": False, "stage": stage, "backend": client.backend,
+                             "model": client.model,
+                             "error": f"{client.backend}: {type(e).__name__}: {e}"},
                             status_code=502)
-    return {"ok": True, "relation": relation, "label": label, "model": client.model}
+    for side in ("from", "to"):
+        try:
+            fit_node(ctx[side], node_chars=node_chars, long_nodes=long_nodes,
+                     input_chars=input_chars, complete=call)
+        except Exception as e:                      # transport, HTTP, timeout, empty summary
+            return failed(f"summary:{side}", e)
+    system, user = render_prompt(ctx, vocab, body.guidance)
+    images = [n["image"] for n in (ctx["from"], ctx["to"]) if n.get("image")]
+    try:
+        resp = call(system, user, **({"images": images} if images else {}))
+    except Exception as e:                          # transport, HTTP, timeout
+        return failed("label", e)
+    try:
+        got = parse_reply(resp.text, vocab, max_items)
+    except ValueError as e:
+        return JSONResponse({"ok": False, "stage": "parse", "error": str(e),
+                             "reply": (resp.text or "")[:2000], "backend": client.backend,
+                             "model": resp.model}, status_code=502)
+    reported = [r.usage for r in responses if r.usage]
+    usage = ({"input_tokens": sum(u.get("input_tokens") or 0 for u in reported),
+              "output_tokens": sum(u.get("output_tokens") or 0 for u in reported),
+              "calls": len(responses)} if reported else None)
+    log.info("canvas suggest_label: %s edge %s -> %r (%s) via %s · %s, %d call(s)",
+             rel, body.edge_id, got["label"], got["relation"], client.backend, resp.model,
+             len(responses))
+    return {"ok": True, "edge_id": body.edge_id, **got, "backend": client.backend,
+            "protocol": resp.provider, "model": resp.model, "usage": usage,
+            "prompt_version": load_prompt("canvas_label")["version"],
+            "label_tags_indexed": bool(cfg.get("canvas.label_tags", False)),
+            "context": context_out(ctx),
+            "note": "nothing was written; the label reaches the file only on Save"}
+
+
+@app.get("/api/canvas/suggest_options")
+def canvas_suggest_options() -> dict:
+    """The Graph tab's suggest-label picker, read from config.yaml on disk. Light
+    on purpose: GET /api/settings imports torch for its device list."""
+    cfg = load_config()
+    _, details = _provider_choices(cfg)
+    entries = {d["name"]: d for d in details}          # the registry, reserved names excluded
+    aug_provider = cfg.get("canvas.augment.provider")
+    aug_model = cfg.get("canvas.augment.model") or None    # blank = the backend's own
+    backend = aug_provider or cfg.get("generation.provider", "anthropic")
+    # The model the default call sends, resolved exactly as LLMClient does it:
+    # from_config when canvas.augment sets nothing (the role's model, then the
+    # entry's), from_provider_override otherwise (the pinned model, then the
+    # entry's own, never the role's). None = that call is refused.
+    if backend in entries:
+        model = (aug_model or (None if aug_provider else cfg.get("generation.model"))
+                 or entries[backend]["model"])
+    elif backend == "local":
+        model = aug_model or cfg.get("generation.local.model", "local-model")
+    elif backend in ("anthropic", "openai"):
+        model = aug_model or cfg.get("generation.model", {
+            "anthropic": "claude-sonnet-4-20250514", "openai": "gpt-4o-mini"}[backend])
+    else:
+        model = None
+    return {"ok": True,
+            "default": {"backend": backend, "model": model,
+                        "source": "canvas.augment" if (aug_provider or aug_model) else "generation"},
+            "providers": details,
+            "vocabulary": list(cfg.get("canvas.augment.vocabulary") or _DEFAULT_RELATIONS),
+            "long_nodes": cfg.get("canvas.augment.long_nodes", "summarize"),
+            "node_chars": cfg.get("canvas.augment.node_chars", 2500),
+            "label_tags": bool(cfg.get("canvas.label_tags", False))}
 
 
 @app.get("/api/vault/search")
@@ -2750,6 +2927,21 @@ EDITABLE_SETTINGS: dict[str, dict] = {
                                      "label": "Generation endpoint (legacy providers only)"},
     "generation.model":             {"kind": "str",  "restart": ":8051",
                                      "label": "Generation model id"},
+    # Graph tab "suggest label" backend. Values are filled in at request time
+    # from the providers: registry; "null" = the generation role's backend.
+    # Read per request, so nothing restarts.
+    "canvas.augment.provider":      {"kind": "enum", "restart": "none (read per request)",
+                                     "values": [],
+                                     "label": "Suggest-label backend (null = generation)"},
+    "canvas.augment.model":         {"kind": "str",  "restart": "none (read per request)",
+                                     "allow_empty": True,
+                                     "label": "Suggest-label model id (blank = the backend's own)"},
+    "canvas.label_tags":            {"kind": "enum", "restart": "none (read per job)",
+                                     "values": ["true", "false"],
+                                     "label": "Index #tags in edge labels as chunk tags",
+                                     "desc": "On the next ingest of a canvas, #tags written in an edge "
+                                             "label also become tags of both nodes it joins "
+                                             "(metadata only; no id or text changes)."},
     # kind "relpath": must stay INSIDE the vault. A leading separator makes the
     # value absolute, and `Path(vault) / "/x"` discards the vault entirely —
     # which silently emptied the whole Vault tab.
@@ -2768,11 +2960,23 @@ EDITABLE_SETTINGS: dict[str, dict] = {
     "graph.enabled":                {"kind": "enum", "restart": ":8051 + reload this page",
                                      "values": ["true", "false"],
                                      "label": "Graph RAG mode (canvas traversal)"},
+    # Graph mode's seed embedder. Values are filled in at request time from
+    # embedding.providers ("null" = the main collection's embedder). GET
+    # /api/canvas/embedder says which choices can actually be built.
+    "graph.embedding_provider":     {"kind": "enum", "restart": ":8051",
+                                     "values": [],
+                                     "label": "Graph-mode seed embedder (null = the main one)"},
     # Likewise the flag behind the Laya reranker's row below. It has no console
     # controls to hide, so no page reload is needed — only the :8051 restart.
     "retrieval.laya.enabled":       {"kind": "enum", "restart": ":8051",
                                      "values": ["true", "false"],
                                      "label": "Laya reranker (experimental)"},
+    # tantivy needs its index built first (the build_tantivy job). POST
+    # /api/engines/set checks that before writing; a Save from this tab does
+    # not, and :8051 then fails to build with the job named in /health.
+    "retrieval.sparse_backend":     {"kind": "enum", "restart": ":8051",
+                                     "values": list(SPARSE_BACKENDS),
+                                     "label": "Sparse (BM25) ranking engine"},
 }
 
 
@@ -2795,10 +2999,10 @@ EXPERIMENTAL_FEATURES: list[dict] = [
                 "result, answer from the graph alone, or take the raw nodes "
                 "with no LLM at all.",
         "why_off": "It works and is covered by tests, but it has never been "
-                   "scored against the golden set — so its retrieval "
-                   "benefit is unmeasured. Until it is, it stays out of the "
-                   "default Query tab instead of implying an answer quality "
-                   "nobody has checked.",
+                   "scored on the bench's labelled question sets — so its "
+                   "retrieval benefit is unmeasured. Until it is, it stays "
+                   "out of the default Query tab instead of implying an "
+                   "answer quality nobody has checked.",
         "unaffected": "Ordinary Ask / Search never touch it, and the canvas "
                       "lane keeps competing in normal retrieval either way. "
                       "Canvas INGESTION is not gated: that is how the lane "
@@ -2878,6 +3082,7 @@ def _provider_choices(disk_cfg) -> tuple[list[str], list[dict]]:
             "key_present": present,
             "key_compatible": compatible,
             "available": available,
+            "vision": spec.get("vision") is True,
         })
     return names + list(LLMClient.RESERVED_PROVIDERS), details
 
@@ -3000,6 +3205,14 @@ def _yaml_key_index(lines: list[str]) -> list[tuple[int, str, "re.Match[str]"]]:
     return index
 
 
+# Every in-process writer of config.yaml (the Settings tab's Save, POST /api/engines/set,
+# the vault switch) goes through _persist_section_keys's read-edit-write, and FastAPI runs
+# them in a thread pool: one lock there serializes them all. Re-entrant, so a caller can
+# hold it across its write and the read-back of what it wrote.
+# ponytail: in-process only; :8051's POST /config persist=true is another process.
+_CONFIG_WRITE_LOCK = threading.RLock()
+
+
 def _persist_section_keys(cfg_path: Path, changes: dict[str, Any]) -> list[str]:
     """Rewrite dotted keys in config.yaml IN PLACE, preserving comments and
     layout.
@@ -3010,33 +3223,34 @@ def _persist_section_keys(cfg_path: Path, changes: dict[str, Any]) -> list[str]:
     unchanged: a path that does not resolve to exactly one line raises instead
     of guessing which one was meant.
     """
-    text = cfg_path.read_text(encoding="utf-8")
-    lines = text.split("\n")
-    index = _yaml_key_index(lines)
-    written: list[str] = []
-    for dotted, value in changes.items():
-        sval = ("true" if value else "false") if isinstance(value, bool) else str(value)
-        if any(c in sval for c in "\r\n"):
-            raise ValueError(f"{dotted}: newlines not allowed")
-        # quote strings that YAML would mangle (paths with ':' etc.)
-        if not re.fullmatch(r"[\w.\-/]+", sval):
-            sval = '"' + sval.replace('"', '\\"') + '"'
-        hits = [(i, m) for i, path, m in index if path == dotted]
-        if not hits:
-            raise ValueError(f"{dotted}: no such key in {cfg_path.name} — add it "
-                             f"to the file before setting it from the console")
-        if len(hits) > 1:
-            where = ", ".join(f"line {i + 1}" for i, _ in hits)
-            raise ValueError(f"{dotted}: found {len(hits)} matches in "
-                             f"{cfg_path.name} ({where}); refusing to rewrite "
-                             f"ambiguously")
-        i, m = hits[0]
-        lines[i] = m.group("indent") + m.group("key") + m.group("pre_tail") \
-            + sval + m.group("post")
-        written.append(dotted)
-    if written:
-        cfg_path.write_text("\n".join(lines), encoding="utf-8")
-    return written
+    with _CONFIG_WRITE_LOCK:
+        text = cfg_path.read_text(encoding="utf-8")
+        lines = text.split("\n")
+        index = _yaml_key_index(lines)
+        written: list[str] = []
+        for dotted, value in changes.items():
+            sval = ("true" if value else "false") if isinstance(value, bool) else str(value)
+            if any(c in sval for c in "\r\n"):
+                raise ValueError(f"{dotted}: newlines not allowed")
+            # quote strings that YAML would mangle (paths with ':' etc.)
+            if not re.fullmatch(r"[\w.\-/]+", sval):
+                sval = '"' + sval.replace('"', '\\"') + '"'
+            hits = [(i, m) for i, path, m in index if path == dotted]
+            if not hits:
+                raise ValueError(f"{dotted}: no such key in {cfg_path.name} — add it "
+                                 f"to the file before setting it from the console")
+            if len(hits) > 1:
+                where = ", ".join(f"line {i + 1}" for i, _ in hits)
+                raise ValueError(f"{dotted}: found {len(hits)} matches in "
+                                 f"{cfg_path.name} ({where}); refusing to rewrite "
+                                 f"ambiguously")
+            i, m = hits[0]
+            lines[i] = m.group("indent") + m.group("key") + m.group("pre_tail") \
+                + sval + m.group("post")
+            written.append(dotted)
+        if written:
+            cfg_path.write_text("\n".join(lines), encoding="utf-8")
+        return written
 
 
 class SettingsIn(BaseModel):
@@ -3058,6 +3272,11 @@ def settings() -> dict:
     for key, spec in EDITABLE_SETTINGS.items():
         editable[key] = {**spec, "value": disk_cfg.get(key)}
     editable["generation.provider"]["values"] = provider_names
+    editable["canvas.augment.provider"]["values"] = ["null"] + provider_names
+    editable["canvas.augment.provider"]["value"] = (
+        disk_cfg.get("canvas.augment.provider") or "null")
+    # Blank, not None: the label says "blank = the backend's own".
+    editable["canvas.augment.model"]["value"] = disk_cfg.get("canvas.augment.model") or ""
     editable["retrieval.cross_encoder_device"]["values"] = _with_current(
         device_choices, disk_cfg.get("retrieval.cross_encoder_device"))
     # "null" is a real, selectable value: it turns the preset OFF and falls back
@@ -3068,11 +3287,15 @@ def settings() -> dict:
     # so an untouched "no preset" config doesn't read back as a pending change.
     editable["pdf.vlm_ocr.preset"]["value"] = (
         disk_cfg.get("pdf.vlm_ocr.preset") or "null")
+    # Same "null" round-trip as the preset above.
+    editable["graph.embedding_provider"]["values"] = [
+        "null", "local", *(disk_cfg.get("embedding.providers") or {})]
+    editable["graph.embedding_provider"]["value"] = (
+        disk_cfg.get("graph.embedding_provider") or "null")
     return {
         "rag_api": RAG_API,
         "providers": provider_details,
         "hub": _hub_credentials(),
-        "judge_provider": disk_cfg.get("eval.judge.provider"),
         "rerankers": [{"id": k, **v} for k, v in KNOWN_RERANKERS.items()],
         "rerank_profiles": [{"id": k, **v} for k, v in RERANK_PROFILES.items()],
         "gpu": gpu,
@@ -3114,12 +3337,17 @@ def settings_update(body: SettingsIn) -> dict:
         # at request time, exactly as they are in GET /api/settings.
         if key == "generation.provider":
             spec = {**spec, "values": provider_names}
+        elif key == "canvas.augment.provider":
+            spec = {**spec, "values": ["null"] + provider_names}
         elif key == "retrieval.cross_encoder_device":
             spec = {**spec, "values": _with_current(
                 device_choices, disk_cfg.get("retrieval.cross_encoder_device"))}
         elif key == "pdf.vlm_ocr.preset":
             spec = {**spec, "values": ["null"] + sorted(
                 (disk_cfg.get("pdf.vlm_ocr_presets") or {}).keys())}
+        elif key == "graph.embedding_provider":
+            spec = {**spec, "values": [
+                "null", "local", *(disk_cfg.get("embedding.providers") or {})]}
         sval = str(value).strip()
         if not sval and not spec.get("allow_empty"):
             return JSONResponse({"ok": False, "error": f"{key}: empty value"},
@@ -3149,6 +3377,10 @@ def settings_update(body: SettingsIn) -> dict:
         # without a restart, and rewriting an identical value is harmless.
         changes[key] = sval
         restarts.add(spec["restart"])
+    # A blank canvas.augment.model means unset, so it is written as null: posting
+    # back the blank GET /api/settings shows over a null rewrites nothing.
+    if changes.get("canvas.augment.model") == "":
+        changes["canvas.augment.model"] = "null"
     # Switching backend without switching model sends the OLD provider's model
     # id to the NEW endpoint, which fails at call time with a confusing 4xx.
     # Carry the new provider's default model along unless the caller set one.
@@ -3220,7 +3452,7 @@ def settings_update(body: SettingsIn) -> dict:
             )
 
     if not changes:
-        return {"ok": True, "written": [], "note": "nothing changed"}
+        return {"ok": True, "written": [], "note": "nothing changed", "notes": notes}
     try:
         written = _persist_section_keys(ROOT / "config.yaml", changes)
     except ValueError as e:
@@ -3231,7 +3463,7 @@ def settings_update(body: SettingsIn) -> dict:
               "of the corpus (main.py index) before search works again.")
     if notes:
         note += "  |  " + "  |  ".join(notes)
-    return {"ok": True, "written": written, "note": note}
+    return {"ok": True, "written": written, "note": note, "notes": notes}
 
 
 # ---- provider API keys (.env writer) ----
@@ -3428,6 +3660,12 @@ class RerankCheckIn(BaseModel):
     max_length: Optional[int] = None
 
 
+# huggingface_hub.model_info passes timeout=None to httpx, which means no
+# timeout at all: an unreachable hub would hang this preflight (and
+# POST /api/engines/set, which runs it) indefinitely.
+_HUB_TIMEOUT_S = 10
+
+
 @app.post("/api/rerank/check")
 def rerank_check(body: RerankCheckIn) -> dict:
     """Can this cross-encoder actually be used here, and what will it cost?
@@ -3477,7 +3715,7 @@ def rerank_check(body: RerankCheckIn) -> dict:
     reachable, detail = None, None
     try:
         from huggingface_hub import model_info
-        info = model_info(model)
+        info = model_info(model, timeout=_HUB_TIMEOUT_S)
         reachable = True
         detail = f"{info.id} ({info.pipeline_tag or 'no pipeline tag'})"
     except Exception as e:                       # offline, 404, auth, timeout
@@ -3494,7 +3732,7 @@ def rerank_check(body: RerankCheckIn) -> dict:
         # does not condition on the env vars alone; it asks where the token
         # actually came from only to name it in the warning.
         try:
-            info = model_info(model, token=False)
+            info = model_info(model, token=False, timeout=_HUB_TIMEOUT_S)
         except Exception as e2:
             detail = (f"{type(e).__name__}: {e} "
                       f"(anonymous retry also failed: {type(e2).__name__})")
@@ -3533,6 +3771,192 @@ def rerank_check(body: RerankCheckIn) -> dict:
             "max_length": max_length,
             "context_length": known["context_length"] if known else None,
             "known": bool(known), "warnings": warnings}
+
+
+# ---- engines map (GET /api/engines) ----
+#
+# Facts only; src/engines_map.py decides what they mean. FAST probes: no model
+# load, no internet, no /api/ocr/status (it runs Tesseract twice). The only
+# network calls are OCR Studio's local sidecar health checks, which already run
+# side by side with 3-5 s timeouts; everything else is a file stat or a
+# find_spec, measured in milliseconds, so nothing here needs its own thread.
+
+def _probe_generation(cfg) -> dict:
+    from src.llm.llm_client import LLMClient
+    _, details = _provider_choices(cfg)
+    return {"active": str(cfg.get("generation.provider") or ""),
+            "model": cfg.get("generation.model"),
+            "providers": details, "reserved": list(LLMClient.RESERVED_PROVIDERS)}
+
+
+def _probe_reranker(cfg, model: str | None = None) -> dict:
+    """`model`: the cross-encoder to check the cache for (default: configured)."""
+    from importlib.util import find_spec
+    from src.retrieval.reranker import RERANK_MODES
+    model = (model or str(cfg.get("retrieval.cross_encoder_model") or "")).strip()
+    laya_dir = cfg.path("retrieval.laya.model_dir", "models/laya-noetrix")
+    return {"active": str(cfg.get("retrieval.rerank_mode", "cross_encoder")).lower(),
+            "model": model, "modes": list(RERANK_MODES),
+            "cached": _model_is_cached(model)[0],
+            "laya": {"enabled": bool(cfg.get("retrieval.laya.enabled", False)),
+                     "package": find_spec("laya") is not None,
+                     "checkpoint": laya_dir.is_dir(), "model_dir": str(laya_dir)}}
+
+
+def _probe_embeddings(cfg) -> dict:
+    """Every chunk collection with a fingerprint sidecar, compared with the
+    configured embedder. Reads the JSON sidecars only: Chroma is never opened."""
+    from src.embeddings.registry import resolve_embedding_spec
+    from src.embeddings.sidecar import SIDECAR_SUFFIX, fingerprint_diff, read_sidecar
+    spec = resolve_embedding_spec(cfg)
+    chroma_dir = cfg.path("paths.chroma_dir")
+    collections = []
+    for f in sorted(chroma_dir.glob(f"*{SIDECAR_SUFFIX}")):
+        name = f.name[:-len(SIDECAR_SUFFIX)]
+        try:
+            sc = read_sidecar(chroma_dir, name)
+        except ValueError as e:              # an untrustworthy file is listed, with why
+            collections.append({"name": name, "error": str(e)})
+            continue
+        if sc["role"] != "chunks":           # HyPE question collections are not switchable
+            continue
+        collections.append({"name": name, "provider": sc["provider"], "model": sc["model"],
+                            "status": sc["status"],
+                            "diff": fingerprint_diff(spec, spec.dimensions, sc, role="chunks")})
+    return {"active": str(cfg.get("paths.collection_name", "obsidian_vault")),
+            "model": spec.label(), "provider": spec.provider,
+            "providers": ["local", *(cfg.get("embedding.providers") or {})],
+            "collections": collections}
+
+
+def _probe_sparse(cfg) -> dict:
+    from importlib.util import find_spec
+    from src.retrieval import sparse_tantivy
+    # The retriever's own build-time test (src/retrieval/retriever.py): the
+    # index is present when its meta file is. check_backend only checks the name.
+    d = sparse_tantivy.index_dir(cfg.path("paths.bm25_index"))
+    return {"active": str(cfg.get("retrieval.sparse_backend", "bm25s")),
+            "backends": list(sparse_tantivy.SPARSE_BACKENDS),
+            "tantivy_package": find_spec("tantivy") is not None,
+            "tantivy_index": (d / "noetrix_meta.json").is_file(), "tantivy_dir": str(d)}
+
+
+def _probe_ocr(cfg) -> dict:
+    from src.ocr_studio import engines
+    return {"active": str(cfg.get("pdf.ocr_engine", "auto")),
+            "model": cfg.get("pdf.vlm_ocr.preset"),
+            "engines": list(EDITABLE_SETTINGS["pdf.ocr_engine"]["values"]),
+            "pipeline": cfg.get("pdf.paddle_ocr.pipeline"),
+            "status": engines.status(cfg)}
+
+
+def _probe_fetch(cfg) -> dict:
+    from importlib.util import find_spec
+    from src.ingestion.web_import import FETCH_BACKENDS
+    return {"active": "auto", "backends": list(FETCH_BACKENDS),
+            "installed": {name: find_spec(name) is not None
+                          for name in ("crawl4ai", "scrapling", "crawlee")}}
+
+
+def _probe_chunking(cfg) -> dict:
+    return {"active": str(cfg.get("parser.chunking", "heading")),
+            "values": list(EDITABLE_SETTINGS["parser.chunking"]["values"])}
+
+
+_ENGINE_PROBES = {
+    "generation": _probe_generation, "reranker": _probe_reranker,
+    "embeddings": _probe_embeddings, "sparse": _probe_sparse, "ocr": _probe_ocr,
+    "fetch": _probe_fetch, "chunking": _probe_chunking,
+}
+
+
+@app.get("/api/engines")
+def engines_list() -> dict:
+    """Every component's engines: the active one, each option's availability,
+    whether POST /api/engines/set accepts it, and what a switch costs."""
+    from src.engines_map import build_engines
+    from src.utils.config_loader import load_config as _load
+    cfg = _load()                            # fresh: a Settings save shows at once
+    return build_engines({name: probe(cfg) for name, probe in _ENGINE_PROBES.items()})
+
+
+class EngineSetIn(BaseModel):
+    component: str
+    engine: str
+    model: Optional[str] = None
+
+
+def _engine_effect(keys: list[str]) -> tuple[str, str | None, list[str]]:
+    """(takes_effect, next_op, warnings) from the written keys' `restart` strings.
+    next_op restarts :8051 only; nothing here can restart the console itself."""
+    services = sorted({part.strip()
+                       for key in keys
+                       for part in EDITABLE_SETTINGS[key]["restart"].split("+")
+                       if part.strip().startswith(":")})
+    if not services:
+        return "the next job: it is read per job, no restart", None, []
+    warnings = (["restart :8052 by hand (rag console / docker compose restart rag); until "
+                 "then the console still uses the old value"] if ":8052" in services else [])
+    return (f"after a restart of {' and '.join(services)}",
+            "POST /api/service/restart" if ":8051" in services else None, warnings)
+
+
+def _refused(message: str) -> JSONResponse:
+    return JSONResponse({"error": message}, status_code=400)
+
+
+@app.post("/api/engines/set")
+def engines_set(body: EngineSetIn):
+    """Persistently switch one component's engine, after its preflight.
+
+    Writes ONLY through settings_update (the Settings tab's Save), so the
+    validation and the comment-preserving write are shared, not copied. A
+    failed preflight writes nothing, and nothing is ever restarted here:
+    `next_op` names the restart, which stays a separate, explicit call."""
+    from src.engines_map import build_engines, switch_changes, switch_option
+    from src.utils.config_loader import load_config as _load
+    probe = _ENGINE_PROBES.get(body.component)
+    if probe is None:
+        return _refused(f"unknown component {body.component!r}; expected one of "
+                        f"{list(_ENGINE_PROBES)}")
+    cfg = _load()
+    facts = (_probe_reranker(cfg, body.model) if body.component == "reranker"
+             else probe(cfg))
+    cross_encoder = (body.component, body.engine) == ("reranker", "cross_encoder")
+    try:
+        option = switch_option(build_engines({body.component: facts}),
+                               body.component, body.engine)
+        # A cross_encoder switch always writes its model too, so settings_update
+        # applies its context-limit check to the pair that will actually load.
+        changes = switch_changes(body.component, body.engine,
+                                 facts["model"] if cross_encoder else body.model)
+    except ValueError as e:
+        return _refused(str(e))
+
+    warnings: list[str] = []
+    if cross_encoder:
+        check = rerank_check(RerankCheckIn(model=facts["model"]))
+        if isinstance(check, JSONResponse):
+            return _refused(json.loads(check.body)["error"])
+        if not check["usable"]:
+            return _refused(f"{facts['model']} cannot be used: " + "; ".join(check["warnings"]))
+        warnings = check["warnings"]
+    elif not option["available"]:
+        return _refused(f"{body.component} engine {body.engine!r} is not available: "
+                        f"{option['reason']}")
+
+    # The config lock (see _persist_section_keys) is held across the read-back too, so
+    # `written` is what THIS call wrote. ponytail: :8051's POST /config persist=true is
+    # another process and does not take it.
+    with _CONFIG_WRITE_LOCK:
+        result = settings_update(SettingsIn(changes=changes))
+        if isinstance(result, JSONResponse):
+            return _refused(json.loads(result.body)["error"])
+        disk = _load()
+    takes_effect, next_op, restart_warnings = _engine_effect(result["written"])
+    return {"written": {key: disk.get(key) for key in result["written"]},
+            "takes_effect": takes_effect, "next_op": next_op,
+            "warnings": warnings + result["notes"] + restart_warnings}
 
 
 # ---- OCR engines (status + warm-up) ----
@@ -3775,6 +4199,10 @@ class StudioPageSetIn(BaseModel):
 class StudioExportIn(BaseModel):
     paths: list[str]
     pages: str = "done"                      # done | all
+
+
+class StudioRemoveIn(BaseModel):
+    path: str                                # vault-relative, as GET /api/ocrstudio/files lists it
 
 
 def _studio_opt(key: str, default):
@@ -4289,6 +4717,59 @@ def ocrstudio_upload(file: UploadFile, pages: str = _Form("")):
             up.rmdir()                           # a failed first import leaves no folder
     return {"ok": True, "path": rel, "name": dest.name, "page_count": count,
             "page_set": _studio_spec(page_set), "bytes": size, "renamed": dest.name != name}
+
+
+# Obsidian's own vault trash folder (where its "Move to Obsidian trash" option
+# puts deleted files): a fixed Obsidian convention, not a setting. Every loader
+# and the vault tree already skip it.
+_OBSIDIAN_TRASH = ".trash"
+
+
+@app.post("/api/ocrstudio/remove")
+def ocrstudio_remove(body: StudioRemoveIn) -> dict:
+    """Take ONE document out of the OCR queue, an import (ocr_studio.upload_dir)
+    or a PDF/image in the inbox (webui.inbox_dir): MOVE it (never delete) into
+    <vault>/.trash, keeping its vault-relative sub-path, " (n)" on a taken
+    name. Refused (409) while it is indexed, so no chunk cites a missing
+    source. Studio state and figure crops stay: moving the file back to its
+    path re-attaches its work."""
+    from src.ingestion.web_import import _unique
+    from src.ocr_studio.pages import doc_state
+    from src.ocr_studio.render import DOC_EXTS
+    try:
+        up, up_rel = _studio_upload_dir()
+        vault = _vault_root().resolve()
+        inbox = (vault / (_vault_rel(CFG.get("webui.inbox_dir")) or "Inbox")).resolve()
+        p = (vault / _vault_rel(body.path)).resolve()
+        # Exactly what GET /api/ocrstudio/files lists in those two groups: a
+        # top-level document, and for an import a non-hidden one (a hidden
+        # ".part" is an upload still in flight).
+        listed = p.parent == inbox or (p.parent == up and not p.name.startswith("."))
+        if not listed or p.is_dir() or p.suffix.lower() not in DOC_EXTS:
+            raise ValueError(f"{body.path!r} is not a document in {up_rel}/ or the inbox: only "
+                             f"OCR Studio imports and inbox documents can be removed")
+        if not p.is_file():
+            raise FileNotFoundError(f"no such document: {body.path}")
+    except (ValueError, FileNotFoundError) as e:
+        return _refuse(e)
+    rel = p.relative_to(vault).as_posix()
+    indexed = _indexed_as(rel)
+    if indexed:
+        return JSONResponse({"ok": False, "indexed": sorted(indexed), "error":
+                             f"{rel} is indexed; remove it from the index first "
+                             f"(Documents tab, or POST /api/documents/delete)"}, status_code=409)
+    state = doc_state(_studio_store(), rel)
+    trash = (vault / _OBSIDIAN_TRASH / rel).parent
+    try:
+        trash.mkdir(parents=True, exist_ok=True)
+        dest = _unique(trash, p.stem, p.suffix)
+        os.replace(p, dest)
+    except OSError as e:                     # e.g. the file is open in another program
+        return JSONResponse({"ok": False, "error": f"could not move {rel} to the vault's "
+                             f"{_OBSIDIAN_TRASH}: {type(e).__name__}: {e}"}, status_code=500)
+    return {"ok": True, "path": rel, "moved_to": dest.relative_to(vault).as_posix(), "state": state,
+            "note": "Moved to the vault's .trash; move it back to restore it "
+                    "(its OCR Studio work re-attaches)."}
 
 
 @app.post("/api/ocrstudio/pageset")
@@ -5190,6 +5671,11 @@ def api_schema() -> dict:
                 "purpose": "one canvas parsed, plus the sha256 of its bytes that "
                            "a save must send back, and its indexed chunks",
                 "query": {"path": "vault-relative .canvas path"}},
+            "GET /api/canvas/embedder": {
+                "permission": "read",
+                "purpose": "graph mode's seed embedder: graph.embedding_provider, the <collection>__graph "
+                           "collection's fingerprint and freshness against the main collection's graph-lane "
+                           "chunks (a verdict and why), and the embedders it can be built with"},
             "POST /api/canvas/file": {
                 "permission": "mutating",
                 "purpose": "WRITES INTO THE VAULT: save edits to one existing "
@@ -5212,11 +5698,29 @@ def api_schema() -> dict:
                 "body": {"path": "vault-relative .canvas path"}},
             "POST /api/canvas/suggest_label": {
                 "permission": "mutating",
-                "purpose": "ask the generation model (may bill) for an edge "
-                           "label from canvas.augment.vocabulary; writes "
-                           "nothing — the label only lands in the file on Save",
-                "body": {"path": "str", "from_text": "str", "to_text": "str",
-                         "examples": "list[str] (labels already on the canvas)"}},
+                "purpose": "ask a language model (a providers: entry marked vision: true "
+                           "also sees image nodes) for one edge's label, relation, tags, "
+                           "alternatives, confidence and reason, from both endpoint nodes "
+                           "of the posted canvas (file nodes read from the vault, "
+                           "read-only; long ones summarised by the same model first), the "
+                           "arrow, the canvas title, the groups and the neighbouring "
+                           "labels. One call plus one per long node; may bill. Writes "
+                           "nothing: the label reaches the file only on Save",
+                "body": {"path": "vault-relative .canvas path (must exist)",
+                         "edge_id": "an edge id in data.edges",
+                         "data": "{nodes, edges} as the editor holds them (unsaved edits "
+                                 "included)",
+                         "provider": "providers: name or openai|anthropic|local? (default "
+                                     "canvas.augment.provider, else generation.provider)",
+                         "model": "model id? (default canvas.augment.model, else the "
+                                  "backend's own)",
+                         "guidance": "free text? appended to the prompt (<= 2000 chars)"}},
+            "GET /api/canvas/suggest_options": {
+                "permission": "read",
+                "purpose": "the Graph tab's suggest-label picker: the default backend and "
+                           "model, every providers: entry with its key status and vision "
+                           "flag, the relation vocabulary, the long-node settings and "
+                           "whether label #tags are indexed"},
             "GET /api/ocrstudio/engines": {
                 "permission": "read",
                 "purpose": "OCR Studio: each engine's availability and the "
@@ -5292,6 +5796,14 @@ def api_schema() -> dict:
                            "pages keep their real numbers. Never overwrites, never "
                            "indexes; refused over ocr_studio.upload_max_mb (413)",
                 "body": {"file": "multipart file", "pages": "range e.g. 12-18,30 (\"\" = all)"}},
+            "POST /api/ocrstudio/remove": {
+                "permission": "destructive",
+                "purpose": "take ONE document out of the OCR queue (an import in "
+                           "ocr_studio.upload_dir, or a PDF/image in webui.inbox_dir): MOVES "
+                           "the vault file to <vault>/.trash (studio state stays, so moving "
+                           "it back re-attaches its work); 409 while it is indexed",
+                "body": {"path": "vault-relative path of an upload or inbox row "
+                                 "(from /api/ocrstudio/files)"}},
             "POST /api/ocrstudio/pageset": {
                 "permission": "mutating",
                 "purpose": "set or clear a document's working pages (studio "
@@ -5363,11 +5875,12 @@ def api_schema() -> dict:
                                    "pdf.",
                          "force": "bool"}},
             "POST /api/inbox/delete": {
-                "permission": "mutating",
-                "purpose": "remove staged files from the inbox / _converted "
-                           "folder ON DISK (index untouched — that's "
-                           "/api/documents/delete)",
-                "body": {"names": "list[str] (plain filenames)"}},
+                "permission": "destructive",
+                "purpose": "PERMANENTLY delete staged files from the inbox / "
+                           "_converted folder on disk (no .trash; index untouched — "
+                           "that's /api/documents/delete)",
+                "body": {"names": "list[str] (plain filenames)",
+                         "folder": "inbox|converted? (needed when both hold a name)"}},
             "GET /api/import/converted": {
                 "permission": "read",
                 "purpose": "list staged .md conversions in <inbox>/_converted"},
@@ -5481,6 +5994,32 @@ def api_schema() -> dict:
                            "uncached model makes the next :8051 start fail.",
                 "body": {"model": "cross-encoder id (default: the configured one)",
                          "max_length": "int? (default: the configured one)"}},
+            "GET /api/engines": {
+                "permission": "read",
+                "purpose": "every engine per component (generation, reranker, "
+                           "embeddings, sparse, ocr, fetch, chunking): the active "
+                           "one, the setting it is written to, and each option's "
+                           "`available`, `reason`, `swappable` (POST "
+                           "/api/engines/set accepts it) and `switch`, the cheapest "
+                           "way to use it (per_call | per_job | restart | build | "
+                           "reembed). Fast probes only: no model load, no "
+                           "internet; local OCR sidecars get short health checks"},
+            "POST /api/engines/set": {
+                "permission": "mutating",
+                "purpose": "persistently switch one component's engine after its "
+                           "preflight (reranker: local cache, then the hub with a "
+                           "timeout, and the context limit; embeddings: only to an "
+                           "already-built collection whose fingerprint matches the "
+                           "configured embedder; sparse: the tantivy index exists; "
+                           "ocr: the engine answers now). Writes through POST "
+                           "/api/settings's validator; a refused switch writes "
+                           "nothing. Never restarts anything: returns `written`, "
+                           "`takes_effect`, `next_op` (the restart to run, or null) "
+                           "and `warnings`",
+                "body": {"component": "str (a GET /api/engines component with a setting)",
+                         "engine": "str (one of its swappable options)",
+                         "model": "str? (generation: the model id; reranker "
+                                  "cross_encoder: the cross-encoder id)"}},
             "GET /api/ocr/status": {
                 "permission": "read",
                 "purpose": "resolved Tesseract/VLM OCR capability, model "
@@ -5678,11 +6217,12 @@ def api_schema() -> dict:
             "recalibrate": {"permission": "mutating",
                             "params": {"dry_run": "bool"},
                             "note": "metadata-only course recalibration"},
-            "eval": {"permission": "read",
-                     "params": {"retrieval_only": "bool (skip generation — "
-                                                  "offline, minutes)"},
-                     "note": "golden-query suite; the full (generation) mode "
-                             "needs FreeLLMAPI up"},
+            "graph_embed": {"permission": "mutating",
+                            "params": {"limit": "int? (smoke run: left 'building', never served)"},
+                            "note": "drops and rebuilds <paths.collection_name>__graph from scratch: the graph.file_type "
+                                    "chunks of the main collection embedded by graph.embedding_provider (refused while that "
+                                    "is null or names the main embedder). Never writes the main collection or a chunk file. "
+                                    "POST /api/canvas/reindex queues it after its append when the key is set. Restart :8051 afterwards"},
         },
         "restart_after_index_change": "python -m uvicorn serve_api:app --host "
                                       "127.0.0.1 --port 8051",

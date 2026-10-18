@@ -472,3 +472,64 @@ def test_discovery_matches_the_extension_case_insensitively(tmp_path):
     from src.ingestion.canvas_loader import iter_canvas_files
     _write_canvas(tmp_path / "Upper.CANVAS", nodes=[])
     assert [f.name for f in iter_canvas_files(tmp_path)] == ["Upper.CANVAS"]
+
+
+# ---- canvas.label_tags: #tags in an edge label become tags of both endpoints ----
+
+def _tagged_canvas(tmp_path: Path, labels=("#p", "uses #Stats #3d", "12")) -> Path:
+    return _write_canvas(tmp_path / "tagged.canvas", nodes=[
+        {"id": "a", "type": "text", "x": 0, "y": 0, "width": 200, "height": 100,
+         "text": "Node A: what the procedure is for, long enough for the floor."},
+        {"id": "b", "type": "text", "x": 400, "y": 0, "width": 200, "height": 100,
+         "text": "Node B: the steps to perform, long enough for the floor."},
+        {"id": "c", "type": "text", "x": 0, "y": 400, "width": 200, "height": 100,
+         "text": "Node C: a neighbouring idea, long enough for the floor."},
+    ], edges=[
+        {"id": "e1", "fromNode": "a", "toNode": "b", "label": labels[0]},
+        {"id": "e2", "fromNode": "c", "toNode": "a", "label": labels[1]},
+        {"id": "e3", "fromNode": "b", "toNode": "c", "label": labels[2]},
+    ])
+
+
+def _tag_loader(tmp_path: Path, on: bool) -> CanvasLoader:
+    return CanvasLoader(vault_path=tmp_path, output_file=tmp_path / "out.jsonl",
+                        min_chunk=10, label_tags=on)
+
+
+def test_label_tags_are_off_by_default(tmp_path):
+    from src.utils.config_loader import Config
+    canvas = _tagged_canvas(tmp_path)
+    assert not any("tags" in c.metadata for c in _loader(tmp_path).load_file(canvas))
+    cfg = Config({"canvas": {"vault_path": str(tmp_path)}}, tmp_path)
+    assert CanvasLoader.from_config(cfg).label_tags is False
+    cfg = Config({"canvas": {"vault_path": str(tmp_path), "label_tags": True}}, tmp_path)
+    assert CanvasLoader.from_config(cfg).label_tags is True
+
+
+def test_label_tags_reach_both_endpoint_chunks_without_touching_ids_or_text(tmp_path):
+    canvas = _tagged_canvas(tmp_path)
+    off = _tag_loader(tmp_path, False).load_file(canvas)
+    on = _tag_loader(tmp_path, True).load_file(canvas)
+    assert [(c.doc_id, c.text) for c in on] == [(c.doc_id, c.text) for c in off]
+    tags = {c.metadata["canvas_node_id"]: c.metadata.get("tags") for c in on}
+    # the sorted union over every edge touching the node, as extract_tags reads it
+    assert tags == {"a": ["Stats", "p"], "b": ["p"], "c": ["Stats"]}
+    without = [{k: v for k, v in c.metadata.items() if k != "tags"} for c in on]
+    assert without == [c.metadata for c in off]                    # nothing else moved
+
+
+def test_label_tags_merge_with_forced_tags(tmp_path):
+    _tagged_canvas(tmp_path, labels=("#p", "uses", "12"))
+    loader = _tag_loader(tmp_path, True)
+    loader.force_tags = ["exam", "p"]
+    rows = [json.loads(ln) for ln in
+            loader.ingest_vault(verbose=False).read_text(encoding="utf-8").splitlines()]
+    tags = {r["metadata"]["canvas_node_id"]: r["metadata"]["tags"] for r in rows}
+    assert tags == {"a": ["p", "exam"], "b": ["p", "exam"], "c": ["exam", "p"]}
+
+
+def test_a_hash_before_a_digit_is_not_a_tag_but_hash_p_is(tmp_path):
+    canvas = _tagged_canvas(tmp_path, labels=("#3d", "10,11", "#p"))
+    tags = {c.metadata["canvas_node_id"]: c.metadata.get("tags")
+            for c in _tag_loader(tmp_path, True).load_file(canvas)}
+    assert tags == {"a": None, "b": ["p"], "c": ["p"]}

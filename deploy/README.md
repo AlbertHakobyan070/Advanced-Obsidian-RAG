@@ -224,9 +224,9 @@ and about as much memory as the stack itself.
 - Do not change `ENCRYPTION_KEY`, and do not rename the Compose project (the folder
   is `rag-docker-bundle`): both would orphan the provider keys stored in the proxy's
   volume. `FREELLMAPI.md` has the recovery.
-- The image now runs as a non-root user. Volumes that an older image filled as root
-  are handed over by `volume-perms` on the next `up`; if a volume still reports it
-  is not writable, `docker compose up volume-perms` shows why.
+- The image runs as a non-root user. A volume that a root-run container filled is
+  handed over by `volume-perms` on the next `up`; if a volume still reports it is
+  not writable, `docker compose up volume-perms` shows why.
 
 The guides shipped inside the archives (`INSTALL.md`, `MAC_SETUP.md`, `SETUP_MACOS.md`,
 `FREELLMAPI.md`) are versioned in `package/`.
@@ -286,10 +286,15 @@ How it is laid out, and why:
   both indexes in RAM; sidecar figures marked ESTIMATE have not been measured yet.
   Volume sizes come from the live corpus's footprint. The local overlay shrinks both
   for a laptop cluster.
-- **Neither the query API nor the console has authentication.** They were built to
-  listen on localhost. Every Service is ClusterIP and the cloud overlay ships no
-  Ingress on purpose: put an authenticating proxy in front before exposing either,
-  because the console's endpoints ingest, delete and change settings.
+- **Both services check `Host` and `Origin` on every request; a bearer token is
+  optional.** Set `RAG_API_TOKEN` in the `noetrix-provider-keys` Secret and every
+  call then needs `Authorization: Bearer <token>`. An in-cluster caller that uses
+  the Service names `rag` or `rag-console` must have those names in
+  `security.allowed_hosts`, or its requests get `400`; `kubectl port-forward`
+  arrives as `localhost` and needs nothing. Every Service is ClusterIP and the cloud
+  overlay ships no Ingress on purpose: the token says who may call, not what they may
+  do, and the console's endpoints ingest, delete and change settings. See
+  [Security](../docs/api.md#security).
 - The FreeLLMAPI and llama.cpp images are upstream's and run as root; they are pinned by
   digest and not pushed into a stricter security context that nobody has tried
   against their entrypoints.

@@ -94,7 +94,7 @@ def hyde_ablation() -> list[tuple[str, dict]]:
 
 def diversity_ablation() -> list[tuple[str, dict]]:
     """The per-file cap (retrieval.max_per_file) over the shipped retrieval pipeline
-    with HyDE OFF (so no LLM is in the loop; config.yaml itself ships use_hyde: true):
+    with HyDE OFF (so no LLM is in the loop; config.yaml also ships use_hyde: false):
     R5 with the scope lanes and the metadata boost off. D-off is that pipeline
     uncapped; it is F-none of the routing ablation."""
     base = {**factor_config(R5), "scope_lanes": False, "metadata_boost": False}

@@ -13,8 +13,8 @@ rather than inventing an answer.
       frontmatter included), PDFs (scanned ones too, via OCR), Jupyter and R
       notebooks, source code in most languages, and Office documents.
     - **Free / local by default**: CPU embeddings, on-disk vector and sparse
-      indexes, no managed service. Generation is the only part that can be
-      remote, and **retrieval works with no LLM at all**.
+      indexes, no managed service. By default generation is the only part that
+      calls out to an endpoint, and **retrieval works with no LLM at all**.
     - **Metadata-aware**: domain, path, file-type and user-tag metadata support
       scoped retrieval without splitting the corpus into separate indexes.
     - **Read the live shape from `GET /stats`** — no copied total stays accurate
@@ -30,7 +30,7 @@ strictly from it, so every claim traces back to a source you already trust.
 It is a full retrieval pipeline rather than a thin wrapper:
 
 - **Hybrid retrieval** — dense embeddings + BM25, fused by Reciprocal Rank Fusion.
-- **Query expansion** — HyDE (and optional HyPE) to bridge the vocabulary gap
+- **Query expansion** — optional HyDE and HyPE to bridge the vocabulary gap
   between a short question and long-form documents.
 - **Intent-aware scope routing** — soft-routes a query toward the right subject
   area, path or file type, without ever being able to empty the result set.
@@ -68,7 +68,7 @@ It is a full retrieval pipeline rather than a thin wrapper:
 
 -   :material-chart-line: **[Evaluation](evaluation.md)**
 
-    The per-configuration bench, the golden suite, the metrics, and an honest read of what they mean.
+    The per-configuration bench, the metrics, and an honest read of what they mean.
 
 -   :material-wrench: **[Operations](operations.md)**
 
@@ -76,12 +76,22 @@ It is a full retrieval pipeline rather than a thin wrapper:
 
 -   :material-docker: **[Docker deployment](deployment-docker.md)**
 
-    Run the whole stack in two commands, and stop the parts you aren't using.
+    Run the whole stack in containers, from a release archive or a checkout, and
+    stop the parts you aren't using.
 
 </div>
 
-## Recent additions
+## Highlights
 
+- **An MCP server** exposes both services as tools for Claude Code, Claude
+  Desktop, Codex and other MCP clients; every tool carries its operation's
+  permission tier. See [MCP server](mcp.md).
+- **A request guard** checks `Host` on every request to either service and
+  `Origin` on every state-changing one, and `RAG_API_TOKEN` adds an optional
+  bearer token. See [Security](api.md#security).
+- **Hand-guided OCR and canvas editing** in the console: the OCR tab reads a
+  page region by region, each with its own engine, and the Graph tab edits an
+  Obsidian canvas, suggests edge labels with a model you pick, and re-indexes it.
 - **A PaddleOCR sidecar** gives scanned PDFs a real detection + recognition
   pipeline — far better than Tesseract on skewed, multi-column and non-Latin
   pages — in its own container, so it can be stopped when you are not ingesting.
@@ -101,3 +111,5 @@ It is a full retrieval pipeline rather than a thin wrapper:
 - **Provider discovery and per-query overrides** expose resolved backend/model
   provenance without exposing secrets; provider-only branches reuse identical
   evidence for fair answer comparisons.
+
+What changed in each release is in the [Release notes](release-notes.md).

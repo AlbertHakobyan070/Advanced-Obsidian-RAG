@@ -122,7 +122,7 @@ Ordered by cost. Stop at the first kill.
 | Where | Role | Notes |
 |---|---|---|
 | **Kaggle, "GPU T4 x2"** | **Training (recommended)** | Two T4s (about 15 GB each) under DDP. Sessions last at most 12 hours (Kaggle's own CLI source). The weekly GPU quota is per user and reported by the server: check it with `kaggle quota` (columns `resource`, `used`, `remaining`, `total`, `refreshAt`). The commonly cited figure is **about 30 GPU-hours a week**, from secondary sources and approximate; Kaggle has reportedly varied it. Whether a dual-T4 hour counts as one quota hour or two is **unverified**: run a 10-minute dual-T4 session and diff `kaggle quota` before and after. The P100 is retired (asking for it gives a T4). |
-| **Colab, free T4** | Fallback | One GPU: set `NPROC = 1` in the notebook (cell 7 then accumulates more steps to keep the effective batch at 64; about twice the wall-clock) and change its three path constants. Upstream's single-process `laya-train` CLI (new in 0.3.28) reads the same `{state, questions, gold}` rows that cell 6 writes to `rows_train.jsonl` in the scratch directory. Colab is also a third party: section 1 applies unchanged. |
+| **Colab, free T4** | Fallback | One GPU: set `NPROC = 1` in the notebook (cell 7 then accumulates more steps to keep the effective batch at 64; about twice the wall-clock) and change its three path constants. Upstream's single-process `laya-train` CLI (in 0.3.28, the version pinned here) reads the same `{state, questions, gold}` rows that cell 6 writes to `rows_train.jsonl` in the scratch directory. Colab is also a third party: section 1 applies unchanged. |
 | **Local GTX 1070 Ti** | **Inference only**, in a **separate venv** | Pascal. See below. |
 | **Local CPU** | Default inference | The RAG venv after `pip install laya==0.3.28`. See below. |
 
@@ -299,8 +299,8 @@ python main.py bench run --configs laya-rerank,default-k10 --split dev
 `laya-rerank` (`{top_k: 10, rerank: laya}` in `eval/configs.yaml`) and `default-k10` (the shipped
 pipeline, with the MiniLM cross-encoder) are scored on the same questions, so the comparison is
 paired. Do the same for `bge-reranker-v2-m3`, the second reference, with that reranker configured;
-the runner runs reranker models one at a time. (`bench` is the v2 harness specified in the eval
-design spec; [Evaluation](evaluation.md) documents the older `main.py eval` and its golden set.)
+the runner runs reranker models one at a time. (`bench` is the harness specified in the eval
+design spec; [Evaluation](evaluation.md) documents it.)
 
 The **`P-rerank-pool` probe** (spec section 5) isolates ranking skill: the pool is fixed at the gold
 chunks plus 30 hard negatives, so the retriever's recall cannot hide or flatter the reranker. That

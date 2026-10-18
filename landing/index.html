@@ -673,54 +673,53 @@ footer { border-top: 1px solid var(--hair); padding-block: 3rem 4rem; }
       <div class="stack">
         <h2 class="measure">Measured, and honest about the measurement.</h2>
         <p class="measure dim">
-          A labelled suite scored in three tiers. Every metric reports how many
-          questions it was actually scored over. A metric with no ground truth
-          reports <span class="mono">not scored</span>, never a confident zero.
+          A bench of labelled questions, each naming its gold sources by file
+          and, where it matters, page range or heading. It scores the pipeline
+          one configuration at a time, and every number carries the count of
+          questions it was computed over and a 95% interval.
         </p>
       </div>
 
       <div class="tiers">
         <table>
           <thead>
-            <tr><th>Tier</th><th>What it measures</th><th>Needs</th></tr>
+            <tr><th>Layer</th><th>What it measures</th><th>Needs</th></tr>
           </thead>
           <tbody>
             <tr>
               <td>1 · Retrieval</td>
-              <td>hit-rate@k, MRR, recall@k over expected source files, scope precision and recall</td>
-              <td>nothing but the index; runs offline in minutes</td>
+              <td>nDCG@10, recall@10, MRR and hit@k against the gold sources, per configuration</td>
+              <td>the index; no LLM unless a configuration turns HyDE or decomposition on</td>
             </tr>
             <tr>
-              <td>2 · Answer</td>
-              <td>keyword recall, citation validity, the groundedness floor, citation support</td>
-              <td>a generation endpoint</td>
+              <td>2 · Comparison</td>
+              <td>the paired per-question difference between two configurations, with a bootstrap interval and an exact McNemar test</td>
+              <td>both configurations, run on the same questions</td>
             </tr>
             <tr>
-              <td>3 · Calibration</td>
-              <td>correctness bucketed by the answer's own confidence line, and the HIGH−LOW gap</td>
-              <td>a generation endpoint</td>
+              <td>3 · Answers</td>
+              <td>nugget recall, citation precision, abstention accuracy and calibration, graded by a judge model</td>
+              <td>a generation endpoint, pinned by a replay store</td>
             </tr>
           </tbody>
         </table>
       </div>
 
       <div class="stack">
-        <h3 class="measure">The groundedness floor</h3>
+        <h3 class="measure">Paired, or it is not a result</h3>
         <p class="measure dim">
-          The part worth defending, because it's deterministic and needs no
-          language model. For each cited sentence it measures content-word
-          overlap with the chunk that sentence points at, and names the
-          worst-scoring sentence. High overlap doesn't prove a claim is right, but
-          but <em>low</em> overlap means a sentence barely resembles the source it
-          cites, which is the exact shape of a fabricated citation. It also
-          catches a <span class="mono">[9]</span> pointing into a seven-source
-          context, which generators otherwise drop in silence.
+          A component earns its place only when the paired interval on the
+          per-question difference excludes zero. Tuning happens on the dev split;
+          the test split is sealed, and every opening is written to a ledger
+          before the first search, so a number cannot be argued into
+          significance after the fact.
         </p>
         <p class="measure dim">
-          An LLM-as-judge tier exists and is labelled <em>advisory</em>: a model
-          grading a model is useful for ranking two runs against each other, not
-          as ground truth. Where a question has no reference answer, the judge's
-          score is discarded rather than recorded.
+          The answer layer is labelled <em>advisory</em>: a model grading a model
+          is useful for ranking two runs against each other, not as ground truth,
+          until a judge-agreement study says how far to trust it. Every model in a
+          run, the judge included, answers from a replay store, so a rerun grades
+          the same text the same way.
         </p>
       </div>
     </div>
@@ -817,7 +816,7 @@ python -m src.ingestion.obsidian_parser "path/to/docs" -o data/chunks.jsonl
 python main.py <span class="k">index</span>
 
 python main.py <span class="k">query</span> "What does our incident response process require?"
-python main.py <span class="k">eval</span> --retrieval-only   <span class="c"># offline regression, minutes</span></pre>
+python main.py <span class="k">bench</span> run --configs ladder   <span class="c"># per-component scorecard</span></pre>
           </div>
           <p class="small" style="margin-top:1rem;max-width:40rem">
             PDFs, notebooks and source code each get their own ingest pass and
@@ -990,7 +989,7 @@ python main.py <span class="k">eval</span> --retrieval-only   <span class="c"># 
     ground: {
       title: "Answer, cite, audit",
       tag: "the contract",
-      body: "The answer is written from the retrieved excerpts only. Each claim carries an <span class='mono'>[n]</span> marker that resolves to a passage that was actually retrieved, plus a confidence line. An optional second pass checks each cited sentence against the passage it points at, and a deterministic groundedness floor flags any sentence that barely resembles its source, which is the exact shape of a fabricated citation.",
+      body: "The answer is written from the retrieved excerpts only. Each claim carries an <span class='mono'>[n]</span> marker that resolves to a passage that was actually retrieved, plus a confidence line. An optional second pass checks each cited sentence against the passage it points at.",
       art: `<svg viewBox="0 0 380 150" aria-hidden="true">
         <rect class="s-box a-fade" style="--d:.05s" x="4" y="10" width="372" height="58" rx="2"/>
         <text class="s-t a-fade" style="--d:.15s" x="16" y="30">Backups are retained for the period in the schedule <tspan class="s-t-hi">[1]</tspan>,</text>

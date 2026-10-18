@@ -512,6 +512,8 @@ def test_schema_lists_the_studio_routes_and_job(management_module):
     assert "REMOVES" in eps["POST /api/ocrstudio/ingest"]["purpose"]
     assert schema["job_kinds"]["ocrstudio_ingest"]["permission"] == "mutating"
     assert eps["POST /api/ocrstudio/upload"]["permission"] == "mutating"
+    assert eps["POST /api/ocrstudio/remove"]["permission"] == "destructive"   # moves a vault file
+    assert eps["POST /api/inbox/delete"]["permission"] == "destructive"       # deletes for good
     assert eps["POST /api/ocrstudio/pageset"]["permission"] == "mutating"
     assert eps["POST /api/ocrstudio/export"]["permission"] == "read"
 
@@ -530,7 +532,7 @@ def client(studio, monkeypatch, tmp_path):
         "ocr_studio": {"upload_dir": "OCR Studio", "upload_max_mb": 500},
         "webui": {"inbox_dir": "Inbox"}}, tmp_path))
     monkeypatch.setattr(m, "_indexed_as", lambda rel: {})
-    return TestClient(m.app), m, vault, store
+    return TestClient(m.app, base_url="http://127.0.0.1"), m, vault, store
 
 
 def _upload(c, name, data, pages=None):
@@ -673,3 +675,134 @@ def test_export_refuses_what_it_cannot_export_by_name(client, tmp_path):
     for body in ({"paths": []}, {"paths": [a], "pages": "some"}, {"paths": ["../x.pdf"]}):
         assert c.post("/api/ocrstudio/export", json=body).status_code == 400, body
     assert c.post("/api/ocrstudio/export", json={"paths": ["Books/none.pdf"]}).status_code == 404
+
+
+# ---- removing an import: a move into the vault's .trash ---------------------
+
+def _remove(c, path):
+    return c.post("/api/ocrstudio/remove", json={"path": path})
+
+
+def test_remove_moves_an_import_to_the_trash_and_leaves_its_studio_work(client, tmp_path):
+    c, m, vault, store = client
+    src = _book(tmp_path / "a.pdf", 3).read_bytes()
+    path = _upload(c, "a.pdf", src, "1-2").json()["path"]
+    fig = tmp_path / "figs" / "k" / "p0001_f.png"
+    fig.parent.mkdir(parents=True)
+    fig.write_bytes(_png())
+    store.save(path, 1, {"status": "done", "regions": [
+        _region(status="done", text="kept", raw="kpet", engine_used="tesseract"),
+        _region(id="f", order=2, type="figure", text="A plot", figure=str(fig))]})
+    work = {f.name: f.read_bytes() for f in store.doc_dir(path).iterdir()}
+    r = _remove(c, path)
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert (j["ok"], j["path"], j["moved_to"]) == (True, path, ".trash/OCR Studio/a.pdf")
+    st = j["state"]
+    assert (st["regions"], st["ocr_done"], st["edited"], st["pages_done"]) == (2, 1, 1, 1)
+    assert "move it back" in j["note"]
+    assert not (vault / path).exists() and (vault / j["moved_to"]).read_bytes() == src
+    # the studio's work and its figure crop stay where they are
+    assert {f.name: f.read_bytes() for f in store.doc_dir(path).iterdir()} == work
+    assert fig.is_file()
+    # gone from every list, and the vault search does not find the trashed copy
+    j = c.get("/api/ocrstudio/files", params={"q": "a.pdf"}).json()
+    assert j["uploads"] == [] and j["studied"] == [] and j["rows"] == []
+    # moving it back re-attaches its work
+    (vault / ".trash" / "OCR Studio" / "a.pdf").replace(vault / path)
+    row = c.get("/api/ocrstudio/files").json()["uploads"][0]
+    assert row["path"] == path and row["state"]["modified"] and row["page_set"] == "1-2"
+
+
+def test_remove_numbers_a_name_the_trash_already_holds(client, tmp_path):
+    c, m, vault, store = client
+    pdf = _book(tmp_path / "a.pdf", 1).read_bytes()
+    old = vault / ".trash" / "OCR Studio" / "a.pdf"
+    old.parent.mkdir(parents=True)
+    old.write_bytes(b"an earlier a.pdf")
+    for n in (1, 2):
+        path = _upload(c, "a.pdf", pdf).json()["path"]
+        assert path == "OCR Studio/a.pdf"                # no studio state: the name is free again
+        j = _remove(c, path).json()
+        assert j["moved_to"] == f".trash/OCR Studio/a ({n}).pdf", j
+        assert (vault / j["moved_to"]).read_bytes() == pdf
+    assert old.read_bytes() == b"an earlier a.pdf"
+
+
+def test_remove_refuses_anything_the_queue_does_not_list(client, tmp_path):
+    c, m, vault, store = client
+    path = _upload(c, "a.pdf", _book(tmp_path / "a.pdf", 1).read_bytes()).json()["path"]
+    (vault / "OCR Studio" / "sub").mkdir()
+    outside = tmp_path / "outside.pdf"                   # beside the vault, not in it
+    outside.write_bytes(b"%PDF-")
+    for bad in ("Books/doc.pdf", "OCR Studio/../Books/doc.pdf", "../outside.pdf",
+                str(vault / "Books" / "doc.pdf"), str(outside),     # absolute paths
+                "OCR Studio", "OCR Studio/sub", ""):
+        r = _remove(c, bad)
+        assert r.status_code == 400 and "only OCR Studio imports" in r.json()["error"], (bad, r.text)
+    # only what the files listing shows: not an upload still in flight, not a
+    # non-document, not something in a sub-folder
+    unlisted = [vault / "OCR Studio" / ".a1b2c3.part.pdf", vault / "OCR Studio" / "notes.txt",
+                vault / "OCR Studio" / "sub" / "b.pdf"]
+    for f in unlisted:
+        f.write_bytes(b"%PDF-")
+        r = _remove(c, f.relative_to(vault).as_posix())
+        assert r.status_code == 400 and "only OCR Studio imports" in r.json()["error"], (f, r.text)
+    r = _remove(c, "OCR Studio/missing.pdf")
+    assert r.status_code == 404 and "no such document" in r.json()["error"]
+    assert (vault / path).is_file() and (vault / "Books" / "doc.pdf").is_file() and outside.is_file()
+    assert all(f.is_file() for f in unlisted)
+    assert not (vault / ".trash").exists()
+
+
+def test_remove_moves_an_inbox_document_to_the_trash_too(client, tmp_path):
+    c, m, vault, store = client
+    pdf = _book(tmp_path / "scan.pdf", 1).read_bytes()
+    (vault / "Inbox").mkdir(exist_ok=True)
+    (vault / "Inbox" / "scan.pdf").write_bytes(pdf)
+    assert [r["path"] for r in c.get("/api/ocrstudio/files").json()["inbox"]] == ["Inbox/scan.pdf"]
+    j = _remove(c, "Inbox/scan.pdf").json()
+    assert (j["ok"], j["path"], j["moved_to"]) == (True, "Inbox/scan.pdf", ".trash/Inbox/scan.pdf"), j
+    assert (vault / ".trash" / "Inbox" / "scan.pdf").read_bytes() == pdf
+    assert not (vault / "Inbox" / "scan.pdf").exists()
+    assert c.get("/api/ocrstudio/files").json()["inbox"] == []
+
+
+def test_remove_refuses_inbox_files_the_tab_does_not_list(client, tmp_path):
+    c, m, vault, store = client
+    inbox = vault / "Inbox"
+    (inbox / "sub").mkdir(parents=True, exist_ok=True)
+    unlisted = [inbox / "notes.md", inbox / "sub" / "b.pdf"]  # not a document; not top level
+    for f in unlisted:
+        f.write_bytes(b"%PDF-")
+        r = _remove(c, f.relative_to(vault).as_posix())
+        assert r.status_code == 400 and "inbox documents" in r.json()["error"], (f, r.text)
+    assert all(f.is_file() for f in unlisted) and not (vault / ".trash").exists()
+
+
+def test_a_failed_move_is_a_readable_error_and_the_import_stays(client, tmp_path, monkeypatch):
+    c, m, vault, store = client
+    path = _upload(c, "a.pdf", _book(tmp_path / "a.pdf", 1).read_bytes()).json()["path"]
+
+    def locked(src, dst):
+        raise PermissionError(13, "The process cannot access the file")
+    monkeypatch.setattr(m.os, "replace", locked)
+    r = _remove(c, path)
+    assert r.status_code == 500 and r.json()["ok"] is False
+    assert "could not move" in r.json()["error"] and "PermissionError" in r.json()["error"]
+    assert (vault / path).is_file()
+
+
+def test_remove_refuses_an_indexed_import_and_leaves_it_in_place(client, tmp_path, monkeypatch):
+    c, m, vault, store = client
+    path = _upload(c, "a.pdf", _book(tmp_path / "a.pdf", 1).read_bytes()).json()["path"]
+    monkeypatch.setattr(m, "_indexed_as", lambda rel: (
+        {"OCR Studio\\a.pdf": {"chunks": 3, "jsonls": ["ocrstudio_a_1_chunks.jsonl"]}}
+        if rel == path else {}))
+    r = _remove(c, path)
+    assert r.status_code == 409, r.text
+    j = r.json()
+    assert j["ok"] is False and j["indexed"] == ["OCR Studio\\a.pdf"]
+    assert j["error"] == (f"{path} is indexed; remove it from the index first "
+                          f"(Documents tab, or POST /api/documents/delete)")
+    assert (vault / path).is_file() and not (vault / ".trash").exists()

@@ -142,7 +142,7 @@ def test_schema_marks_graph_endpoints_experimental_and_reports_the_switch(
     assert "POST /graph/expand" in block["endpoints"]
     # The reason must travel with the flag: "off" without "unmeasured" reads as
     # "broken".
-    assert "golden set" in block["unmeasured"]
+    assert "labelled question sets" in block["unmeasured"]
     assert "/query" in block["when_off"]
 
 

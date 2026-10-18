@@ -2,7 +2,8 @@
 # Each is a set of RAGPipeline.search() overrides merged over the eval
 # defaults (top_k 10, omnisearch/hype/parent/neighbor off). The ladder,
 # leave-one-out and factorial sets are generated in eval/bench/configs.py
-# and need no entry here.
+# and need no entry here. A configuration that does not set `hyde` follows
+# config.yaml's retrieval.use_hyde (off by default).
 configs:
   default-k10:          # the shipped pipeline as-is, scored at depth 10
     top_k: 10

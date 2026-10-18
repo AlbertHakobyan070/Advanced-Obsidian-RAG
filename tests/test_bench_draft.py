@@ -603,12 +603,16 @@ def test_http_fetch_maps_a_refused_connection_and_an_http_error(monkeypatch):
     monkeypatch.setattr(requests, "post", refuse)
     with pytest.raises(SearchUnreachable, match="unreachable"):
         fetch("/search", {"q": "x"})
-    monkeypatch.setattr(requests, "get", lambda url, timeout=None: SimpleNamespace(ok=False, status_code=503, text="not ready"))
+    monkeypatch.setattr(requests, "get", lambda url, headers=None, timeout=None: SimpleNamespace(
+        ok=False, status_code=503, text="not ready"))
     with pytest.raises(DraftError, match="503.*not ready"):
         fetch("/chunks/a?include_text=0")
-    monkeypatch.setattr(requests, "post", lambda url, json=None, timeout=None: (
-        calls.append((url, json)) or SimpleNamespace(ok=True, json=lambda: {"results": []})))
-    assert fetch("/search", {"q": "x"}) == {"results": []} and calls == [("http://host:1/search", {"q": "x"})]
+    monkeypatch.setattr(requests, "post", lambda url, json=None, headers=None, timeout=None: (
+        calls.append((url, json, headers)) or SimpleNamespace(ok=True, json=lambda: {"results": []})))
+    assert fetch("/search", {"q": "x"}) == {"results": []} and calls == [("http://host:1/search", {"q": "x"}, {})]
+    monkeypatch.setenv("RAG_API_TOKEN", "s3cret")              # set: the query API's token goes along
+    fetch("/search", {"q": "y"})
+    assert calls[-1][2] == {"Authorization": "Bearer s3cret"}
 
 
 def _parse(*argv):

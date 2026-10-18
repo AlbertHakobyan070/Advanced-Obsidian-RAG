@@ -1,25 +1,26 @@
 # Architecture
 
 Every stage below is configured from `config.yaml` and can be swapped, tuned, or
-turned off. Solid paths are always on; optional lanes open only when a query calls for
-them.
+turned off. Solid paths are always on; the dotted paths (HyDE, the scope lanes)
+are off by default; the code lane opens only when a query calls for it.
 
 ## The query path
 
 ```mermaid
 flowchart TD
     Q["Question"] --> R{Intent routing}
-    R -->|prose| H["HyDE query expansion<br/>LLM drafts a hypothetical answer to embed"]
+    R -->|prose, HyDE off| HY["Hybrid retrieval"]
+    R -.->|prose, HyDE on| H["Optional HyDE query expansion<br/>LLM drafts a hypothetical answer to embed"]
     R -->|code intent| C0["Skip HyDE · widen pool · open code lane"]
-    H --> HY["Hybrid retrieval"]
+    H -.-> HY
     C0 --> HY
     HY --> D["Dense · ChromaDB<br/>bge-small-en-v1.5"]
     HY --> S["Sparse · bm25s"]
-    HY --> SL["Scope lanes<br/>domain / path / file-type filters"]
+    HY -.-> SL["Scope lanes<br/>domain / path / file-type filters"]
     HY --> CL["Code lane<br/>.ipynb / .py / .R / .sql / …"]
-    D --> RRF["Reciprocal Rank Fusion (k=60)<br/>+ metadata boosts"]
+    D --> RRF["Reciprocal Rank Fusion (k=60)<br/>+ optional metadata boosts"]
     S --> RRF
-    SL --> RRF
+    SL -.-> RRF
     CL --> RRF
     RRF --> RR["Configured rerank policy<br/>cross-encoder / HTTP / lexical / none<br/>(experimental: Laya)"]
     RR --> GT["Optional relevance gate<br/>drops weak chunks · abstains if none pass"]
@@ -42,13 +43,19 @@ label — `taxonomy.label`, which defaults to `course` but is just as happily
 | `pdf_loader` | Lecture PDFs and textbooks; OCR-capable for scanned pages. |
 | `ipynb_loader` | Jupyter and R notebooks (`.ipynb`, `.R`, `.Rmd`, `.py`). |
 | `code_loader` | Other source languages (`.js/.ts/.sql/.go/.java/.c/.cpp/.rs/.sh/…`) into a dedicated code lane. |
+| `canvas_loader` | Obsidian `.canvas` files: one chunk per text node, its id keyed on the canvas path and node id (so an edited node keeps its id), with the node's labelled edges flattened into its text and metadata, so the graph needs no retrieval-time code. With `canvas.label_tags` on, `#tags` written in an edge label also become tags of the chunks of both nodes it joins. |
 | `ocr_vlm` | Vision-model OCR path for hard scanned material. |
 
 !!! note "Selectable chunking"
-    Oversized sections can be split by **`heading`** (the default — respects document
-    structure and wins on well-structured PDFs) or **`fixed`** (a sliding window, better
-    for OCR walls of text with no paragraph breaks). Choose per run with
-    `--chunking heading|fixed`.
+    Oversized sections are split by one of four strategies: **`heading`** (the default —
+    packs paragraphs and sentences, so it respects document structure and wins on
+    well-structured PDFs), **`fixed`** (a strict sliding window, better for OCR walls of
+    text with no paragraph breaks), **`document`** (element-aware packing that keeps each
+    fenced code block, table, list and paragraph whole, falling back to the sliding window
+    only for one element that alone exceeds the size) or **`none`** (no splitting: each
+    section stays one chunk, which an embedding model truncates when it is long). Small
+    sections chunk the same under every strategy. Choose per run with
+    `--chunking heading|fixed|document|none`.
 
 ## Hybrid retrieval
 
@@ -78,21 +85,23 @@ Queries that name a domain or content type are routed toward where they point:
 - `retrieval.content_signals` maps phrases ("the handbooks", "meeting notes",
   "the reference books", "cheat sheet") to path substrings or file types.
 
-A detected scope adds **filtered dense + sparse lanes** to the fusion. Routing is
-**soft**: in-scope chunks are guaranteed seats in the candidate pool, but the reranker
-still makes the final call — so a wrong hint degrades gracefully instead of returning
-nothing. Both dictionaries are config-only; extend them without touching code.
+With `retrieval.scope_lanes` on (it ships off; a call can also set `scope_lanes`), a
+detected scope adds **filtered dense + sparse lanes** to the fusion. With it off, the
+scope is still detected and reported in the retrieval echo, but no scope lane runs.
+Routing is **soft**: in-scope chunks are guaranteed seats in the candidate pool, but the
+reranker still makes the final call — so a wrong hint degrades gracefully instead of
+returning nothing. Both dictionaries are config-only; extend them without touching code.
 
 ## The code lane
 
 Code and notebook chunks are a small slice of the corpus. For a query like *"show me a
-complex ggplot from my code"*, a prose-oriented pipeline writes a prose HyDE draft that
+complex ggplot from my code"*, a prose-oriented pipeline with HyDE on writes a prose draft that
 lands near lecture notes, and BM25's code hits get outvoted in fusion by textbook pages
 that merely repeat the keyword — so the reranker never even sees the user's own code.
 
 The fix, triggered by a configurable code-intent signal list:
 
-1. **Skip HyDE** (a prose hypothetical hurts code retrieval).
+1. **Skip HyDE** if it is on (a prose hypothetical hurts code retrieval).
 2. **Widen** the dense/sparse candidate pool.
 3. **Reserve a filtered lane** for script/notebook chunks so they always reach the
    reranker.

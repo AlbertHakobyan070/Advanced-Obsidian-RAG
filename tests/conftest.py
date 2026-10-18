@@ -47,6 +47,16 @@ def _chroma_telemetry_off(monkeypatch):
     monkeypatch.setenv("ANONYMIZED_TELEMETRY", "False")
 
 
+@pytest.fixture(autouse=True)
+def _no_api_token(monkeypatch):
+    """A developer's RAG_API_TOKEN (exported in their shell, or in the .env that
+    load_config() loads into the process) would turn every request a test sends to
+    serve_api or manage_api into a 401. Set to "" rather than deleted: "" means no
+    token (src/utils/http_guard.py), and load_dotenv never overrides a variable that
+    exists. A test that wants a token sets its own."""
+    monkeypatch.setenv("RAG_API_TOKEN", "")
+
+
 @pytest.fixture
 def management_module(tmp_path, monkeypatch):
     """Import the console against the config a fresh clone actually ships.

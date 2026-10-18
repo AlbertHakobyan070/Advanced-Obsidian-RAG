@@ -30,9 +30,9 @@ from src.utils.timing import StageTrace
 
 log = get_logger(__name__)
 
-# Both patterns are shared with eval/metrics.py, which scores stored answers
-# with the same rules. See src/utils/citations.py for what models actually
-# emit and why the parsers tolerate it.
+# Both patterns are defined once, in src/utils/citations.py, so every reader of
+# an answer (this parser, the bench's judge) uses the same rules. See that
+# module for what models actually emit and why the parsers tolerate it.
 _CONFIDENCE_RE = CONFIDENCE_RE
 _CITATION_RE = CITATION_RE
 _THINK_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
@@ -218,8 +218,8 @@ class Generator:
         citations = []
         for n in used:
             # An out-of-range marker (a [9] against 7 sources) is dropped
-            # here without a trace; eval/metrics.citation_validity is what
-            # counts those as dangling.
+            # here without a trace; eval/bench/judge.py re-reads every marker
+            # in the text and never lets one past the sources count as support.
             if 1 <= n <= len(docs):
                 d = docs[n - 1]
                 citations.append(

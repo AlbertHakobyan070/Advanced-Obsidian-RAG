@@ -12,6 +12,7 @@ Build the corpus
     python main.py index --rebuild-into NAME [--embedding PROVIDER]
                                                # re-embed into a NEW collection, resumably;
                                                # the active one is never written
+    python main.py graph-embed                 # rebuild <collection>__graph from scratch
 
 Ingest lanes (each writes its own *_chunks.jsonl; then `index --append` it)
     ingest-pdfs | ingest-notebooks | ingest-code | ingest-canvas | ingest-md
@@ -21,7 +22,6 @@ Ingest lanes (each writes its own *_chunks.jsonl; then `index --append` it)
 Ask and measure
     python main.py query "What is ARIMA?"      # one-shot question
     python main.py chat                        # interactive REPL
-    python main.py eval [--retrieval-only]     # the golden-query eval suite
     python main.py bench run --configs ladder  # the v2 eval: labelled questions scored per
                                                # named pipeline configuration; also
                                                # bench validate | split | report | sample
@@ -91,6 +91,50 @@ def _cmd_rebuild_into(cfg, args):
     print(f"   Score it:  python main.py bench run --collection {args.rebuild_into} ...")
     print(f"   Activate:  paths.collection_name: {args.rebuild_into}  and  "
           f"embedding.provider: {sidecar['provider']}, then restart :8051")
+
+
+def cmd_graph_embed(args):
+    cfg = load_config(args.config)
+    _bootstrap_logging(cfg)
+    from src.embeddings.embedder import Embedder
+    from src.embeddings.graph_twin import build_twin, graph_collection_name, graph_spec
+    from src.embeddings.reembed import ReembedError
+    from src.embeddings.sidecar import StampError
+
+    name = graph_collection_name(cfg)
+    try:
+        spec = graph_spec(cfg)
+        if spec is None:
+            raise ValueError("graph.embedding_provider is null: graph mode seeds from the main "
+                             "collection with its own embedder, so there is no graph index to "
+                             "build. Set it to an embedding.providers name first")
+        if spec.api_key_env and not spec.api_key_optional:
+            # Embedder.from_config reads this key with Config.require_secret, whose
+            # plain RuntimeError is too broad to catch around the build (torch's
+            # out-of-memory error is one too), so the key is asked for here, alone.
+            try:
+                cfg.require_secret(spec.api_key_env)
+            except RuntimeError as e:
+                raise ValueError(f"{spec.label()} needs its API key: {e}") from e
+        emb = Embedder.from_config(cfg, spec=spec)
+        print(f"Rebuilding {name!r} from scratch: the {cfg.get('graph.file_type', 'canvas')!r} "
+              f"chunks of {cfg.get('paths.collection_name')!r}, embedded by {spec.label()} "
+              f"(doc_prefix {spec.doc_prefix!r}, max_seq_length {spec.max_seq_length})")
+        sidecar = build_twin(cfg, emb, limit=args.limit)
+    except (ReembedError, StampError, ValueError) as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    build = sidecar["build"]
+    print(f"\n{'OK' if sidecar['status'] == 'complete' else 'PARTIAL'} {name!r}: "
+          f"{sidecar['count']} of {sidecar['expected']} chunks, {sidecar['dimension']}-d, "
+          f"status {sidecar['status']} ({build['embedded']} embedded, "
+          f"{build['chunks_per_s']} chunks/s; sample cosine {sidecar['verified']['min_cosine']:.5f})")
+    if sidecar["status"] == "building":
+        print("   --limit run: left 'building' on purpose; graph-mode query seeding refuses it. "
+              "Run graph-embed without --limit to replace it.")
+        return
+    print("   Restart :8051 so graph mode seeds from it.")
 
 
 def cmd_index(args):
@@ -450,25 +494,6 @@ def cmd_chat(args):
         print("\nbye.")
 
 
-def cmd_eval(args):
-    cfg = load_config(args.config)
-    _bootstrap_logging(cfg)
-    from eval.eval_runner import apply_judge_scores, run_eval
-
-    # Merging external judge scores is a pure post-process on an existing
-    # results file — it must not build the pipeline or re-run any query.
-    if getattr(args, "judge_import", None):
-        apply_judge_scores(cfg, results_path=args.out,
-                           scores_path=args.judge_import)
-        return
-
-    run_eval(cfg, golden_path=args.golden, out_path=args.out,
-             retrieval_only=getattr(args, "retrieval_only", False),
-             judge=getattr(args, "judge", False),
-             limit=getattr(args, "limit", None),
-             judge_export=getattr(args, "judge_export", None))
-
-
 def cmd_stamp(args):
     cfg = load_config(args.config)
     _bootstrap_logging(cfg)
@@ -737,29 +762,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("chat", help="Interactive REPL").set_defaults(func=cmd_chat)
 
-    e = sub.add_parser("eval", help="Run the golden-query eval suite")
-    e.add_argument("--golden", default="eval/golden_queries.yaml")
-    e.add_argument("--out", default="eval/results.json")
-    e.add_argument("--retrieval-only", action="store_true", dest="retrieval_only",
-                   help="Tier 1 only, no LLM needed: keyword recall is measured "
-                        "over the retrieved chunks — minutes, offline")
-    e.add_argument("--judge", action="store_true",
-                   help="Add the LLM-as-judge pass (answer correctness vs the "
-                        "golden set's gold_answer + model-scored groundedness). "
-                        "Advisory, costs one extra LLM call per question; "
-                        "ignored with --retrieval-only")
-    e.add_argument("--limit", type=int, default=None, metavar="N",
-                   help="Score only the first N questions (smoke runs)")
-    e.add_argument("--judge-export", dest="judge_export", metavar="PATH",
-                   help="Also write a JSONL bundle (question, answer, cited "
-                        "chunks) for an EXTERNAL judge — a human or a model "
-                        "with no access to this machine — to grade")
-    e.add_argument("--judge-import", dest="judge_import", metavar="PATH",
-                   help="Merge an external judge's scores JSONL into the "
-                        "results file named by --out and rebuild the "
-                        "scorecard. Runs no queries")
-    e.set_defaults(func=cmd_eval)
-
     st = sub.add_parser("stamp",
                         help="Verify which embedder built a collection, then record it")
     st.add_argument("--collection", default=None, metavar="NAME",
@@ -769,6 +771,15 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Replace an existing fingerprint that disagrees with the "
                          "configured embedder. The sample check still has to pass")
     st.set_defaults(func=cmd_stamp)
+
+    ge = sub.add_parser("graph-embed",
+                        help="Rebuild graph mode's seed index <collection>__graph from scratch: "
+                             "the graph.file_type chunks embedded by graph.embedding_provider. "
+                             "Never writes the main collection or a chunk file")
+    ge.add_argument("--limit", type=int, default=None, metavar="N",
+                    help="Embed only N graph chunks, for a smoke test. The result stays "
+                         "'building' (never served)")
+    ge.set_defaults(func=cmd_graph_embed)
 
     add_bench_parser(sub)
 

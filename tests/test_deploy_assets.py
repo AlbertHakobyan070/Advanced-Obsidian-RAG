@@ -18,6 +18,7 @@ than pretend. Field names are checked offline against the typed models in the
 `kubernetes` client, so no cluster and no kubeconform is needed.
 """
 import importlib.util
+import os
 import re
 import shutil
 import subprocess
@@ -134,6 +135,48 @@ def test_compose_has_no_secret_values_and_demands_the_ones_it_needs():
     services = yaml.safe_load(text)["services"]
     # The proxy gets ONLY the variables it needs, not every provider key in .env.
     assert all("env_file" not in svc for svc in services.values())
+
+
+def test_the_api_token_is_optional_everywhere_it_is_passed():
+    """RAG_API_TOKEN is optional: an unset one must not fail `docker compose up`, and
+    every place a deployment takes it from names it."""
+    rag = yaml.safe_load((DOCKER / "docker-compose.yml").read_text(encoding="utf-8"))["services"]["rag"]
+    assert rag["environment"]["RAG_API_TOKEN"] == "${RAG_API_TOKEN:-}"
+    assert '# RAG_API_TOKEN: ""' in (K8S / "base" / "secret.template.yaml").read_text(encoding="utf-8")
+    for example in (ROOT / ".env.example", DOCKER / ".env.example"):
+        assert re.search(r"(?m)^RAG_API_TOKEN=$", example.read_text(encoding="utf-8")), example
+
+
+def _sh():
+    found = shutil.which("sh")
+    if found:
+        return found
+    git = shutil.which("git")                                        # Git for Windows ships its own
+    cand = Path(git).resolve().parents[1] / "bin" / "sh.exe" if git else None
+    return str(cand) if cand and cand.is_file() else None
+
+
+@pytest.mark.skipif(_sh() is None, reason="no POSIX shell")
+@pytest.mark.parametrize("token", ["", "s3cret"])
+def test_the_live_probe_sends_the_token_to_the_console_only_when_one_is_set(tmp_path, token):
+    """/health is exempt from the token and /docs is not, so `healthcheck.sh live`
+    must carry it on the console probe when RAG_API_TOKEN is set, and never otherwise."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "curl").write_text('#!/bin/sh\necho "$*" >> "$FAKE_LOG"\n', encoding="utf-8", newline="\n")
+    (bin_dir / "curl").chmod(0o755)
+    log = tmp_path / "curl.log"
+    env = {**os.environ, "FAKE_LOG": log.as_posix(), "RAG_API_TOKEN": token}
+    # The stand-in goes first INSIDE the shell: Git for Windows' sh puts its own
+    # /usr/bin (with a real curl) ahead of the PATH it inherits.
+    done = subprocess.run([_sh(), "-c", 'PATH="$PWD/bin:$PATH"; export PATH; exec sh "$0" live',
+                           (DOCKER / "healthcheck.sh").as_posix()],
+                          cwd=tmp_path, capture_output=True, text=True, env=env, timeout=60)
+    assert done.returncode == 0, done.stderr
+    health, docs = log.read_text(encoding="utf-8").splitlines()
+    assert health.endswith("/health") and "Authorization" not in health
+    assert docs.endswith("/docs")
+    assert ("Authorization: Bearer s3cret" in docs) is bool(token)
 
 
 DOCKERFILES = [DOCKER / "Dockerfile", ROOT / "ocr-sidecar" / "Dockerfile",
@@ -263,7 +306,7 @@ def test_every_file_the_app_dockerfile_copies_is_in_the_build_context():
 def test_the_ignore_rules_behave_as_documented_in_both_layouts():
     rules = _ignore_rules(RULES)
     kept_in_checkout = ["main.py", "src/utils/config_loader.py", "webui/index.html", "eval/bench/cli.py",
-                        "eval/golden_queries.yaml", "requirements.txt", ".env.example",
+                        "eval/configs.yaml", "requirements.txt", ".env.example",
                         "deploy/docker/constraints.txt", "deploy/docker/docker-entrypoint.sh",
                         "deploy/docker/healthcheck.sh"]
     sent_never = ["data/chunks.jsonl", "data/vaults/x/chroma_db/chroma.sqlite3", "rag_data/bm25_index.pkl",
@@ -285,6 +328,20 @@ def test_the_ignore_rules_behave_as_documented_in_both_layouts():
 def test_shell_scripts_have_unix_line_endings():
     for sh in DOCKER.glob("*.sh"):
         assert b"\r" not in sh.read_bytes(), f"{sh.name} has CRLF; the container cannot run it"
+
+
+def test_the_mcp_server_starts_in_the_background_and_is_published_only_on_loopback():
+    entry = (DOCKER / "docker-entrypoint.sh").read_text(encoding="utf-8")
+    launch = "python mcp_server.py --http --host 0.0.0.0 &"
+    assert launch in entry.splitlines()
+    assert entry.index(launch) < entry.index("exec python -m uvicorn manage_api:app")   # before the console execs
+    rag = yaml.safe_load((DOCKER / "docker-compose.yml").read_text(encoding="utf-8"))["services"]["rag"]
+    assert "127.0.0.1:${NOETRIX_MCP_PORT:-8053}:8053" in rag["ports"]
+    # MCP is optional: a down MCP server must never mark the RAG unhealthy.
+    assert "mcp" not in (DOCKER / "healthcheck.sh").read_text(encoding="utf-8").lower()
+    deployment = next(d for d in yaml.safe_load_all((K8S / "base" / "rag.yaml").read_text(encoding="utf-8"))
+                      if d and d["kind"] == "Deployment")
+    assert {"name": "mcp", "containerPort": 8053} in deployment["spec"]["template"]["spec"]["containers"][0]["ports"]
 
 
 # ---------------------------------------------------------------------------

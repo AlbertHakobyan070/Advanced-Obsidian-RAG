@@ -640,7 +640,7 @@ def test_the_rerank_score_gate_cuts_on_laya_probabilities():
 def _client(monkeypatch, rag):
     monkeypatch.setitem(S._STATE, "rag", rag)
     monkeypatch.setattr(S, "_HISTORY", deque(maxlen=50))
-    return TestClient(S.app)               # never entered: the lifespan would build the real pipeline
+    return TestClient(S.app, base_url="http://127.0.0.1")   # never entered: the lifespan would build the real pipeline
 
 
 def test_search_with_rerank_laya_and_the_flag_off_is_a_200_naming_the_flag(monkeypatch):

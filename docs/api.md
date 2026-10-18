@@ -17,10 +17,43 @@ Both also expose FastAPI's own `/docs` (Swagger), `/redoc` and `/openapi.json`.
     page tells you what exists and why; the schema endpoints tell you what your
     install currently accepts.
 
-!!! warning "There is no authentication"
-    Both services bind to `127.0.0.1` and assume a single trusted operator.
-    Permission tiers (below) are a **policy for callers to enforce**, not an
-    access-control mechanism. Do not expose either port to a network.
+## Security
+
+Both services bind to `127.0.0.1` and assume a single trusted operator. Every
+request passes three checks, in this order:
+
+1. **Host, always on.** The `Host` header must name a loopback address
+   (`localhost`, `127.0.0.1`, `::1`) or a name listed in
+   `security.allowed_hosts`; anything else gets `400`. This is what stops DNS
+   rebinding, which CORS does not.
+2. **Origin, always on, for `POST`, `PUT`, `PATCH` and `DELETE`.** A request
+   that carries an `Origin` passes only from the console's own origin
+   (`http://localhost:<webui.port>` or `http://127.0.0.1:<webui.port>`), the
+   service's own, or one listed in `security.allowed_origins`; anything else
+   gets `403`. A request with no `Origin` (curl, scripts, agents) passes.
+3. **Token, only when `RAG_API_TOKEN` is set** (in `.env`; blank means unset).
+   Every request then needs `Authorization: Bearer <token>`, else `401`.
+   Exempt: `GET /health`, CORS preflights (`OPTIONS`) and the console's page
+   shell `GET /`. `/docs` and `/openapi.json` need the token like any other
+   route.
+
+Every refusal is JSON naming the setting to change, with `guard` set to
+`host`, `origin` or `token`.
+
+Reaching a service through a LAN address or a Kubernetes Service name needs
+that name in `security.allowed_hosts`. `kubectl port-forward` arrives as
+`localhost` and needs nothing. The console asks for the token once when a
+request returns `401`, and keeps it in the browser's local storage. Do not
+expose either port to a network: the permission tiers (below) are still a
+**policy for callers to enforce**, and the token says who may call, not what
+they may do.
+
+**A known limit of the console's token.** The console keeps the token in the
+browser's local storage, and it renders note content, imported pages and
+generated answers as Markdown without sanitising the HTML, so a crafted note
+could run script in the page and read the token. Use a token with a vault you
+trust. The MCP server and other non-browser callers keep the token in their
+own environment and are unaffected.
 
 ---
 
@@ -58,6 +91,9 @@ Both `/search` and `/query` accept the same retrieval controls:
 | `lane_weights` | Per-lane RRF fusion weights, e.g. `{"sparse": 1.5}`. See [Lane weights](#lane-weights). |
 | `lanes` | Restrict the call to a subset of the lanes (names under [Lane weights](#lane-weights)), e.g. `["sparse"]`: a lane outside the list is not run at all. It only restricts — a conditional lane (code, scope, `omnisearch`, `hype`) still needs its own trigger. An empty list or an unknown name is an error ([below](#when-a-knob-is-wrong)); the echo's `lanes_requested` and `lanes_run` show what ran. |
 | `metadata_boost` | `true` / `false` forces the course/domain/tag metadata boost on or off for this call; unset follows `retrieval.metadata_boost`. |
+| `scope_lanes` | `true` / `false` forces the scope lanes (`dense_scope` / `sparse_scope`) on or off for this call. The scope is detected and echoed either way; unset follows `retrieval.scope_lanes`. |
+| `max_per_file` | At most this many chunks of one source file in the final list (0–50, `0` = no cap), best first. When the cap leaves fewer than `top_k`, the skipped chunks fill the tail. Unset follows `retrieval.max_per_file`. |
+| `decompose` | `true` / `false` forces **query decomposition**: one generation-model call (on `/search` too) splits a multi-part question into sub-queries, each retrieved and reranked against its own text, and the branches merge by reciprocal rank so every part keeps a seat. An atomic question runs unchanged. A failed or unparseable split is the call's error, never a quiet fallback to one search. Unset follows `retrieval.decompose.enabled`; the echo's `decompose` says what ran. |
 | `gate` / `gate_threshold` / `gate_scorer` | The post-rerank **relevance gate**: drop chunks scoring below a cutoff before generation, and abstain when nothing is left. Off by default; a `gate_threshold` alone turns it on for the call. See [Relevance gate](#relevance-gate). |
 | `include_text` | Characters of chunk text to return (0–6000). |
 | `max_sources` | Cap the number of sources returned. |
@@ -88,7 +124,8 @@ unknown lane or a negative weight in `lane_weights`; an unknown `rerank` mode,
 or one that is refused (`laya` while `retrieval.laya.enabled` is off); a gate
 that cannot work — no threshold anywhere, `rerank: none` under the
 `rerank_score` scorer, an unknown `gate_scorer`, or a scorer other than the
-configured one without its own `gate_threshold`.
+configured one without its own `gate_threshold`; or `decompose` together with
+the gate, which would judge chunks scored against sub-queries.
 
 A wrong **type** is different: `top_k: "ten"`, `lanes: "sparse"` (a string, not
 a list), a non-numeric `gate_threshold` — or a number outside a field's
@@ -199,10 +236,9 @@ curl -s -X POST http://127.0.0.1:8051/compare \
 
 ### Comparison options
 
-Building a valid `/compare` call used to mean reading `presets` from `/schema`,
-`rerank_modes` from `/schema`, and the backends from `/providers`, then joining
-the three by hand and re-deriving the branch caps from a sentence of English.
-Every caller was reimplementing the console's sidebar.
+Building a valid `/compare` call by hand means reading `presets` and
+`rerank_modes` from `/schema` and the backends from `/providers`, joining the
+three, and re-deriving the branch caps from a sentence of English.
 
 `GET /compare/options` returns the joined result: per dimension, a list of
 branch objects that can be posted to `/compare` unchanged.
@@ -279,24 +315,23 @@ reranker documented to expect it).
 
 ### Lane weights
 
-Fusion is Reciprocal Rank Fusion over **eight** lanes, not two:
+Fusion is Reciprocal Rank Fusion over every lane that ran. The lanes:
 
 | Lane | When it opens |
 |---|---|
 | `dense` / `sparse` | Always. Vector and BM25. |
 | `dense_code` / `sparse_code` | On code-intent queries, filtered to the configured code file types. |
-| `dense_scope` / `sparse_scope` | When the query names a domain or a content type, filtered to that scope. |
+| `dense_scope` / `sparse_scope` | When `retrieval.scope_lanes` (or a call's `scope_lanes`) is on and the query names a domain or a content type, filtered to that scope. The lanes ship off; the scope is detected and echoed either way. |
 | `omnisearch` | When the live-vault lane is enabled and reachable. |
 | `hype` | When the hypothetical-question collection exists and the lane is on. |
 
 A document's fused score is the sum over lanes of
 `weight(lane) / (rrf_k + rank_in_that_lane)`. Every weight defaults to `1.0`,
-which is plain unweighted RRF — an untouched config ranks exactly as it did
-before weights existed.
+so an untouched config is plain unweighted RRF.
 
 Set defaults in `retrieval.lane_weights`, per preset inside
 `retrieval.presets.*`, or per call. All three **merge lane by lane**, so setting
-one lane leaves the other seven where they were.
+one lane leaves every other lane where it was.
 
 A weight of `0` is not an off switch: the lane still contributes candidates for
 the reranker to consider, it just stops influencing the fused order. To drop a
@@ -309,10 +344,9 @@ retrieval echo reports every lane's effective weight, so the ones you did not
 override are visible too.
 
 !!! tip "Tune these against an eval, not by feel"
-    `main.py eval --retrieval-only` runs the golden set without a generation
-    backend, and `main.py bench run` scores labelled questions per named
-    configuration; a configuration in `eval/configs.yaml` can set `lane_weights`
-    like any other search override. See [Evaluation](evaluation.md).
+    `main.py bench run` scores labelled questions per named configuration; a
+    configuration in `eval/configs.yaml` can set `lane_weights` like any other
+    search override. See [Evaluation](evaluation.md).
 
 ### Relevance gate
 
@@ -368,7 +402,7 @@ the starting values in `eval/configs.yaml` are starting points, not tuned ones.
 
 !!! warning "Experimental — off by default"
     Graph mode ships behind `graph.enabled: false`. It works and is covered by
-    tests, but its retrieval benefit has never been scored against the golden
+    tests, but its retrieval benefit has never been scored on a bench question
     set, so it is not part of the default workflow. While the flag is off,
     `POST /graph/expand` answers `503` naming the key to set; `/query` and
     `/search` are unaffected, and the graph lane still competes in ordinary
@@ -418,6 +452,35 @@ Two details matter when reading it:
   complete graph. `stats.dangling_edges` counts edges pointing at nodes that
   never became chunks — `file` and `group` nodes never do — which is normal,
   not an error.
+
+**A seed embedder of its own.** By default (`graph.embedding_provider: null`)
+a query-seeded walk searches the main collection with the main embedder. Set
+the key to an `embedding.providers` name (or to `local`, when the main embedder
+is not local) and query seeding searches a separate collection,
+`<paths.collection_name>__graph`, instead. It holds exactly the main
+collection's `graph.file_type` chunks: their ids and metadata, embedded by the
+named model. Every seed found there is read back from the main collection, so
+the walk and the node text are unchanged, and `/query`, `/search` and seeding by
+chunk id never touch it.
+
+- **Building it.** `python main.py graph-embed`, or the console's `graph_embed`
+  job. `--limit N` (the job's `limit`) makes a smoke build that is never served.
+  `POST /api/jobs` refuses the job with a `400` while the key is null, unknown,
+  or names the main embedder. Every build drops the collection and rebuilds it
+  from scratch, because a canvas chunk keeps its id when its text is edited. It
+  never writes the main collection or a chunk file, and
+  `POST /api/canvas/reindex` queues it after its append when the key is set.
+  Restart `:8051` after a build.
+- **The startup check.** `:8051` checks that the collection exists, was built by
+  the configured embedder, is complete, and holds exactly the main collection's
+  graph-lane ids. When a check fails, `:8051` still starts, and `/query`,
+  `/search` and seeding by id keep working; only a query-seeded
+  `POST /graph/expand` fails, answering with an `error` (`Seeding failed (…)`)
+  that names the reason.
+- **What the check cannot see** is text edited under a kept id. So
+  `GET :8052/api/canvas/embedder` also lists the chunk files written since the
+  build, beside its verdict (`off`, `missing`, `building`, `mismatch`, `stale`,
+  `ready` or `error`) and the reason.
 
 **`POST /answer`** — generation over a document set the caller chose. No
 retrieval runs.
@@ -471,8 +534,8 @@ same scorer can also back the [relevance gate](#relevance-gate).
 
 ### Readiness and failure
 
-`GET /health` distinguishes three states, because "not ready" used to conflate
-two situations that call for opposite responses:
+`GET /health` distinguishes three states, because a service that is still
+loading and one that failed to build call for opposite responses:
 
 | `state` | Meaning | What to do |
 |---|---|---|
@@ -501,8 +564,10 @@ the live list rather than counting on this page.
 
 ### Permission tiers
 
-The local API has no authentication, so these tiers are a contract the **caller**
-honours. Any agent toolkit driving this API should gate on them.
+These tiers are a contract the **caller** honours; the optional token decides
+who may call, not which operation. Any agent toolkit driving this API should
+gate on them. The [MCP server](mcp.md) does: it maps each tier to its tools'
+annotations and prompts.
 
 | Tier | Meaning |
 |---|---|
@@ -531,6 +596,7 @@ honours. Any agent toolkit driving this API should gate on them.
 | `GET /api/inbox`, `GET /api/import/converted`, `GET /api/import/file` | Staged-file listings and raw fetch. |
 | `GET /api/import/ocr_scan` | Which pages of a staged PDF carry no extractable text — run this before OCRing anything. |
 | `POST /api/rerank/check` | Preflight a cross-encoder: reachable? already cached (and where)? within its context limit? Downloads nothing. |
+| `GET /api/engines` | Every engine per component, with availability and the cost of a switch. See [Engines map](#engines-map). |
 | `GET /api/eval/progress`, `GET /api/eval/questions`, `GET /api/eval/questions/{qid}` | The eval review queue: per-suite progress, the filtered question list, and one question with its gold texts and validator findings. See [Eval review queue](#eval-review-queue). |
 
 ### Change things — `mutating`
@@ -538,6 +604,7 @@ honours. Any agent toolkit driving this API should gate on them.
 | Endpoint | Purpose |
 |---|---|
 | `POST /api/settings` | Persist whitelisted config values into `config.yaml` in place, comments preserved. Nothing hot-applies; the response says which service to restart. |
+| `POST /api/engines/set` | Switch one component's engine persistently, after a preflight. See [Engines map](#engines-map). |
 | `POST /api/providers/key` | Set or clear one provider key in `.env`. Only variable names the registry already declares are accepted. Never returns the value; rejects a declared credential-prefix mismatch. |
 | `POST /api/service/restart` | Restart the warm query API. Returns the relaunch generation counter; fails loudly if the supervisor does not actually relaunch. |
 | `POST /api/jobs`, `.../retry`, `.../cancel` | Queue, retry and cancel jobs. |
@@ -552,8 +619,155 @@ honours. Any agent toolkit driving this API should gate on them.
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /api/documents/delete` | Remove documents from the index. |
-| `POST /api/inbox/delete` | Remove staged files. |
+| `POST /api/documents/delete` | Remove documents from the index: their vectors and their rows in the chunk files, and with `rebuild: true` a queued sparse rebuild. Vault files are never touched. Restart `:8051` afterwards. |
+| `POST /api/inbox/delete` | **Permanently deletes** staged files (`names`, plain filenames) from the inbox or its `_converted` folder on disk: no `.trash` copy, and the index is untouched. `folder` (`inbox` or `converted`) says which folder to delete from. Without it, a name that both folders hold is refused with a `400` before anything is deleted. A name it cannot find comes back under `missing`. The console's two × buttons each send their own `folder`. |
+| `POST /api/ocrstudio/remove` | Take one document out of the OCR queue by **moving** it into the vault's `.trash`; nothing is deleted. See [OCR Studio](#ocr-studio). |
+
+### Engines map
+
+`GET /api/engines` lists, for each component (generation, reranker, embeddings,
+sparse, ocr, fetch, chunking), the active engine, the setting a switch writes,
+and every option with:
+
+| Field | Meaning |
+|---|---|
+| `available` | A fast probe says it can be used now. The probes load no model and call no internet; the local OCR sidecars get short health checks. |
+| `swappable` | `POST /api/engines/set` accepts it: a probe can check it, the switch is checked before it is written, and it fails loudly instead of falling back. An option that is not is still listed. |
+| `reason` | Why it is unavailable or not swappable; `null` when it is both. |
+| `switch` | The cheapest way to use it: `per_call`, `per_job`, `restart`, `build` (a one-off job first) or `reembed`. |
+
+`POST /api/engines/set` takes `{component, engine, model?}`. It refuses an
+unknown or unswappable engine with its reason, then runs that component's
+preflight: for the reranker, the local cache and then the model's hub entry
+(with a timeout) and the context limit; for embeddings, only an already-built
+collection whose fingerprint matches the configured embedder; for the sparse
+lane, the tantivy index must exist; for OCR, the engine must answer now. It
+writes through the same validator as `POST /api/settings`, and a refusal
+writes nothing. It never restarts anything: the response is
+`{written, takes_effect, next_op, warnings}`. `next_op` is the restart to run,
+`POST /api/service/restart`, which restarts `:8051` only; it is `null` when
+nothing needs a restart and also when only `:8052` does, so read
+`takes_effect`. When the console must restart, `warnings` says so: restart it
+by hand. `warnings` also carries the Settings writer's notes, such as a model
+carried along with a provider. `model` applies to `generation` (the model id)
+and to the reranker's `cross_encoder`.
+
+### Canvases (the Graph tab)
+
+The Graph tab is a client of these routes. Of them, only `POST /api/canvas/file`
+writes the canvas itself, and only on an explicit save.
+
+| Endpoint | Tier | Behaviour |
+|---|---|---|
+| `GET /api/canvas/folders` | `read` | Which vault trees hold `.canvas` files, with counts: the scope picker of the canvas ingest lane. One cached vault walk; `refresh=1` rescans. |
+| `POST /api/canvas/preview` | `read` | Runs the canvas loader for real into a scratch file, then deletes it, and reports the chunks, nodes and edges, the share of chunks that carry edges, the text that `context_depth` duplicates, and one composed sample. Body: `include_path`, `min_chunk_size`, `max_chunk_size`, `chunking`, `context_depth`. Indexes nothing. |
+| `GET /api/canvas/files` | `read` | Every `.canvas` in the vault, vault-relative, from the same cached walk. |
+| `GET /api/canvas/file` | `read` | One canvas (`path`), parsed, with the `sha256` of its bytes that a save must send back and its indexed chunks. |
+| `POST /api/canvas/file` | `mutating` | Save edits: `{path, base_sha256, data}`. Refused with `409` when the file changed on disk since it was loaded. The edit is merged onto the file as it is on disk, so only what the editor edits changes (node text, positions and sizes, edge labels, added and deleted text nodes and edges) and everything else stays as Obsidian wrote it. The old bytes are backed up to `canvas.backup_dir`, outside the vault, and the new ones replace the file atomically; a save with no edits writes nothing. |
+| `POST /api/canvas/reindex` | `mutating` | Re-index one canvas (`path`): removes its chunks from the index and the chunk files, then queues a scoped `ingest_canvas` into its own `data/canvas_edit_*_chunks.jsonl` and an `index_append`, and `graph_embed` third when `graph.embedding_provider` is set. A broken embedder setting is refused before anything is removed. Restart `:8051` when the last job finishes. |
+| `POST /api/canvas/suggest_label` | `mutating` | A suggested label for one edge, from a language model ([below](#suggest-label)). May bill; writes nothing. |
+| `GET /api/canvas/suggest_options` | `read` | The suggest-label picker: the default backend and model and which setting they come from, every `providers:` entry with its key status and `vision` flag, the relation vocabulary, the long-node settings, and whether label `#tags` are indexed. |
+| `GET /api/canvas/embedder` | `read` | Graph mode's seed embedder: the setting, the seed collection's fingerprint and freshness, a verdict with its reason, and the embedders it can be built with. See [Graph mode](#graph-mode). Reads only. |
+
+To take a canvas out of the index, the Graph tab calls the ordinary
+`POST /api/documents/delete` with its `source_files` and `rebuild: true`, then
+queues `graph_embed` when a graph embedder is set, then offers the `:8051`
+restart. The `.canvas` file stays in the vault.
+
+**Tags in labels.** A label can carry Obsidian `#tags` (`#` and then a letter).
+With `canvas.label_tags: true` (default `false`), the next ingest of that canvas
+copies them into the `tags` of the chunks of both nodes the edge joins.
+Metadata only: chunk ids and text do not change.
+
+#### Suggest label
+
+`POST /api/canvas/suggest_label` asks a language model for one edge's label.
+Its body is `path` (an existing canvas), `edge_id`, `data` (the `{nodes, edges}`
+the editor holds, unsaved edits included), and optionally `provider`, `model`
+and `guidance` (free text appended to the prompt, up to 2000 characters).
+
+What the model is shown is built from the posted canvas, not the file:
+
+- **Both endpoint nodes.** File nodes are read from the vault, read-only: a note
+  without its frontmatter, plain text and code as they are, a sub-canvas as its
+  node titles, a group as its label and members, a link as its URL (never
+  fetched). A PDF or other binary, a missing file, or a path outside the vault
+  becomes a placeholder, never an error. An endpoint longer than
+  `canvas.augment.node_chars` is summarised by the same model first (one more
+  call, reading at most `canvas.augment.summarize_input_chars`), or cut, with
+  `canvas.augment.long_nodes: truncate`.
+- **The arrow** as drawn (`→`, `←`, `↔` or `—`), the canvas title, each
+  endpoint's group and the canvas's groups.
+- **The labels around it:** the other edges at each endpoint, and the canvas's
+  labels as examples. A label with no letter once its `#tags` are removed (a
+  step number, a bare `#p`) names no relation, so it is never an example and its
+  edge shows only the neighbour's title.
+- **Images**, only for a `providers:` entry marked `vision: true` and up to
+  `canvas.augment.max_image_mb`. For any other entry the prompt names the image
+  instead; the LLM client refuses to send images to an entry without the flag.
+
+Who answers: the request's `provider` and `model`, else `canvas.augment.provider`
+and `canvas.augment.model`, else the generation role's backend and model. A
+backend that cannot be built is refused, never replaced by another. The output
+cap is `canvas.augment.max_tokens`, sized for a model that reasons before it
+answers.
+
+The reply is read robustly: reasoning blocks are dropped and the last JSON
+object with a non-empty `label` wins. The response carries `label`, `relation`
+(a term of `canvas.augment.vocabulary`, read along the arrow, or `null`, with a
+warning, when the model names another), `tags`, `alternatives`, `confidence`
+(`high`, `medium`, `low` or `null`), `why` and `warnings`; the `backend`, `protocol`
+and routed `model` that answered; `usage` over every call; `prompt_version`;
+`label_tags_indexed`; and `context`, exactly what was sent, including how each
+endpoint was fitted and which images went or why not. Nothing is written: the
+label reaches the file only through a save.
+
+Errors are typed by `stage`, and each `502` names the `backend` and `model`:
+
+| Status | `stage` | When |
+|---|---|---|
+| `400` | — | The path is not a `.canvas` in the vault; `data` is not `{nodes, edges}`; the edge, or one of its endpoints, is not in `data`; `canvas.augment.long_nodes` is neither `summarize` nor `truncate`. A canvas that does not exist is a `404`. |
+| `400` | `client` | An unknown provider (the error names the field that set it), a missing or wrong-type key, or a `vision` value that is not a boolean. |
+| `502` | `summary:from`, `summary:to` | A long endpoint's summary call failed or came back empty. |
+| `502` | `label` | The label call failed: transport, HTTP or timeout. |
+| `502` | `parse` | The reply holds no JSON object with a non-empty `label`; `reply` carries the start of the raw reply. |
+
+### OCR Studio
+
+The OCR tab's routes. Studio work (regions, clean-up, masks, page status) is
+kept in `ocr_studio/` beside the chunk files, never in the vault.
+
+| Endpoint | Tier | Behaviour |
+|---|---|---|
+| `GET /api/ocrstudio/files` | `read` | The OCR queue: imports (`ocr_studio.upload_dir`), the inbox's top-level PDFs and images, other documents with studio work, and with `q` (two characters or more) a filename search of the whole vault. Every row carries its studio state and working page set. |
+| `POST /api/ocrstudio/upload` | `mutating` | Import one PDF or image (multipart `file`) into `ocr_studio.upload_dir`, whole and byte for byte. `pages`, a typed range, becomes its working page set, and every page keeps its real number. Never overwrites a name, never indexes; `413` above `ocr_studio.upload_max_mb`. |
+| `POST /api/ocrstudio/remove` | `destructive` | Take one document out of the queue ([below](#taking-a-document-out-of-the-queue)). |
+| `GET /api/ocrstudio/doc`, `/page`, `/page.png`, `/mask.png` | `read` | One document's pages with the scanner's verdict per page, its progress and its indexed chunks; one page's regions and assembled markdown; the page rendered with its clean-up; its healing mask. |
+| `POST /api/ocrstudio/page`, `/mask`, `/pageset` | `mutating` | Save one page's regions, clean-up and status; store or clear its mask; set or clear the working pages (`409` when saved work would fall outside them). |
+| `POST /api/ocrstudio/propose` | `read` | Region proposals for one page, from the page layout or the PaddleOCR sidecar's lines. Saves nothing. |
+| `POST /api/ocrstudio/ocr` | `mutating` | OCR one region with its own engine and language, and store the result. A failing engine is that region's error, never another engine's output. May call the sidecar or a vision model. |
+| `GET /api/ocrstudio/engines`, `/quality` | `read` | Each engine's availability and languages; the character error rate per engine over the pages marked done. |
+| `POST /api/ocrstudio/ingest` | `mutating` | Chunk the done (or every saved) page into the document's own `data/ocrstudio_*_chunks.jsonl` and queue its ingest and append. `append` is refused (`409`) for a document that already has chunks; `replace` first removes them from the index and every chunk file; `dry_run` only reports. |
+| `POST /api/ocrstudio/export` | `read` | A zip of the corrected markdown per document, real page numbers as `<!-- page N -->` markers, with its figure crops. Writes nothing. |
+
+#### Taking a document out of the queue
+
+`POST /api/ocrstudio/remove {path}` accepts exactly what the queue lists as an
+import or an inbox document: a top-level PDF or image of `ocr_studio.upload_dir`
+or of the inbox (`webui.inbox_dir`). Anything else is a `400`, a missing file a
+`404`.
+
+- It **moves** the file into the vault's `.trash` folder, under its own
+  vault-relative sub-path, with a ` (n)` suffix when that name is taken. Nothing
+  is deleted, and the reply names `moved_to`.
+- The studio work and figure crops stay. Moving the file back to its old path
+  brings the document back with its work attached.
+- It is refused with `409` while the document has chunks in the index. Remove
+  those first, with `POST /api/documents/delete` or the Documents tab.
+
+The Ingest tab's inbox delete is a different operation. `POST /api/inbox/delete`
+deletes a staged file from disk for good, with no trash copy; the queue's
+remove only ever moves.
 
 ### Eval review queue
 

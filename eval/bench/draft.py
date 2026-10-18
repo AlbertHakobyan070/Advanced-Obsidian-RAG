@@ -376,12 +376,15 @@ def http_fetch(base_url: str) -> Fetch:
     made is SearchUnreachable; an HTTP error is a DraftError carrying the body."""
     import requests
 
+    from src.utils.http_guard import auth_headers
+
     base = base_url.rstrip("/")
 
     def fetch(path: str, payload: dict | None = None) -> dict:
+        headers = auth_headers()         # the query API's token, when RAG_API_TOKEN is set
         try:
-            r = (requests.get(base + path, timeout=HTTP_TIMEOUT) if payload is None
-                 else requests.post(base + path, json=payload, timeout=HTTP_TIMEOUT))
+            r = (requests.get(base + path, headers=headers, timeout=HTTP_TIMEOUT) if payload is None
+                 else requests.post(base + path, json=payload, headers=headers, timeout=HTTP_TIMEOUT))
         except requests.ConnectionError as e:        # refused, DNS, connect timeout: not a slow read
             raise SearchUnreachable(f"search service {base} is unreachable ({type(e).__name__}: {e})") from e
         if not r.ok:

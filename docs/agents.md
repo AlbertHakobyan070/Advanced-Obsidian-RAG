@@ -8,6 +8,26 @@ toolkit can gate it.
 If you are wiring an LLM agent, a script, a bot, or a CI job into this, start
 here. The endpoint-by-endpoint listing is in the [API reference](api.md).
 
+## Prefer the MCP tools when they are connected
+
+If the [MCP server](mcp.md) is connected to your client, use its tools instead of
+raw HTTP: `noetrix_search` for evidence, `noetrix_query` for a cited write-up,
+`noetrix_job` to follow a job, and the `noetrix_read` / `noetrix_change` /
+`noetrix_remove` dispatchers for anything else. They validate arguments before
+any call, send the token, carry each operation's permission tier, and turn
+every failure into an explicit error. Everything below applies to them too:
+they are the same endpoints.
+
+## Send the token when one is set
+
+When the operator has set `RAG_API_TOKEN`, every call except `GET /health`
+needs `Authorization: Bearer <token>`; a `401` names the token as the cause.
+Read the token from the environment, never ask for it in chat or print it:
+
+```bash
+curl -s -H "Authorization: Bearer $RAG_API_TOKEN" http://127.0.0.1:8051/schema
+```
+
 ## Discover, don't hard-code
 
 Presets, branch limits, provider names, job kinds and taxonomy all come from the
@@ -90,12 +110,14 @@ A fabricated citation costs more trust than an admitted gap.
 | Shape | Preset | Why |
 |---|---|---|
 | "How was X implemented here?" | `code` | Wide pools, HyDE off, code-boosted — surfaces real scripts and notebooks over prose that merely mentions X. |
-| "What is the technique for X?" | `concept` | Tight top-k plus HyDE — grounds an approach in the corpus's explanation of it. |
-| "Connect X and Y" / "the whole approach to Z" | `synthesis` | Wide, HyDE on, parent/neighbour context — spans several documents. |
+| "What is the technique for X?" | `concept` | Tight top-k — grounds an approach in the corpus's explanation of it. |
+| "Connect X and Y" / "the whole approach to Z" | `synthesis` | Wide pools, parent/neighbour context — spans several documents. |
 | Unsure | *omit* | Code-intent queries self-apply the `code` preset. |
 
-Naming a language or library in the query (`sql`, `pytorch`, `ggplot`) is itself
-a routing signal: it opens the code lane and turns HyDE off.
+No preset turns HyDE on; send `"hyde": true` to try it on one call. Naming a
+language or library in the query (`sql`, `pytorch`, `ggplot`) is itself a
+routing signal: it opens the code lane and keeps HyDE off, even when the call
+turns it on.
 
 ## When one search is not enough
 
@@ -121,8 +143,8 @@ Do not relay a weak result — branch:
 
 ## Permission tiers on the management API
 
-The local API has no authentication. The tiers in `GET /api/schema` are a
-contract the **caller** enforces:
+The tiers in `GET /api/schema` are a contract the **caller** enforces; the
+optional token decides who may call, not which operation:
 
 | Tier | Rule |
 |---|---|

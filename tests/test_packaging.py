@@ -197,14 +197,14 @@ def _rag(env: dict[str, str]) -> dict:
 
 MAC = {"RAG_HOST_HOME": "/Users/a", "ENCRYPTION_KEY": "k"}
 WINDOWS = {"RAG_HOST_HOME": "C:/Users/a", "RAG_CONTAINER_HOME": "/c/Users/a", "ENCRYPTION_KEY": "k"}
-REMAPPED = {**MAC, "NOETRIX_API_PORT": "9051", "NOETRIX_CONSOLE_PORT": "9052"}
+REMAPPED = {**MAC, "NOETRIX_API_PORT": "9051", "NOETRIX_CONSOLE_PORT": "9052", "NOETRIX_MCP_PORT": "9053"}
 
 
 def test_macos_and_linux_mount_home_at_the_same_path():
     rag = _rag(MAC)
     assert rag["home"] == "/Users/a:/Users/a"
     assert rag["env"]["RAG_HOST_HOME"] == "/Users/a"               # what config.docker.yaml expands
-    assert rag["ports"] == ["127.0.0.1:8051:8051", "127.0.0.1:8052:8052"]
+    assert rag["ports"] == ["127.0.0.1:8051:8051", "127.0.0.1:8052:8052", "127.0.0.1:8053:8053"]
 
 
 def test_windows_mounts_a_drive_path_onto_a_linux_path_and_the_config_sees_the_linux_one():
@@ -217,7 +217,8 @@ def test_a_remapped_host_port_is_the_port_inside_too():
     """The console's PAGE calls webui.rag_api from the browser: if only the host side moved,
     its Query tab would talk to whatever owns :8051."""
     rag = _rag(REMAPPED)
-    assert rag["ports"] == ["127.0.0.1:9051:9051", "127.0.0.1:9052:9052"]
+    # The MCP port moves on the host side only: no page in a browser names it.
+    assert rag["ports"] == ["127.0.0.1:9051:9051", "127.0.0.1:9052:9052", "127.0.0.1:9053:8053"]
     assert rag["env"]["RAG_PORT"] == "9051" and rag["env"]["RAG_CONSOLE_PORT"] == "9052"
 
 
@@ -345,7 +346,8 @@ FAKE_CURL = """#!/bin/sh
 for last in "$@"; do :; done
 case "$last" in
   */health) [ -n "${FAKE_HEALTH:-}" ] || exit 7; printf '%s' "$FAKE_HEALTH" ;;
-  */docs)   exit 0 ;;
+  */)       exit 0 ;;                 # the console's page shell, exempt from the token
+  *)        exit 22 ;;
 esac
 """
 
@@ -412,6 +414,31 @@ def test_start_sh_fails_readably(tmp_path, env, must_say):
     assert must_say in done.stderr, done.stderr
 
 
+def test_the_launchers_probe_the_consoles_page_shell_which_needs_no_token():
+    """GET / is exempt from RAG_API_TOKEN and /docs is not: a launcher that probed /docs
+    would call a healthy console dead whenever a token is set."""
+    for name in ("start.sh", "start.ps1"):
+        text = (PKG / name).read_text(encoding="utf-8")
+        assert '"http://127.0.0.1:$console/"' in text, name
+        assert "$console/docs" not in text, name
+
+
+@pytest.mark.parametrize("token", ["", "s3cret"])
+def test_the_smoke_probe_sends_the_token_only_when_one_is_set(monkeypatch, token):
+    spec = importlib.util.spec_from_file_location("noetrix_smoke", PKG / "smoke.py")
+    smoke = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(smoke)
+    sent = []
+
+    def record(req, timeout):
+        sent.append(req)
+        raise OSError("nothing is sent in this test")
+    monkeypatch.setattr(smoke.urllib.request, "urlopen", record)
+    monkeypatch.setenv("RAG_API_TOKEN", token)
+    assert smoke.http("GET", "http://127.0.0.1:9/api/jobs")[0] == 0
+    assert sent[0].get_header("Authorization") == ("Bearer s3cret" if token else None)
+
+
 @pytest.mark.skipif(sys.platform != "win32" or shutil.which("powershell") is None, reason="Windows PowerShell only")
 def test_start_ps1_installs_the_skills(tmp_path):
     bundle = _bundle_with_skills(tmp_path, "start.ps1")
@@ -471,6 +498,10 @@ def test_the_cold_archive_builds_and_holds_what_it_should(tmp_path):
     assert set(keys) == {"RAG_HOST_HOME", "ENCRYPTION_KEY"} and re.fullmatch(r"[0-9a-f]{64}", keys["ENCRYPTION_KEY"])
     assert not SECRET_SHAPE.search("\n".join(p.read_text(encoding="utf-8", errors="ignore") for p in bundle.rglob("*")
                                              if p.is_file() and p.suffix not in {".png", ".jpg", ".gz"}))
+    # no question set either: the sets quote the vault, and only the with-data archive carries one
+    assert (bundle / "app" / "eval" / "bench" / "cli.py").is_file()
+    for sets in ["sets", "smoke"]:
+        assert not (bundle / "app" / "eval" / sets).exists(), f"app/eval/{sets} must not ship in the cold archive"
 
     # the skills: rag-ops is the project's file byte for byte; both are recorded in BUILD_INFO
     assert (bundle / "skills" / "rag-ops" / "SKILL.md").read_bytes() == (ROOT / "SKILL_RAGOPS.md").read_bytes()

@@ -311,7 +311,7 @@ def test_the_schema_describes_a_bad_lane_weight_the_way_it_is_answered(monkeypat
     _stub_counting(r, monkeypatch, dense=["a"], sparse=["b"])
     monkeypatch.setitem(S._STATE, "rag", _pipeline(r))
     monkeypatch.setattr(S, "_HISTORY", deque(maxlen=50))
-    client = TestClient(S.app)          # never entered: the lifespan would build the real pipeline
+    client = TestClient(S.app, base_url="http://127.0.0.1")   # never entered: the lifespan would build the real pipeline
 
     negative = client.post("/search", json={"q": "x", "lane_weights": {"dense": -1}})
     assert negative.status_code == 200 and "error" in negative.json()

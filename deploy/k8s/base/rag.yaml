@@ -55,6 +55,10 @@ spec:
               containerPort: 8051
             - name: console
               containerPort: 8052
+            # The MCP server (mcp_server.py --http). No Service on purpose:
+            # `kubectl port-forward deploy/rag 8053:8053` arrives as localhost.
+            - name: mcp
+              containerPort: 8053
           env:
             - name: RAG_SERVE_PID_FILE
               value: /tmp/serve_api.pid
@@ -164,8 +168,10 @@ spec:
         - name: tmp
           emptyDir: {}
 ---
-# The query API. ClusterIP only: it has no authentication (it was built to listen
-# on localhost), so anything that exposes it beyond the cluster must add its own.
+# The query API. ClusterIP only. It checks Host and Origin on every request, and a
+# bearer token only when RAG_API_TOKEN is set (see secret.template.yaml). A caller
+# using this Service's name needs `rag` in security.allowed_hosts; port-forward
+# arrives as localhost. Anything that exposes it beyond the cluster must add more.
 apiVersion: v1
 kind: Service
 metadata:
@@ -186,7 +192,8 @@ spec:
 # NOT Ready. publishNotReadyAddresses is the point: the console is the tool that
 # fixes a pipeline that failed to build, ingests into a fresh install, and presses
 # restart. Behind the readiness-gated Service above it would vanish exactly when it
-# is needed. Same authentication caveat as the API; for access use
+# is needed. Same guard as the API (a caller using this name needs `rag-console` in
+# security.allowed_hosts); for access use
 # `kubectl port-forward svc/rag-console 8052:8052`.
 apiVersion: v1
 kind: Service

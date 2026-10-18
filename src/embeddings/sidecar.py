@@ -39,10 +39,12 @@ from src.embeddings.registry import EmbeddingSpec
 
 SIDECAR_SUFFIX = ".embedding.json"
 SIDECAR_VERSION = 1
-ROLES = ("chunks", "hype")
+ROLES = ("chunks", "hype", "graph")
 STATUSES = ("building", "complete")
 # A re-embed target X pairs with the question collection X__hype: reserved.
 HYPE_SUFFIX = "__hype"
+# <paths.collection_name>__graph is graph mode's seed index (graph_twin.py): reserved.
+GRAPH_SUFFIX = "__graph"
 
 # A sidecar missing any of these cannot say which vectors it describes. That is
 # an error, never "no sidecar": a half-written file must not unlock serving.
@@ -176,12 +178,22 @@ def ids_digest(ids: Iterable[str]) -> str:
     return "sha256:" + hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 
-def iter_ids(col, page: int = 5000) -> Iterator[str]:
+def iter_ids(col, page: int = 5000, where: dict | None = None) -> Iterator[str]:
     """Every id in the collection, a page at a time: one get() over all of
     them fails on SQLite's variable limit (delete_doc.py pages for the same
-    reason)."""
-    for offset in range(0, col.count(), page):
-        yield from col.get(limit=page, offset=offset, include=[])["ids"]
+    reason). With `where`, only the matching rows: their number is not known
+    up front, so pages are read until one comes back short."""
+    if where is None:
+        for offset in range(0, col.count(), page):
+            yield from col.get(limit=page, offset=offset, include=[])["ids"]
+        return
+    offset = 0
+    while True:
+        ids = col.get(where=where, limit=page, offset=offset, include=[])["ids"]
+        yield from ids
+        if len(ids) < page:
+            return
+        offset += page
 
 
 def stored_dimension(col) -> int:
@@ -196,10 +208,13 @@ def stored_dimension(col) -> int:
 
 def role_for(cfg, collection: str) -> str:
     """A collection named like retrieval.hype.collection, or ending in __hype, is
-    a HyPE question collection (embedded query-side); anything else holds chunks."""
+    a HyPE question collection (embedded query-side); one ending in __graph is
+    graph mode's seed index; anything else holds chunks."""
     if collection == cfg.get("retrieval.hype.collection", "hype_questions") \
             or collection.endswith(HYPE_SUFFIX):
         return "hype"
+    if collection.endswith(GRAPH_SUFFIX):
+        return "graph"
     return "chunks"
 
 
@@ -301,9 +316,9 @@ def verify_sample(embedder, col, *, role: str, sample_size: int, min_cosine: flo
     """Re-embed `sample_size` evenly spaced stored documents with the configured
     embedder and require each to match its stored vector at >= min_cosine. The
     same model on the same text scores ~1.0; another model or prefix lands far
-    below, so a pass proves which embedder built the collection. Chunk
-    collections are re-embedded document-side, HyPE questions query-side (that
-    is how each was built). Raises StampError on any failure."""
+    below, so a pass proves which embedder built the collection. Chunk and
+    graph collections are re-embedded document-side, HyPE questions query-side
+    (that is how each was built). Raises StampError on any failure."""
     import numpy as np
 
     if sample_size < 1:
@@ -325,7 +340,7 @@ def verify_sample(embedder, col, *, role: str, sample_size: int, min_cosine: flo
                          f"rows, so there is nothing to re-embed and compare")
 
     spec = embedder.spec
-    embed = embedder.embed_documents if role == "chunks" else embedder.embed_queries
+    embed = embedder.embed_queries if role == "hype" else embedder.embed_documents
     new = np.asarray(embed(texts), dtype=float)
     old = np.asarray(stored, dtype=float)
     if new.shape[1] != old.shape[1]:

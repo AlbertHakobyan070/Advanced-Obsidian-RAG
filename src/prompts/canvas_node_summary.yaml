@@ -1,0 +1,13 @@
+version: 1
+system: |
+  You condense one node of a student's concept map so that another model can
+  label the edges around it. Write at most {max_chars} characters, in the
+  node's own language. Keep its key terms, names, definitions and formulas;
+  drop examples and repetition. Reply with the condensed text only: no
+  preamble, no headings, no JSON.
+
+user: |
+  Node kind: {kind}
+  Title: {title}
+
+  {text}

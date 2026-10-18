@@ -35,8 +35,8 @@ from typing import Callable, Iterator
 
 from src.embeddings.registry import EmbeddingSpec, resolve_embedding_spec
 from src.embeddings.sidecar import (
-    HYPE_SUFFIX, fingerprint_diff, ids_digest, iter_ids, make_sidecar, read_sidecar,
-    stored_dimension, verify_sample, write_sidecar)
+    GRAPH_SUFFIX, HYPE_SUFFIX, fingerprint_diff, ids_digest, iter_ids, make_sidecar,
+    read_sidecar, stored_dimension, verify_sample, write_sidecar)
 from src.utils.chroma_client import persistent_client
 from src.utils.config_loader import Config
 
@@ -78,12 +78,20 @@ def _pages(items: list[str]) -> Iterator[list[str]]:
         yield items[i:i + PAGE]
 
 
-def _check_target(cfg: Config, target: str) -> None:
+def _check_target(cfg: Config, target: str, role: str = "chunks") -> None:
     if not COLLECTION_NAME_RE.fullmatch(target):
         raise ReembedError(f"{target!r} is not a collection name: 3-512 characters of "
                            f"letters, digits, '.', '_' or '-', alphanumeric at both ends")
     if target.endswith(HYPE_SUFFIX):
         raise ReembedError(f"{target!r}: the suffix {HYPE_SUFFIX!r} is reserved for HyPE collections")
+    if role == "graph":
+        derived = cfg.get("paths.collection_name", "obsidian_vault") + GRAPH_SUFFIX
+        if target != derived:
+            raise ReembedError(f"{target!r}: a graph index is always {derived!r} "
+                               f"(paths.collection_name + {GRAPH_SUFFIX!r})")
+    elif target.endswith(GRAPH_SUFFIX):
+        raise ReembedError(f"{target!r}: the suffix {GRAPH_SUFFIX!r} is reserved for graph mode's "
+                           f"seed index (the graph_embed job builds it)")
     for key, default in (("paths.collection_name", "obsidian_vault"),
                          ("retrieval.hype.collection", "hype_questions")):
         if target == cfg.get(key, default):
@@ -92,14 +100,17 @@ def _check_target(cfg: Config, target: str) -> None:
 
 
 def rebuild_into(cfg: Config, target: str, embedder, *, limit: int | None = None,
-                 client=None, progress: Callable[[str], None] = print) -> dict:
+                 client=None, progress: Callable[[str], None] = print,
+                 role: str = "chunks") -> dict:
     """Embed the active collection's corpus into `target` with `embedder` and
     return the target's sidecar. `limit` embeds only that many ids (a smoke run):
-    the result is verified but stays "building", so it can never be served."""
+    the result is verified but stays "building", so it can never be served.
+    role="graph" embeds only the graph.file_type chunks, into graph mode's seed
+    index (graph_twin.py), which pairs with no HyPE collection."""
     spec: EmbeddingSpec | None = embedder.spec
     if spec is None:
         raise ValueError("this embedder carries no spec; build it with Embedder.from_config")
-    _check_target(cfg, target)
+    _check_target(cfg, target, role)
     if limit is not None and limit < 1:
         raise ReembedError(f"--limit must be a positive integer, got {limit}")
 
@@ -122,7 +133,7 @@ def rebuild_into(cfg: Config, target: str, embedder, *, limit: int | None = None
         raise ReembedError(f"collection {target!r} exists but has no embedding fingerprint, so it "
                            f"is not a re-embed target. Pick another name.")
     if sidecar is not None:
-        diff = fingerprint_diff(spec, embedder.dimension(), sidecar, role="chunks")
+        diff = fingerprint_diff(spec, embedder.dimension(), sidecar, role=role)
         if diff:
             raise ReembedError(
                 f"{target!r} was started with {sidecar['provider']} · {sidecar['model']}, but this "
@@ -136,9 +147,12 @@ def rebuild_into(cfg: Config, target: str, embedder, *, limit: int | None = None
                                f"already exists")
 
     # ---- membership, and proof the JSONLs can supply every id, BEFORE any write ----
-    all_ids = set(iter_ids(source, PAGE))
+    where = {"file_type": str(cfg.get("graph.file_type", "canvas"))} if role == "graph" else None
+    all_ids = set(iter_ids(source, PAGE, where=where))
     if not all_ids:
-        raise ReembedError(f"the active collection {source_name!r} is empty")
+        raise ReembedError(f"the active collection {source_name!r} is empty" if where is None else
+                           f"the active collection {source_name!r} holds no chunks with file_type "
+                           f"{where['file_type']!r} (graph.file_type)")
     members = set(sorted(all_ids)[:limit]) if limit else all_ids
     files = chunk_union_files(cfg.path("paths.chunks_file"))
     supplied = {cid for cid, _ in _iter_union(files) if cid in members}
@@ -155,14 +169,14 @@ def rebuild_into(cfg: Config, target: str, embedder, *, limit: int | None = None
     todo = members - present
     dimension = (sidecar["dimension"] if sidecar else
                  embedder.dimension() or len(embedder.embed_documents(["dimension probe"])[0]))
-    twin = target + HYPE_SUFFIX
+    twin = target + HYPE_SUFFIX if role == "chunks" else None
     created_at = sidecar["created_at"] if sidecar else time.strftime("%Y-%m-%dT%H:%M:%S")
     expected = len(all_ids)
     started = time.perf_counter()
 
     def write(status: str, count: int, **extra) -> dict:
         data = make_sidecar(
-            spec, collection=target, role="chunks", status=status, dimension=dimension,
+            spec, collection=target, role=role, status=status, dimension=dimension,
             count=count, written_by="rebuild-into", hype_collection=twin, created_at=created_at,
             expected=expected, source_collection=source_name, **extra)
         write_sidecar(chroma_dir, target, data)
@@ -230,14 +244,14 @@ def rebuild_into(cfg: Config, target: str, embedder, *, limit: int | None = None
         raise RuntimeError(f"{target!r} holds {len(stored)} ids but {len(members)} were expected "
                            f"({len(members - stored)} missing, {len(stored - members)} extra); "
                            f"left as 'building'. Run the same command again.")
-    verified = verify_sample(embedder, col, role="chunks",
+    verified = verify_sample(embedder, col, role=role,
                              sample_size=int(cfg.get("embedding.verify.sample_size", 32)),
                              min_cosine=float(cfg.get("embedding.verify.min_cosine", 0.99)))
     seconds = time.perf_counter() - started
     build = {"seconds": round(seconds, 1), "chunks_per_s": round(done / seconds, 2) if done else 0,
              "embedded": done, "skipped_present": len(present) - len(stale), "pruned": len(stale),
              "metadata_synced": synced, "text_drift": text_drift, "limited_to": limit}
-    hype = {"mode": "none", "collection": twin, "count": 0}   # deferred: not re-embedded
+    hype = {"mode": "none", "collection": twin, "count": 0} if twin else None   # deferred: not re-embedded
     dimension = stored_dimension(col)
     if limit:                                  # a smoke subset must stay unservable
         return write("building", col.count(), hype=hype, verified=verified, build=build,

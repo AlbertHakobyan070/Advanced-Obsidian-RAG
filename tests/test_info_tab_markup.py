@@ -222,6 +222,14 @@ def test_the_info_tab_states_no_counts_that_change():
         rf"\b{words}\s+(?:\w+\s+)?(?:lanes|loaders|modes|stages|surfaces|tabs|presets|scorers)\b", prose, re.I)
 
 
+def test_the_workspace_map_has_one_card_per_nav_tab_in_nav_order():
+    nav = HTML[HTML.index('<nav id="nav">'):HTML.index("</nav>")]
+    tabs = re.findall(r'<button data-tab="[^"]+"(?: class="on")?>([^<]+)</button>', nav)
+    info = _info()
+    grid = info[info.index("Workspace map"):info.index("The Query knobs")]
+    assert re.findall(r'<div class="infocard">.*?<h3>([^<]+)</h3>', grid) == tabs
+
+
 def test_defaults_in_the_knobs_table_are_read_live_not_typed():
     table = _info()[_info().index("The Query knobs"):]
     assert not re.search(r"Default \d", table), "a default typed into the table goes stale"

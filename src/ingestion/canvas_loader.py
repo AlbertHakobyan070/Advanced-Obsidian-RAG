@@ -62,6 +62,7 @@ from src.ingestion.obsidian_parser import (
     detect_course_from_path,
     clean_text,
     apply_forced_meta,
+    extract_tags,
     split_section,
 )
 from src.utils.config_loader import Config
@@ -298,6 +299,7 @@ class CanvasLoader:
         overlap: int = 150,
         context_depth: int = 0,
         context_chars: int = 400,
+        label_tags: bool = False,
     ):
         self.vault_path = Path(vault_path)
         self.output_file = Path(output_file)
@@ -329,6 +331,10 @@ class CanvasLoader:
                              f"{context_depth!r}")
         self.context_depth = int(context_depth)
         self.context_chars = int(context_chars)
+        # #tags in an edge label also become `tags` of BOTH endpoint chunks.
+        # Metadata only (the label is already in both footers), so ids and text
+        # never change; off = no chunk carries tags from its edge labels.
+        self.label_tags = bool(label_tags)
 
         # Per-file / batch metadata overrides — metadata only, doc_ids unaffected.
         self.force_domain: str | None = None
@@ -372,6 +378,7 @@ class CanvasLoader:
             overlap=cfg.get("canvas.chunk_overlap", 150),
             context_depth=cfg.get("canvas.context_depth", 0),
             context_chars=cfg.get("canvas.context_chars", 400),
+            label_tags=cfg.get("canvas.label_tags", False),
         )
 
     # ---- discovery ----
@@ -481,6 +488,7 @@ class CanvasLoader:
             edges_aligned: list[str] = []
             file_refs: list[str] = []
             conn_lines: list[str] = []
+            node_tags: set[str] = set()
             for e in touching:
                 if e.get("fromNode") == node_id:
                     direction, other_id = "->", e.get("toNode")
@@ -492,6 +500,8 @@ class CanvasLoader:
                 label = _collapse(e.get("label"))
                 if label:
                     edge_labels.append(label)
+                if self.label_tags and label:
+                    node_tags.update(extract_tags(label))
                 # ONE entry per edge, labelled or not — this is the list a
                 # graph traversal can actually pair up. The two lists above
                 # are kept because the composed footer and existing indexed
@@ -546,6 +556,8 @@ class CanvasLoader:
             if group_label:
                 meta["canvas_group"] = group_label
             meta.update(course_meta)
+            if node_tags:
+                meta["tags"] = sorted(node_tags)
 
             for part, part_body in enumerate(bodies, start=1):
                 part_meta = dict(meta)

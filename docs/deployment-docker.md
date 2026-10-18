@@ -1,17 +1,19 @@
 # Docker deployment
 
-Run the whole system on another machine from the packaged `rag-docker-bundle`
-tree with **two commands** — no Python, no venv, no path surgery. The same
-Dockerfiles and Compose files are versioned in the repository under `deploy/`,
-which also carries a Kubernetes (kustomize) path; its README explains how a
-checkout, the archives and the cluster manifests relate. This page describes
-the packaged archive.
+Run the whole system on another machine from a release archive, which unpacks to
+a `rag-docker-bundle` folder, with **one command** — no Python, no venv, no path
+surgery. The archive is built from the Dockerfiles and Compose files versioned in
+the repository under `deploy/`, which also carries a Kubernetes (kustomize) path;
+`deploy/README.md` explains how a checkout, the archives and the cluster manifests
+relate. This page describes the archive, and
+[From a source clone](#from-a-source-clone) runs the same stack from a checkout.
 
 Everything binds to `127.0.0.1`. Nothing is exposed to your network.
 
 | Service | Port | Starts by default | Stop it when |
 |---|---|---|---|
 | `rag` — query API + console | `8051`, `8052` | yes | never; it *is* the RAG |
+| `rag` — MCP server for agents | `8053` | yes, inside the `rag` container | cannot be stopped on its own; nothing depends on it, and the container's health ignores it |
 | `freellmapi` — generation proxy | `3001` | yes | you generate through a direct cloud backend |
 | `paddleocr` — OCR for scanned PDFs | `8103` | **no** (`--profile ocr`) | you are not ingesting scanned material |
 | `rerank` — external reranker | `8102` | **no** (`--profile rerank`) | you are not using an external reranker |
@@ -31,7 +33,7 @@ docker-entrypoint.sh      # supervises serve_api (:8051) alongside manage_api (:
 healthcheck.sh            # the readiness/liveness probe the image and Compose use
 paddleocr/                # the OCR sidecar image + its tiny HTTP service
                           # (a shipping copy of the repo's ocr-sidecar/)
-skills/                   # the two agent skills: personal-rag (ask) and rag-ops (operate)
+skills/                   # the agent skills: personal-rag (ask) and rag-ops (operate)
 .env.example              # settings + provider-key template
 app/                      # the application source
 data/                     # JSONL chunk files (the source of truth)
@@ -80,6 +82,26 @@ embedding and rerank models into a persistent cache volume. Wait until:
 curl -fsS http://127.0.0.1:8051/health   # -> {"ready":true,"state":"ready",...}
 ```
 
+## From a source clone
+
+A checkout runs the same stack from `deploy/docker/`, with a config generated from
+`config.example.yaml` (the generator needs only a Python with PyYAML):
+
+```bash
+cd deploy/docker
+cp .env.example .env              # set RAG_HOST_HOME and ENCRYPTION_KEY
+python make_docker_config.py ../../config.example.yaml config.docker.yaml
+docker compose -p noetrix up --build -d
+```
+
+`-p noetrix` names the Compose project; without it Compose names the project after
+the folder and the volumes become `docker_*`. Give every later `docker compose`
+command the same name, or set `COMPOSE_PROJECT_NAME=noetrix` in `.env`. The compose
+commands on the rest of this page then work from `deploy/docker/`, except the GPU OCR
+sidecar's own project, which runs from the repository's `ocr-sidecar/`; the `start`
+launcher and `start.sh skills` belong to the archive. Leave an unpacked archive's
+project name alone: its volumes hold the proxy's stored provider keys.
+
 ## One path to set
 
 Set `RAG_HOST_HOME` in `.env` to your home folder:
@@ -107,7 +129,7 @@ selectable from the console's vault switcher with no further edits.
 
 ## Agent skills
 
-`skills/` holds the two skills that let a coding agent drive the stack: **personal-rag**
+`skills/` holds the agent skills that let a coding agent drive the stack: **personal-rag**
 (ask, search, compare, inspect evidence on `:8051`) and **rag-ops** (ingest, OCR, settings,
 jobs, the evaluation bench on `:8052`). One command installs both for Claude Code, and is
 safe to repeat after a newer archive:
@@ -116,6 +138,33 @@ safe to repeat after a newer archive:
 sh start.sh skills                    # PowerShell: start.ps1 skills
 sh start.sh skills --dest FOLDER      # another agent's skills folder (PowerShell: -Dest)
 ```
+
+## Connect an agent over MCP
+
+The container also runs the [MCP server](mcp.md) over HTTP at
+`http://127.0.0.1:8053/mcp` (host port `NOETRIX_MCP_PORT`). It is optional: a
+down MCP server shows up as a refused connection, with the reason in
+`logs/mcp_server.log`, and never marks the container unhealthy. A client that
+needs stdio, or a machine with no port to spare, can run it inside the
+container instead:
+
+```bash
+docker exec -i <rag container> python mcp_server.py
+```
+
+## Require a token
+
+The services check `Host` and `Origin` on every request. To also require a
+bearer token, set `RAG_API_TOKEN` in `.env` and recreate the `rag` container:
+
+```bash
+docker compose up -d rag
+```
+
+Every call except `GET /health` then needs `Authorization: Bearer <token>`. The
+console asks for it once; the MCP server inside the container sends it on its
+own calls, and an MCP client must send it too. See
+[Security](api.md#security).
 
 ## Point it at a model
 
@@ -142,14 +191,14 @@ Retrieval-only (`/search`) needs no generation provider at all.
 
     ```bash
     docker compose down
-    docker volume rm rag-docker-bundle_freellmapi-data
+    docker volume rm rag-docker-bundle_freellmapi-data   # from a checkout: noetrix_freellmapi-data
     docker compose up -d
     ```
 
 ## OCR for scanned PDFs
 
 The container image ships **Tesseract** ready to use (`pdf.ocr_engine: auto`).
-For scanned books it is the weakest of the three lanes; the **PaddleOCR
+For scanned books it is the weakest OCR lane; the **PaddleOCR
 sidecar** is the one worth turning on:
 
 ```bash
@@ -195,7 +244,7 @@ without kernels for your card still imports and still reports the right device
 count, so that pin was chosen by running a real GPU op, not by reading a
 support matrix.
 
-### Two engines: `ocr` and `vl`
+### The `ocr` and `vl` engines
 
 "PaddleOCR" names two different products, and the GPU sidecar serves both.
 Choose per request with `"pipeline"`, or set the container default with
@@ -238,8 +287,8 @@ That matters more than it looks: `PaddleOCR()` resolves to whatever the
 installed PaddleX pins as current, so the same call yields a different model on
 a different image, with no visible symptom until you compare transcripts.
 
-The third lane, a document **vision model**, is reached over HTTP and
-deliberately lives in no image here: on container CPU it is minutes per page.
+The document **vision-model** lane is reached over HTTP and deliberately
+lives in no image here: on container CPU it is minutes per page.
 Run one on the host and the container reaches it at `host.docker.internal`.
 
 ## An external reranker
@@ -271,7 +320,7 @@ in the console header. This works *inside* the container: the entrypoint
 supervises the query API, so the button restarts that process rather than
 needing `docker compose restart`.
 
-If it does not come back, the console now prints the query API's startup log
+If it does not come back, the console prints the query API's startup log
 instead of spinning. The cause is almost always the setting that was just
 changed — a reranker id that cannot be downloaded, an embedding model with a
 typo, an index path that moved:
@@ -295,7 +344,10 @@ the two things that make the following restart fail.
 - **Ask returns a generation error** — the backend has no key yet, or a free
   quota is exhausted. `/search` and evidence comparison trees still work.
 - **Port already in use** — set the host port in `.env`, e.g.
-  `NOETRIX_API_PORT=9051` (also `NOETRIX_CONSOLE_PORT`, `NOETRIX_PROXY_PORT`).
-  The container-side ports do not change.
+  `NOETRIX_API_PORT=9051` (also `NOETRIX_CONSOLE_PORT`, `NOETRIX_PROXY_PORT`,
+  `NOETRIX_MCP_PORT`).
+  The query API and the console then listen on the new number inside the
+  container too, so the console's Query tab follows the remap; the proxy and the
+  MCP server keep their container-side ports.
 - **Model download is slow the first time** — expected; it is cached in a named
   volume afterwards.

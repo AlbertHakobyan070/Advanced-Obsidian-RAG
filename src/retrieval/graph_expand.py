@@ -72,9 +72,50 @@ def _edges_of(meta: dict) -> tuple[list[dict], bool]:
             False)
 
 
+def _seed_index(cfg: Config, retriever, file_type: str):
+    """(embedder, collection, error) for graph.embedding_provider's seed index,
+    <paths.collection_name>__graph (src/embeddings/graph_twin.py).
+
+    A twin that cannot be served — not built, unfinished, built by another
+    embedder, or holding other ids than the main collection's graph lane — is
+    an ERROR, never a fallback to the main embedder. But it is scoped: it
+    refuses query seeding only, and :8051, /query, /search and seeding by id
+    keep working. The id check is exact; text edited under a kept id is not
+    seen here (the console's status names chunk files newer than the build)."""
+    from chromadb.errors import NotFoundError
+
+    from src.embeddings.embedder import Embedder
+    from src.embeddings.graph_twin import (
+        BUILD_HINT, graph_collection_name, graph_spec, twin_id_diff)
+    from src.embeddings.sidecar import EmbeddingMismatchError, check_collection
+    from src.utils.chroma_client import persistent_client
+
+    name = graph_collection_name(cfg)
+    chroma_dir = cfg.path("paths.chroma_dir")
+    try:
+        embedder = Embedder.from_config(cfg, spec=graph_spec(cfg))
+        if check_collection(embedder, chroma_dir, name, role="graph") is None:
+            raise RuntimeError(f"{name!r} has not been built: {BUILD_HINT}")
+        col = persistent_client(chroma_dir).get_collection(name)
+        only_main, only_twin = twin_id_diff(retriever._get_collection(), col, file_type)
+        if only_main or only_twin:
+            raise RuntimeError(
+                f"{name!r} is out of step with {retriever.collection_name!r}: {len(only_main)} "
+                f"{file_type} chunk(s) are not in it and {len(only_twin)} are no longer in the "
+                f"main collection. Rebuild it: {BUILD_HINT}")
+    except (EmbeddingMismatchError, ValueError, RuntimeError, NotFoundError) as e:
+        log.error("graph-mode query seeding is unavailable: %s", e)
+        return None, None, str(e)
+    log.info("graph seeds: %r embedded by %s", name, embedder.spec.label())
+    return embedder, col, None
+
+
 class GraphExpander:
     """Walks canvas edges. Owns no models — it borrows the retriever's
-    collection and embedder, and the pipeline's reranker for seed ordering."""
+    collection and embedder, and the pipeline's reranker for seed ordering.
+    With graph.embedding_provider set, query seeding ranks its dense lane in
+    that embedder's own index instead (seed_embedder / seed_collection); a
+    broken one sets seed_error, which only query seeding refuses on."""
 
     def __init__(
         self,
@@ -86,6 +127,9 @@ class GraphExpander:
         max_total: int = 40,
         seed_top_k: int = 5,
         file_type: str = "canvas",
+        seed_embedder=None,
+        seed_collection=None,
+        seed_error: str | None = None,
     ):
         self.retriever = retriever
         self.reranker = reranker
@@ -95,18 +139,30 @@ class GraphExpander:
         self.max_total = max_total
         self.seed_top_k = seed_top_k
         self.file_type = file_type
+        self.seed_embedder = seed_embedder
+        self.seed_collection = seed_collection
+        self.seed_error = seed_error
 
     @classmethod
     def from_config(cls, cfg: Config, retriever, reranker=None) -> "GraphExpander":
+        from src.embeddings.graph_twin import configured_provider
+        enabled = bool(cfg.get("graph.enabled", True))
+        file_type = str(cfg.get("graph.file_type", "canvas"))
+        seed = (_seed_index(cfg, retriever, file_type)
+                if enabled and configured_provider(cfg) is not None
+                else (None, None, None))
         return cls(
             retriever=retriever,
             reranker=reranker,
-            enabled=bool(cfg.get("graph.enabled", True)),
+            enabled=enabled,
             max_depth=int(cfg.get("graph.max_depth", 2)),
             max_per_hop=int(cfg.get("graph.max_per_hop", 8)),
             max_total=int(cfg.get("graph.max_total", 40)),
             seed_top_k=int(cfg.get("graph.seed_top_k", 5)),
-            file_type=str(cfg.get("graph.file_type", "canvas")),
+            file_type=file_type,
+            seed_embedder=seed[0],
+            seed_collection=seed[1],
+            seed_error=seed[2],
         )
 
     # ---- seeding ----
@@ -119,13 +175,23 @@ class GraphExpander:
         seed set is the thing a human is about to steer, so it should be
         explainable — "the best canvas chunks for these words" — rather than
         the product of every heuristic the main path applies.
+
+        With a graph seed index (graph.embedding_provider), the dense lane is
+        ranked there, by that embedder, and each hit is read back from the
+        main collection. A broken one refuses here, and only here.
         """
+        if self.seed_error:
+            raise RuntimeError(f"graph-mode query seeding is unavailable: {self.seed_error}")
         k = seed_top_k or self.seed_top_k
         pool = max(k * 4, 20)
-        qvec = self.retriever.embedder.embed_query(query)
         ftype = self.file_type
+        if self.seed_collection is not None:
+            dense = self._seed_index_search(query, pool)
+        else:
+            qvec = self.retriever.embedder.embed_query(query)
+            dense = self.retriever._dense_search(qvec, pool, where={"file_type": ftype})
         lanes = [
-            self.retriever._dense_search(qvec, pool, where={"file_type": ftype}),
+            dense,
             self.retriever._sparse_search(
                 query, pool,
                 predicate=lambda m: str(m.get("file_type", "")).lower() == ftype),
@@ -142,6 +208,22 @@ class GraphExpander:
         log.info("graph seeds(%r): %d candidate(s) -> %d seed(s)",
                  query[:48], len(fused), min(k, len(ranked)))
         return ranked[:k]
+
+    def _seed_index_search(self, query: str, pool: int) -> list[tuple[str, str, dict]]:
+        """The dense lane over the graph seed index: its ranking, the main
+        collection's text and metadata (what the walk and the answer read)."""
+        res = self.seed_collection.query(
+            query_embeddings=[self.seed_embedder.embed_query(query)], n_results=pool,
+            include=["distances"])
+        ranked = res["ids"][0]
+        by_id = {d.id: d for d in self._fetch_ids(ranked)}
+        gone = [i for i in ranked if i not in by_id]
+        if gone:
+            # ponytail: an id deleted from main since the build is skipped per query;
+            # the startup id check refuses the whole index at the next :8051 restart.
+            log.warning("graph seed index returned %d id(s) the main collection no longer "
+                        "holds (skipped; rebuild it with graph_embed), e.g. %r", len(gone), gone[0])
+        return [(i, by_id[i].text, by_id[i].metadata) for i in ranked if i in by_id]
 
     def seed_from_ids(self, ids: list[str]) -> tuple[list[RetrievedDoc], list[str]]:
         """Explicit seeds from a previous result. Returns (docs, missing_ids)

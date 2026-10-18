@@ -29,7 +29,7 @@ import pytest
 
 from src.generation.generator import _CONFIDENCE_RE, Generator
 from src.retrieval.retriever import RetrievedDoc
-from src.utils.citations import CITATION_RE, CONFIDENCE_RE, ONLY_CITATIONS_RE
+from src.utils.citations import CITATION_RE, CONFIDENCE_RE
 
 
 def docs(n):
@@ -130,37 +130,15 @@ def test_a_grouped_marker_is_deliberately_not_a_citation():
     assert CITATION_RE.findall("values = a[1, 2]") == []
 
 
-# ---- the two files must not drift apart again ----
+# ---- the generator must not grow its own copy of the patterns again ----
 
-def test_the_generator_and_the_eval_suite_share_one_citation_pattern():
-    """This pattern lived in both files as a copy. A fix applied to one of them
-    would have left the eval suite scoring correctly-cited answers as uncited,
+def test_the_generator_uses_the_shared_citation_and_confidence_patterns():
+    """These patterns once lived in two files as a copy. A fix applied to one of
+    them would have left a scorer reading correctly-cited answers as uncited,
     which is worse than both being broken."""
-    from eval import metrics
-    assert metrics._CITATION_RE is CITATION_RE
-    assert metrics._ONLY_CITATIONS_RE is ONLY_CITATIONS_RE
-
     import src.generation.generator as gen
     assert gen._CITATION_RE is CITATION_RE
     assert gen._CONFIDENCE_RE is CONFIDENCE_RE
-
-
-def test_the_eval_suite_scores_fullwidth_citations_as_cited():
-    from eval.metrics import citation_validity
-    rate, dangling = citation_validity("Claim【1】 and claim【2】.", n_docs=3)
-    assert rate == 1.0 and dangling == []
-
-
-def test_the_eval_suite_still_flags_a_dangling_fullwidth_citation():
-    from eval.metrics import citation_validity
-    rate, dangling = citation_validity("Claim【1】 and claim【9】.", n_docs=3)
-    assert dangling == [9] and rate == 0.5
-
-
-def test_a_citation_only_fragment_is_recognised_in_every_bracket_family():
-    for frag in ("[1][2]", "【1】【2】", "［3］.", " [1] "):
-        assert ONLY_CITATIONS_RE.match(frag), frag
-    assert not ONLY_CITATIONS_RE.match("gradient clipping [1]")
 
 
 # ---- the prompt asks for what the parser prefers ----

@@ -247,7 +247,7 @@ def _boot(monkeypatch, cfg):
         monkeypatch.setattr(P, name, stand_in)
     monkeypatch.setattr(P, "configure_logging", lambda **kwargs: None)
     monkeypatch.setattr(S, "load_config", lambda *args, **kwargs: cfg)
-    return TestClient(S.app)
+    return TestClient(S.app, base_url="http://127.0.0.1")    # the request guard refuses Host: testserver
 
 
 def test_a_mismatch_brings_the_query_service_up_failed_with_both_models_named(

@@ -118,7 +118,7 @@ this; here's a standard implementation" and move on. Trust is the whole point.
 
 - Put the **library/language** in the query (`ggplot`, `sklearn`, `pytorch`,
   `sql`, `dplyr`) — these are scope + HyDE-skip signals; they route to the code
-  lane and turn HyDE off automatically.
+  lane and switch HyDE off if it is on.
 - Use **"my" / a course name** for personal-work recall ("my capstone", "my Time
   Series homework") — the retriever boosts course/domain matches.
 - For a raw-script language now covered by `ingest-code` (JS/TS/SQL/Go/…), name
@@ -207,8 +207,9 @@ Total generation spend: zero for the code itself (all `/search`), one small
   is ~36 KB of text you skim and discard. Triage at 400–800; expand only the
   keepers.
 - **HyDE on for a code/exact-term query.** The hypothetical answer biases toward
-  lecture prose and buries his actual code. The `code` preset turns it off; if
-  you hand-roll, set `hyde:false` for "show me my code" queries.
+  lecture prose and buries his actual code. HyDE is off by default and the `code`
+  preset keeps it off; if you turned it on while hand-rolling, set `hyde:false`
+  for "show me my code" queries.
 - **Fabricating grounding.** Never cite his vault for something the search didn't
   return. "Not in your vault, here's a standard version" is the correct,
   trust-preserving answer.

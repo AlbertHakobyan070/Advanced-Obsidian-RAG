@@ -4,17 +4,18 @@ confidence line are written, and therefore how they are read back.
 
 WHY THIS MODULE EXISTS
   These patterns lived in two places: `src/generation/generator.py`, which
-  parses a fresh answer, and `eval/metrics.py`, which scores a stored one. The
-  same regex, copy-pasted. On 2026-09-17 a model started emitting fullwidth
-  CJK citation brackets and a bolded confidence label, and both copies broke —
-  but a fix applied to one of them would have left the eval suite quietly
-  scoring correctly-cited answers as uncited, which is worse than both being
-  broken. One definition, two importers.
+  parses a fresh answer, and the metrics module of the old eval harness (since
+  removed), which scored a stored one. The same regex, copy-pasted. On
+  2026-09-17 a model started emitting fullwidth CJK citation brackets and a
+  bolded confidence label, and both copies broke — but a fix applied to one of
+  them would have left the scorer quietly scoring correctly-cited answers as
+  uncited, which is worse than both being broken. One definition, two
+  importers: the generator, and the bench's judge (`eval/bench/judge.py`),
+  which reads the markers of a stored answer.
 
-  It lives in `src/utils/` and imports nothing, because `eval/metrics.py` is
-  deliberately dependency-light: it is the LLM-free half of the eval suite and
-  must not drag in the LLM client, the prompt loader or the retriever just to
-  recognise a bracket.
+  It lives in `src/utils/` and imports nothing, so a scorer can take a pattern
+  without dragging in the LLM client, the prompt loader or the retriever just
+  to recognise a bracket.
 
 WHAT MODELS ACTUALLY EMIT
   The generation prompt asks for `[1]` and a bare `CONFIDENCE: HIGH` line, and
@@ -59,8 +60,3 @@ CONFIDENCE_RE = re.compile(
 # would also match numpy-style indexing `a[1, 2]`, which is ordinary content
 # in this corpus, and the prompt asks for `[1], [2]` anyway.
 CITATION_RE = re.compile(r"[\[［【〔](\d{1,3})[\]］】〕]")
-
-# A fragment that is nothing but citation markers belongs to the sentence
-# BEFORE it ("...gradient clipping. [1][2]"). Same bracket families.
-ONLY_CITATIONS_RE = re.compile(
-    r"^(?:\s*[\[［【〔]\d{1,3}[\]］】〕]\s*)+[.,;]?$")

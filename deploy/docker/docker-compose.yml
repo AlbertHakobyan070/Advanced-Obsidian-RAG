@@ -6,6 +6,7 @@
 #
 #   query API  : http://127.0.0.1:8051    (rag serve equivalent)
 #   console    : http://127.0.0.1:8052    (rag console equivalent)
+#   MCP        : http://127.0.0.1:8053/mcp (rag mcp --http equivalent; optional)
 #   generation : http://127.0.0.1:3001    (FreeLLMAPI dashboard + /v1 proxy)
 #
 # This file runs unchanged from a repo checkout (here) and from a release
@@ -126,9 +127,17 @@ services:
       # console's Query tab talking to whatever owns :8051.
       RAG_PORT: "${NOETRIX_API_PORT:-8051}"
       RAG_CONSOLE_PORT: "${NOETRIX_CONSOLE_PORT:-8052}"
+      # The optional bearer token both servers then require (src/utils/http_guard.py).
+      # Passed in here as well as through the mounted .env, because healthcheck.sh is
+      # its own process and sees only this environment. Unset = "" = no token check;
+      # recreate the container (docker compose up -d) after changing it.
+      RAG_API_TOKEN: "${RAG_API_TOKEN:-}"
     ports:
       - "127.0.0.1:${NOETRIX_API_PORT:-8051}:${NOETRIX_API_PORT:-8051}"
       - "127.0.0.1:${NOETRIX_CONSOLE_PORT:-8052}:${NOETRIX_CONSOLE_PORT:-8052}"
+      # The MCP server. Nothing in a browser names its port, so inside it stays
+      # mcp.port (8053) and only the host side moves.
+      - "127.0.0.1:${NOETRIX_MCP_PORT:-8053}:8053"
     # Docker Desktop (Mac/Windows) resolves host.docker.internal on its own;
     # Linux does not. Declaring it here means the OCR and external-rerank lanes
     # reach a server running on the HOST the same way on every platform.

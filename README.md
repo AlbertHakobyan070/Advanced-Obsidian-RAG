@@ -16,10 +16,10 @@ When your corpus is silent on something, it says so instead of inventing.
 </p>
 
 > **Runs on free / local infrastructure.** CPU embeddings, on-disk vector and
-> sparse indexes, no managed service. Generation is the only part that can be
-> remote, and it is one config line: any OpenAI- or Anthropic-compatible
-> endpoint — a cloud API, a free-tier proxy, or a model server on your own
-> machine. **Retrieval works with no LLM at all.**
+> sparse indexes, no managed service. By default generation is the only part
+> that calls out to an endpoint, and it is one config line: any OpenAI- or
+> Anthropic-compatible endpoint — a cloud API, a free-tier proxy, or a model
+> server on your own machine. **Retrieval works with no LLM at all.**
 
 ---
 
@@ -47,17 +47,18 @@ in, but nothing is required beyond a directory of files.
 ```mermaid
 flowchart TD
     Q["Question"] --> R{Intent routing}
-    R -->|prose| H["HyDE query expansion<br/>(LLM drafts a hypothetical answer to embed)"]
+    R -->|prose, HyDE off| HY["Hybrid retrieval"]
+    R -.->|prose, HyDE on| H["Optional HyDE query expansion<br/>(LLM drafts a hypothetical answer to embed)"]
     R -->|code intent| C0["Skip HyDE · widen pool · open code lane"]
-    H --> HY["Hybrid retrieval"]
+    H -.-> HY
     C0 --> HY
     HY --> D["Dense · ChromaDB<br/>bge embeddings"]
     HY --> S["Sparse · bm25s"]
-    HY --> SL["Scope lanes<br/>domain / path / file-type filters"]
+    HY -.-> SL["Scope lanes<br/>domain / path / file-type filters"]
     HY --> CL["Code lane<br/>.ipynb / .py / .R / .sql / …"]
-    D --> RRF["Reciprocal Rank Fusion (k=60)<br/>+ metadata boosts"]
+    D --> RRF["Reciprocal Rank Fusion (k=60)<br/>+ optional metadata boosts"]
     S --> RRF
-    SL --> RRF
+    SL -.-> RRF
     CL --> RRF
     RRF --> RR["Rerank policy<br/>cross-encoder / HTTP / lexical / none<br/>(experimental: Laya)"]
     RR --> GT["Optional relevance gate<br/>drops weak chunks · abstains if none pass"]
@@ -66,8 +67,9 @@ flowchart TD
     G --> V["Optional second-pass<br/>citation verification"]
 ```
 
-Every stage is swappable from `config.yaml`. Solid path = always on; the rest
-are optional lanes that open only when the query calls for them.
+Every stage is swappable from `config.yaml`. Solid path = always on; dotted
+path = off by default (HyDE, the scope lanes); the code lane opens only when
+the query calls for it.
 
 ## What makes retrieval good here
 
@@ -77,9 +79,12 @@ are optional lanes that open only when the query calls for them.
   order — no fragile score normalisation across incompatible scales.
 - **Intent-aware scope routing.** A query that names a subject area or a content
   type ("in the compliance policies", "in the textbooks", "the onboarding docs")
-  opens *filtered* lanes toward that material. Routing is **soft**: scoped chunks
-  get guaranteed seats in the candidate pool, but the reranker still makes the
-  final call — a wrong hint degrades gracefully and can never empty your results.
+  can open *filtered* lanes toward that material. Routing is **soft**: scoped
+  chunks get guaranteed seats in the candidate pool, but the reranker still makes
+  the final call — a wrong hint degrades gracefully and can never empty your
+  results. The scope lanes ship switched off (`retrieval.scope_lanes`, or per
+  call); the scope is still detected and reported in the retrieval echo, and the
+  bench's `routing` configurations measure what the lanes add on your corpus.
   Both dictionaries are config-only; extend them without touching code.
 - **A dedicated code lane.** Code and notebook chunks are usually a small
   fraction of a corpus, so a prose-oriented pipeline buries them under prose that
@@ -91,7 +96,7 @@ are optional lanes that open only when the query calls for them.
   on a GPU, out-of-process behind an HTTP endpoint, or be replaced by a
   model-free lexical scorer on hardware that cannot afford one.
   **Bigger is not automatically better on your corpus** — that is what
-  `recall@k` and `MRR` in the eval suite are for, and the default stays the
+  `recall@k` and `MRR` in the bench are for, and the default stays the
   cheap, portable model until your own numbers say otherwise. A further method, an
   experimental fine-tuned scorer (Laya), sits behind a flag, off by default; see
   Evaluation below.
@@ -108,8 +113,8 @@ the warm pipeline is never mutated:
 retrieval:
   presets:
     code:      {rerank_top_k: 10, use_hyde: false, dense_top_k: 40, sparse_top_k: 40, boost_code: true}
-    concept:   {rerank_top_k: 5,  use_hyde: true}
-    synthesis: {rerank_top_k: 10, use_hyde: true, dense_top_k: 30, sparse_top_k: 30}
+    concept:   {rerank_top_k: 5,  use_hyde: false}
+    synthesis: {rerank_top_k: 10, use_hyde: false, dense_top_k: 30, sparse_top_k: 30, parent_context: true, neighbor_context: true}
 ```
 
 ```bash
@@ -154,11 +159,11 @@ away.
 The canvas lane flattens each node's edges into its chunk at ingest time, so the
 graph is visible to the embedder, the reranker and the model with no
 retrieval-time cost. On top of that sits **graph mode**, a separate endpoint
-rather than a knob on the main query — and, for now, an **experimental feature
-that ships switched off** (`graph.enabled: false`, flipped from the console's
-Settings > Experimental features panel). The cost of the traversal is measured;
-its retrieval benefit is not, and a mode nobody has scored against the golden
-set does not belong in the default workspace:
+rather than a knob on the main query, and an **experimental feature that ships
+switched off** (`graph.enabled: false`; the console's Settings > Experimental
+features panel switches it on). The cost of the traversal is measured;
+its retrieval benefit is not, and a mode nobody has scored on the bench's
+labelled question sets does not belong in the default workspace:
 
 ```bash
 curl -s -X POST http://127.0.0.1:8051/graph/expand \
@@ -187,10 +192,11 @@ assuming it.
 
 ### Weight the lanes you fuse
 
-Hybrid retrieval here is not two lanes but eight: dense and sparse, their
+Hybrid retrieval here fuses more than a dense and a sparse lane: their
 code-filtered and scope-filtered counterparts, the live-vault lane and the
-hypothetical-question lane. Reciprocal Rank Fusion merges them, and
-`retrieval.lane_weights` scales each one's contribution:
+hypothetical-question lane join them when they open. Reciprocal Rank Fusion
+merges them, and `retrieval.lane_weights` scales each one's contribution
+([Lane weights](docs/api.md#lane-weights) lists every lane):
 
 ```bash
 curl -s -X POST http://127.0.0.1:8051/search \
@@ -201,8 +207,8 @@ curl -s -X POST http://127.0.0.1:8051/search \
 Every lane defaults to `1.0`, so an untouched config fuses exactly as plain RRF.
 Weights merge lane by lane across config, preset and call, an unknown lane name
 is an error rather than a setting that does nothing, and the retrieval echo
-reports all eight effective weights — not just the ones you overrode. Tune them
-against the golden-set eval rather than by feel.
+reports every lane's effective weight — not just the ones you overrode. Tune
+them on the bench rather than by feel.
 
 ### Compare runs instead of guessing
 
@@ -222,7 +228,7 @@ same thing is a collapsible **Query comparison tree** panel under the composer.
 | Surface | Port | What it's for |
 |---|---|---|
 | **Query API** (`serve_api`) | `:8051` | Warm FastAPI endpoint — ask, search, compare, inspect evidence, discover capabilities. `GET /schema` is the live agent contract. |
-| **Corpus Ledger console** (`manage_api`) | `:8052` | Visual management: Query, Documents (search / filter / retag / delete), Vault browser, Ingest, Jobs, Settings, and an Info tab that diagrams the whole pipeline in-app. `GET /api/schema` is its machine-readable, permission-tiered capability map. |
+| **Corpus Ledger console** (`manage_api`) | `:8052` | Visual management of the corpus, one tab per job ([below](#the-console-tab-by-tab)). `GET /api/schema` is its machine-readable, permission-tiered capability map. |
 
 Both are documented endpoint by endpoint in the
 **[API reference](docs/api.md)**, and every one of them is callable by an agent
@@ -234,6 +240,22 @@ The console's import lane pulls online sources straight into the corpus
 pipeline: fetch a URL as **markdown** or as a **printed PDF** of the fully
 rendered page (headless Chromium — LaTeX, tables and highlighted code
 preserved), preview the result, then promote it into the normal ingest flow.
+
+### The console, tab by tab
+
+| Tab | What it does |
+|---|---|
+| **Ledger** | The corpus at a glance: chunk, document and vector counts, disk use, an index-health verdict that compares the dense and sparse indexes, each domain's share, every chunk file, and recent jobs. |
+| **Ingest** | Upload files into the vault inbox, each with its own settings (domain, tags, chunking, OCR engine and pages, a destination folder); fetch web pages as markdown or a printed PDF and convert other formats to markdown; review the planned jobs before queueing them; run vault-wide passes and maintenance; preview and queue canvas ingestion. |
+| **Documents** | Search and filter everything indexed by file, domain, tag or chunk file; preview a document's chunks; retag its metadata with no re-embedding; delete it from the index. |
+| **Vault** | Browse the vault tree with each file's index status, stage domain and tag edits for indexed files and apply them in one pass, and find any file by name. Vault files are never modified. |
+| **OCR** | Hand-guided OCR of a PDF or an image from the vault or an import: a working page range, clean-up per page, regions drawn or proposed, each region read by its own engine and language, a quality report per engine, ingest of the finished pages, and an export of the corrected markdown. The × on an imported or inbox row moves that file into the vault's `.trash`, from where moving it back restores it with its work (refused while it is indexed); the Ingest tab's × on an inbox or staged file deletes it for good instead. |
+| **Graph** | Obsidian canvases: open one, edit its nodes, edges and labels, save the edits back into the `.canvas` file (refused if the file changed on disk since it was opened, with the previous version backed up outside the vault), and re-index it. **Suggest label** asks a model you pick for an edge's label, from the canvas as edited (both nodes, the arrow, the groups and the labels nearby), fills the label box, and shows alternatives, suggested `#tags` and what the model saw; nothing is written until Save. `#tags` in labels can become chunk tags (`canvas.label_tags`). A canvas can be removed from the index without touching its file, and graph mode's seed index can be built with an embedder of its own. Graph-mode *querying* is separate: an experimental Query-tab panel, off by default (`graph.enabled`, switched in Settings > Experimental features). |
+| **Jobs** | The job queue, one job at a time: status, the live log, retry and cancel. |
+| **Query** | Ask or search with per-query controls, fan a question across presets, rerankers or backends in a comparison tree, preview answers and sources as Markdown with LaTeX, and restore recent queries. It calls the query API directly. |
+| **Eval** | The review queue for the bench's question sets: progress per suite, filters by suite, status and split, and verify, reject or edit each question beside a live retrieval check. |
+| **Settings** | Appearance (dark and light theme shelves, and a theme designer with one row per colour, font and radius token that starts from the theme in use), the vault switcher, the editable config surface (paths, models, defaults) saved into `config.yaml`, generation backends and their keys, reranker and OCR readiness, and the experimental-feature switches. |
+| **Info** | Diagrams of the query and ingestion pipelines; each stage says what it does, which `config.yaml` keys control it, and whether it is on in the live config. A workspace map has one card per tab. |
 
 ## Built for agents, not just people
 
@@ -249,15 +271,37 @@ curl -s http://127.0.0.1:8052/api/schema # management operations + permission ti
 `/search` is the primary agent call: retrieval only, no generation backend
 needed, no tokens spent. Management operations carry a `read` / `mutating` /
 `destructive` permission tier so a toolkit can gate them before calling.
+
+- **An MCP server.** `mcp_server.py` exposes both services as
+  [Model Context Protocol](https://modelcontextprotocol.io) tools, over stdio
+  (`rag mcp` on Windows) or streamable HTTP (`--http`; the container serves it on
+  `:8053`). Named tools cover the frequent calls (search, query, compare, a
+  chunk, a job's progress, the engines), and a dispatcher per permission tier
+  reaches the other JSON routes. Each tool carries its tier as MCP annotations,
+  and the mutating and destructive ones make Claude Code ask before every call.
+  It is a plain HTTP client of the two services and never loads the pipeline.
+  See **[MCP server](docs/mcp.md)**.
+- **A request guard.** Both services, and the MCP server over HTTP, accept only
+  a loopback `Host` (or one listed in `security.allowed_hosts`) and refuse a
+  state-changing request from a foreign `Origin`. Set `RAG_API_TOKEN` and every
+  request also needs `Authorization: Bearer <token>`, apart from `GET /health`,
+  CORS preflights and the console's page shell. The token decides who may call;
+  the tiers say what a caller should confirm first. See
+  **[Security](docs/api.md#security)**.
+- **An engines map.** `GET :8052/api/engines` lists every engine per component,
+  with whether it is available now, whether it can be switched, and what a
+  switch costs (per call, per job, a restart, a build or a re-embed).
+  `POST /api/engines/set` makes a checked, persistent switch and never restarts
+  anything itself.
+
 See **[Agent integration](docs/agents.md)**.
 
 ## Evaluation — honest by design
 
-Two harnesses, for different questions. **The bench** (`python main.py bench …`)
-scores retrieval *per pipeline configuration* against labelled questions, which is
-what lets it say which component helps. **The golden suite** (`python main.py
-eval …`, further down) is the older one: cheap regression checks, and still the
-only home of the answer and calibration tiers.
+**The bench** (`python main.py bench …`) scores retrieval *per pipeline
+configuration* against labelled questions, which is what lets it say which
+component helps. Its answer tier (`bench run --answers`, then `bench judge`)
+grades generated answers for nuggets, citations and abstention.
 
 ### The bench: which component helps?
 
@@ -281,8 +325,8 @@ python main.py bench report eval/runs/<run>   # re-render a finished run's score
   (BM25, dense, hybrid, scope routing, the code lanes, the cross-encoder, HyDE);
   leave-one-out removes each in turn from the full pipeline; the factorial runs
   every subset, which is the input to an exact Shapley split of each component's
-  contribution. The report renders the ladder today; the Shapley computation exists
-  in `eval/bench/stats.py` but is not yet rendered.
+  contribution. The report renders the ladder; the Shapley computation exists in
+  `eval/bench/stats.py` but is not yet rendered.
 - **Paired statistics.** Every mean carries a bootstrap interval with a fixed seed.
   A-versus-B comparisons are paired on the same questions, and a ladder step is
   called real only when its paired 95% interval excludes zero. A suite with few
@@ -307,50 +351,10 @@ the current default, and only then check that it holds on test. This README quot
 no bench results. [`docs/evaluation.md`](docs/evaluation.md) has the details, and
 says what the bench cannot do yet.
 
-### The golden suite
-
-It predates the bench. A labelled suite (`eval/golden_queries.yaml`) scored automatically in three
-tiers, each one clear about what it can and cannot prove. Every run writes a
-JSON result and a markdown scorecard, and **every metric reports the number of
-questions it was actually scored over** — a metric with no ground truth reports
-`not scored`, never a confident zero.
-
-| Tier | Metrics | Needs |
-|---|---|---|
-| **1 · Retrieval** | hit-rate@k, **MRR**, **recall@k** over expected source files, **scope precision / recall**, routing accuracy | nothing but the index — runs offline in minutes |
-| **2 · Answer** | keyword recall, **citation validity** (`[n]` markers that actually resolve), **groundedness floor**, citation support, answered rate | generation endpoint |
-| **3 · Calibration** | correctness bucketed by the answer's own HIGH/MEDIUM/LOW line, plus the HIGH−LOW `gap` | generation endpoint |
-
-The **groundedness floor** is the part worth defending: it is deterministic and
-needs no LLM. For each cited sentence it measures content-word n-gram overlap
-with the chunk that sentence points at, and reports the worst-scoring sentence
-by name. High overlap doesn't prove a claim is right — but *low* overlap means a
-sentence barely resembles the source it cites, which is the exact shape of a
-fabricated citation. It also catches dangling markers (a `[9]` against a top-7
-context), which generators otherwise drop silently.
-
-An optional `--judge` tier adds LLM-as-judge correctness against a `gold_answer`
-label, explicitly marked **advisory**: a language model grading a language model
-is useful for ranking two runs against each other, not as ground truth — and
-when a question has no gold answer the judge's score is *discarded* rather than
-recorded.
-
-```bash
-python main.py eval --retrieval-only     # tier 1 only: offline, minutes, no LLM
-python main.py eval                      # all three tiers
-python main.py eval --judge              # + the advisory LLM-judge pass
-```
-
-`--judge-export` writes a JSONL bundle (question, answer, and the text of the
-chunks the answer actually cited) that any external grader can score;
-`--judge-import` merges the scores back and rebuilds every tier. A partial
-scores file is refused rather than quietly averaged.
-
 ## Swapping the LLM backend
 
-Generation, HyDE and the eval judge each resolve through a **provider registry**
-in `config.yaml`, so the backend is a one-word change and different roles can
-run on different providers (generate locally, judge with something stronger):
+Generation resolves through a **provider registry** in `config.yaml`, so the
+backend is a one-word change:
 
 ```yaml
 providers:
@@ -369,6 +373,9 @@ OpenAI-compatible `/v1/chat/completions` or an Anthropic-compatible endpoint
 drops in the same way. **Keys are never stored in `config.yaml`** — a provider
 names the environment variable that holds its key, and the console's Settings
 tab shows which providers have their key set without ever displaying the value.
+Images go only to an entry marked `vision: true`, which is how the Graph tab's
+suggest-label can show a model an image node; the client refuses images for any
+other entry.
 
 ## Quickstart
 
@@ -400,7 +407,7 @@ python -m uvicorn serve_api:app --host 127.0.0.1 --port 8051   # warm JSON API
 python -m uvicorn manage_api:app --host 127.0.0.1 --port 8052  # Corpus Ledger console
 
 # 6. Measure
-python main.py eval --retrieval-only             # fast offline regression
+python main.py bench run --configs ladder        # per-component scorecard (needs labelled questions)
 ```
 
 Full local-only setup (no cloud key) is in [`RUN_LOCAL.md`](RUN_LOCAL.md);
@@ -415,76 +422,123 @@ mkdocs serve        # http://127.0.0.1:8000
 
 ## Run it anywhere with Docker
 
-Docker deployment uses the separately packaged `rag-docker-bundle` tree, which
-contains the Compose file, Dockerfile, container config, and this source under
-`app/`. A plain source clone does not contain that scaffold. Once unpacked, it
-runs both services plus a generation backend with **two commands** — no Python
-or venv setup:
+The container stack is versioned with the code under [`deploy/`](deploy/):
+`deploy/docker/` holds the Dockerfile, the Compose files, the entrypoint, the
+healthcheck and the generator for the container config, and `deploy/k8s/` holds
+the same stack as Kubernetes manifests. From a source clone, with Docker running
+(the config generator needs only a Python with PyYAML):
 
 ```bash
-docker compose up --build -d     # query API :8051 · console :8052 · generation :3001
+cd deploy/docker
+cp .env.example .env              # set RAG_HOST_HOME and ENCRYPTION_KEY
+python make_docker_config.py ../../config.example.yaml config.docker.yaml
+docker compose -p noetrix up --build -d   # query API :8051 · console :8052 · MCP :8053 · generation :3001
 ```
 
-Two heavy extras are **opt-in and independently stoppable**, so a laptop can
-reclaim their memory when they are idle:
+`-p noetrix` names the Compose project, so its volumes are `noetrix_*` rather
+than named after the folder; give it to every later command run from
+`deploy/docker/`, or set `COMPOSE_PROJECT_NAME=noetrix` in `.env`. Two heavy
+extras are **opt-in and independently stoppable**, so a laptop can reclaim their
+memory when they are idle:
 
 ```bash
-docker compose --profile ocr    up -d --build paddleocr   # PaddleOCR for scanned PDFs
-docker compose --profile rerank up -d rerank              # external reranker on /v1/rerank
-docker compose stop paddleocr                             # give the RAM back
+docker compose -p noetrix --profile ocr    up -d --build paddleocr   # PaddleOCR for scanned PDFs
+docker compose -p noetrix --profile rerank up -d rerank              # external reranker on /v1/rerank
+docker compose -p noetrix stop paddleocr                             # give the RAM back
+```
+
+A **release archive** carries the same stack in a flat layout for a machine that
+has Docker and no checkout, so it needs no Python or venv at all: its config is
+already generated, and a launcher checks Docker, fills `.env`, starts the stack
+and waits until it is ready. A cold archive holds the code with no corpus, no
+indexes and no keys, for a fresh install; the with-data archive also carries a
+corpus and its prebuilt indexes. Once unpacked:
+
+```bash
+cd rag-docker-bundle
+sh start.sh                                          # macOS, Linux
+powershell -ExecutionPolicy Bypass -File start.ps1   # Windows
 ```
 
 On a machine with an NVIDIA GPU, [`ocr-sidecar/`](ocr-sidecar/) holds the same
-OCR sidecar built against CUDA and PaddleOCR 3.x, as its **own** compose
-project — same port, same contract, but the recognition models live in VRAM
-instead of system RAM, and its lifecycle is independent of the query stack:
+OCR sidecar built against CUDA, as its **own** compose project — same port,
+same contract, but the recognition models live in VRAM instead of system RAM,
+and its lifecycle is independent of the query stack:
 
 ```bash
 cd ocr-sidecar && docker compose -f docker-compose.gpu.yml up -d --build
 ```
 
-That sidecar serves **two** engines, chosen per request: `ocr` (PP-OCRv6
+That sidecar serves its engines per request: `ocr` (PP-OCRv6
 detect-and-recognise — plain text, seconds per page, the default) and `vl`
 (PaddleOCR-VL, a 0.9B document model that returns markdown with LaTeX formulas
 and real tables). The default is measured, not assumed: `vl` costs ~30x the
 time and 7x the VRAM and transcribes ordinary prose slightly *worse*, so it is
 worth choosing only where a page's structure is the information.
 
-See [`docs/deployment-docker.md`](docs/deployment-docker.md) for the full
-walkthrough and [`ocr-sidecar/README.md`](ocr-sidecar/README.md) for the
-benchmark behind that choice.
+See [`deploy/README.md`](deploy/README.md) for how a checkout, the archives and
+the cluster manifests relate, [`docs/deployment-docker.md`](docs/deployment-docker.md)
+for the archive walkthrough, and [`ocr-sidecar/README.md`](ocr-sidecar/README.md)
+for the benchmark behind that choice.
+
+## Versions and release notes
+
+The version is set once, in [`VERSION`](VERSION). A release bumps it, adds its
+entry to [`CHANGELOG.md`](CHANGELOG.md) and moves the version line in each
+agent skill, all in one commit, and a test fails when any of them disagree. Both
+APIs report the running version (`GET /health` adds the commit the query API
+started from), and the console's header chip shows what each part of an install
+is running beside the release notes. The documentation site renders the
+changelog as **[Release notes](docs/release-notes.md)**.
 
 ## Repository layout
 
 ```
+VERSION                             # the product version
+CHANGELOG.md                        # what each release changed, newest first
 config.yaml / config.example.yaml   # every tunable: providers, top-k, presets, paths, routing
-ocr-sidecar/                        # the OCR sidecar's source: one server.py, CPU + GPU images
 .env.example                        # secrets template (real .env is gitignored)
-main.py                             # CLI: index | ingest-* | query | chat | eval | bench | serve
+main.py                             # CLI: index, the ingest lanes, query, chat, bench, serve, …
 serve_api.py                        # warm query API (:8051)
 manage_api.py                       # Corpus Ledger console backend (:8052)
+mcp_server.py                       # MCP server: both services as agent tools (stdio or HTTP)
 webui/index.html                    # the console front-end
 app.py                              # optional Streamlit interface
+rebuild_bm25.py, delete_doc.py, …   # maintenance scripts; docs/operations.md lists them
 src/
   ingestion/   # obsidian_parser, pdf_loader (OCR-capable), ipynb_loader, code_loader,
-               # ocr_vlm (vision-model OCR), ocr_paddle (PaddleOCR sidecar), web_import
-  embeddings/  # embedder — builds ChromaDB + bm25s from chunk JSONL
+               # canvas_loader + canvas_edit + canvas_label (the Graph tab's suggest label),
+               # ocr_scan (which pages need OCR), ocr_vlm (vision-model OCR),
+               # ocr_paddle (PaddleOCR sidecar), web_import
+  embeddings/  # embedder (ChromaDB + bm25s from chunk JSONL), the embedder registry,
+               # the record of which embedder built a collection, resumable re-embed,
+               # graph_twin (graph mode's own seed index)
   retrieval/   # retriever (hybrid + RRF + code lane), reranker (+ experimental laya_reranker),
-               # relevance_gate, hyde, scope, context_expand
+               # relevance_gate, hyde (+ disk cache), scope, decompose, diversity,
+               # context_expand, graph_expand, omnisearch_client, sparse_tantivy
   generation/  # generator — grounded answers + citation verification
-  llm/         # unified OpenAI-/Anthropic-compatible client
+  llm/         # unified OpenAI-/Anthropic-compatible client, and the bench's replay store
   prompts/     # versioned YAML prompt templates + loader
-  utils/       # config_loader (comment-preserving persistence), logger
+  ocr_studio/  # the console's OCR tab: page state, regions, engines, rendering, ingest
+  mcp_bridge/  # the MCP server's route catalog, tools and HTTP client
+  utils/       # config_loader (comment-preserving persistence), http_guard (the request
+               # guard), release (the version), citations, logger, …
+  engines_map.py  # every swappable engine per component, behind /api/engines
   pipeline.py  # wires the query path together
-eval/          # golden suite + tiered runner (metrics.py); bench/ is the per-configuration
-               # harness, configs.yaml its named configurations
+eval/          # bench/ is the per-configuration harness, configs.yaml its named
+               # configurations; the question sets are local data
+tools/laya/    # the Laya pair export and its Kaggle notebook
 tests/         # pytest suite
 docs/          # MkDocs documentation site
+deploy/        # the container stack: docker/ (Compose), k8s/ (kustomize); see deploy/README.md
+ocr-sidecar/   # the OCR sidecar's source: one server.py, CPU + GPU images
+embed-sidecar/ # a model on a GPU behind an OpenAI-compatible API: embeddings, or rerank
+landing/       # the project site
 ```
 
 ## Design notes
 
-- **Content-addressed IDs.** `doc_id = sha256(source_file + text[:500])[:16]` —
+- **Content-addressed IDs.** `doc_id = sha256(source_file + "::" + text[:500])[:16]` —
   re-ingesting is idempotent; changing chunk *text* orphans vectors (there's a
   swap playbook for that), while metadata-only fixes go through an in-place
   retag with no re-embedding.

@@ -17,7 +17,8 @@ REM
 REM   COMMANDS (each BLOCKS its window; run each in a SEPARATE terminal):
 REM     rag serve              = start the warm HTTP endpoint on :8051
 REM     rag console            = start the management console on :8052 (browser)
-REM     rag web                = start the Streamlit web app (browser UI)
+REM     rag mcp                = MCP server for agents over stdio; add --http for HTTP
+REM     rag web               = start the Streamlit web app (browser UI)
 REM     rag query "..."        = one-shot CLI query (cold, human use)
 REM     rag chat               = interactive warm CLI loop
 REM     rag [anything]         = forwarded to: python main.py [anything]
@@ -42,6 +43,7 @@ if not exist "%VENV%\Scripts\activate.bat" (
 )
 
 call "%VENV%\Scripts\activate.bat"
+set "PYEXE=%VENV%\Scripts\python.exe"
 if not "%PROJECT%"=="" cd /d "%PROJECT%"
 
 if /i "%~1"=="serve" (
@@ -58,13 +60,20 @@ if /i "%~1"=="console" (
     goto :end
 )
 
+if /i "%~1"=="mcp" (
+    REM MCP server for agents. This branch must print NOTHING: over stdio,
+    REM stdout is the protocol channel. --http serves HTTP on mcp.port instead.
+    "%PYEXE%" mcp_server.py %2 %3 %4
+    goto :end
+)
+
 if /i "%~1"=="web" (
     echo [rag.bat] Starting Streamlit app - a browser tab will open ...
     streamlit run app.py
     goto :end
 )
 
-REM Everything else is forwarded straight to main.py (query, chat, eval, ingest-*, index).
+REM Everything else is forwarded straight to main.py (query, chat, bench, ingest-*, index).
 python main.py %*
 
 :end

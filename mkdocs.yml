@@ -47,10 +47,12 @@ nav:
   - Usage: usage.md
   - API reference: api.md
   - Agent integration: agents.md
+  - MCP server: mcp.md
   - Evaluation: evaluation.md
   - Laya fine-tune: laya-finetune.md
   - Operations: operations.md
   - Docker deployment: deployment-docker.md
+  - Release notes: release-notes.md
 
 markdown_extensions:
   - admonition
@@ -63,7 +65,8 @@ markdown_extensions:
   - pymdownx.highlight:
       anchor_linenums: true
   - pymdownx.inlinehilite
-  - pymdownx.snippets
+  - pymdownx.snippets:
+      check_paths: true
   - pymdownx.details
   - pymdownx.superfences:
       custom_fences:

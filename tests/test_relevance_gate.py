@@ -469,7 +469,7 @@ def test_the_pipeline_build_wires_the_configured_gate(monkeypatch):
 def _client(monkeypatch, rag):
     monkeypatch.setitem(S._STATE, "rag", rag)
     monkeypatch.setattr(S, "_HISTORY", deque(maxlen=50))        # /query and /search append to it
-    return TestClient(S.app)               # never entered: the lifespan would build the real pipeline
+    return TestClient(S.app, base_url="http://127.0.0.1")   # never entered: the lifespan would build the real pipeline
 
 
 def test_gate_and_gate_threshold_reach_rag_search_from_every_endpoint(monkeypatch):

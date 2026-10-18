@@ -85,5 +85,6 @@ do this — follow the same pattern for any new one.
 python -m pytest tests/ -q
 ```
 
-The suite guards chunking (including a past bug where a splitter silently dropped text
-past a size threshold in paragraph-less prose) plus job and loader behaviour.
+The suite covers chunking (a splitter must not drop text, even from a paragraph-less
+wall of prose longer than a chunk), the loaders and jobs, both APIs' contracts, the
+bench, the MCP server, the deploy assets and archives, and the versioning rule.

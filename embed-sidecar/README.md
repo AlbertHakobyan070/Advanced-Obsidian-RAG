@@ -33,7 +33,7 @@ One file (`server.py`, standard-library HTTP server), one `requirements.txt`.
 ## Create the venv (once)
 
 The measured stack (torch 2.14.1+cu126, sentence-transformers 6.1.0,
-transformers 5.19.0, torchvision 0.29.1+cu126) is what `G:\eg2_bench\gpu_venv`
+transformers 5.19.0, torchvision 0.29.1+cu126) is what `<gpu-venv>`
 ran. Use a venv of its own, never the project venv:
 
 ```powershell
@@ -42,7 +42,7 @@ uv pip install --python <runtime-dir>\.venv-embed\Scripts\python.exe -r embed-si
 ```
 
 `uv pip compile embed-sidecar/requirements.txt` resolves to exactly those
-versions. (This README's commands were run against `G:\eg2_bench\gpu_venv`; the
+versions. (This README's commands were run against `<gpu-venv>`; the
 fresh install above was resolved but not performed.)
 
 ## Launch
@@ -141,7 +141,7 @@ $env:CUDA_VISIBLE_DEVICES = "1"            # the headless card
 $env:EMBED_PORT           = "8101"         # retrieval.rerank_http.base_url
 $env:HF_HOME      = "<runtime-dir>\.cache\huggingface"
 $env:HF_HUB_CACHE = "<runtime-dir>\.cache\huggingface\hub"
-G:\eg2_bench\gpu_venv\Scripts\python.exe embed-sidecar\server.py
+<gpu-venv>\Scripts\python.exe embed-sidecar\server.py
 ```
 
 ```

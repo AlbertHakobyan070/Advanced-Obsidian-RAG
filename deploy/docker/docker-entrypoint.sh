@@ -101,6 +101,13 @@ supervise_serve_api() {
 
 supervise_serve_api &
 
+# The MCP server (mcp_server.py --http, on mcp.port) for agents. Optional, so
+# no supervisor loop: a crash shows up as "connection refused" on its port, with
+# the reason in ${LOG_DIR}/mcp_server.log, and healthcheck.sh ignores it on
+# purpose. Add a loop like serve_api's if it ever crashes in practice.
+echo "[rag] starting MCP server (streamable HTTP at /mcp) ..."
+python mcp_server.py --http --host 0.0.0.0 &
+
 echo "[rag] starting management console on :${CONSOLE_PORT} ..."
 # Foreground: its exit stops the container, same as before.
 exec python -m uvicorn manage_api:app --host 0.0.0.0 --port "${CONSOLE_PORT}"

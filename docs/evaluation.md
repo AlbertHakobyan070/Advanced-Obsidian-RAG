@@ -1,19 +1,14 @@
 # Evaluation
 
-Two harnesses live in this repo, built for different questions:
+One harness lives in this repo: **the bench** (`eval/bench/`, run with
+`python main.py bench …`). It scores retrieval, per pipeline *configuration*,
+against labelled questions whose gold is a source locator, and is built to say
+which *component* helps, and by how much. Its questions carry gold sources, it
+varies the pipeline per call, and every run records which pipeline it measured.
+An answer tier (`run --answers`, then `bench judge`) grades generated answers for
+nuggets, citations and abstention; see "What exists, and what does not yet" below.
 
-| | Measures | Run with |
-|---|---|---|
-| **The bench** (`eval/bench/`) | Retrieval, per pipeline *configuration*, against labelled questions whose gold is a source locator. Built to say which *component* helps, and by how much. | `python main.py bench …` |
-| **The golden suite** (`eval/golden_queries.yaml`) | Retrieval, answer and calibration tiers over a fixed query list. Cheap regression checks. | `python main.py eval …` |
-
-The bench supersedes the golden suite's **retrieval** tier: its questions carry
-gold sources, it varies the pipeline per call, and every run records which
-pipeline it measured. It does not yet cover what the golden suite's answer and
-calibration tiers cover (generated answers, citations, confidence), so those stay
-on the golden suite until the bench grows an answer tier.
-
-Neither harness certifies that an answer is correct. Both report what they
+The bench does not certify that an answer is correct. It reports what it
 measured and over how many questions.
 
 ## The bench
@@ -176,7 +171,7 @@ configurations:
 
 | Spec | Runs |
 |---|---|
-| `ladder` (default) | One rung per added component, cumulative: BM25 alone (`R0-bm25`) and dense alone (`R1-dense`), then hybrid (`R2-hybrid`), then + scope routing and the metadata boost (`R3-routing`), + the code lanes and code preset (`R4-code`), + the cross-encoder (`R5-rerank`), + HyDE (`R6-hyde`, the shipped default). |
+| `ladder` (default) | One rung per added component, cumulative: BM25 alone (`R0-bm25`) and dense alone (`R1-dense`), then hybrid (`R2-hybrid`), then + scope routing and the metadata boost (`R3-routing`), + the code lanes and code preset (`R4-code`), + the cross-encoder (`R5-rerank`), + HyDE (`R6-hyde`; the shipped config leaves it off). |
 | `loo` | **Leave-one-out.** The full pipeline (`full`), then the full pipeline minus each factor in turn (`-sparse`, `-dense`, `-routing`, `-code`, `-rerank`, `-hyde`). |
 | `factorial` | **Every subset** of the factors, named `F:<factors joined by +>` (`F:none` is the empty set). A subset with neither dense nor sparse has no lane to search and scores 0 without searching. |
 | `routing` | **Routing split.** `routing` is two mechanisms, so this separates them at the R5 level (HyDE off): `F-full` (scope lanes + metadata boost), `F-noscope` (boost only), `F-noboost` (scope lanes only), `F-none` (neither). Each variant is paired against `F-full` in the report. Switched by the per-call `scope_lanes` and `metadata_boost` keys. |
@@ -284,7 +279,7 @@ completeness or nDCG. Only answerable questions are scored.
   the factors could be switched on, an order-independent share where the ladder
   gives only one order.
 
-What exists today: the runner scores each of these sets and records every
+What exists: the runner scores each of these sets and records every
 configuration's numbers in `summary.json`, and the report renders the ladder's
 paired steps. **`bench report` does not yet render leave-one-out deltas or Shapley
 values.** `shapley()` is implemented and tested, and a factorial run's `summary.json`
@@ -328,7 +323,7 @@ judge, under the same rules as any other.
   threshold, and a threshold means something only for one scorer. The named
   configurations `gate-rerank-score` and `gate-laya` carry *starting* thresholds,
   not tuned ones. The intended protocol is a sweep on the **dev** split, with the
-  chosen threshold then reported once on test. A sweep today is several named
+  chosen threshold then reported once on test. A sweep is several named
   configurations that differ only in `gate_threshold` (add entries to
   `eval/configs.yaml`), run together so each is scored on the same questions. What
   the bench does not have yet are the metrics a sweep is really about: the share of
@@ -354,73 +349,21 @@ beyond the tolerance the spec sets.
 ### What exists, and what does not yet
 
 Built: `sample`, `validate` (with the review cache), `split`, `run` (generated and
-named configurations) and `report`, plus the review API.
+named configurations) and `report`, plus the review API. The answer tier is built
+as well: `run --answers` also generates an answer per row, from the first
+`retrieval.rerank_top_k` chunks, and `judge <run_dir> --llm record|replay:<store>`
+grades those answers through a pinned replay store (use a different model from the
+one that wrote them): nugget recall, citation precision, abstention accuracy,
+calibration by the stated confidence, and the first layer that lost each
+question. Judged numbers are advisory until a labelled sample has measured how
+well the judge agrees with the owner.
 
-Specified in the design but **not built**: answer-side metrics and a pinned judge
-(nugget recall, faithfulness, abstention accuracy, calibration); isolation probes
-(feeding a component oracle input from the layer below); per-question failure
-attribution; `bench compare`; rendering of leave-one-out and Shapley results; a
-stage cache that would make the factorial cheap (today each configuration runs the
-whole question set); and console dashboards with a job kind for runs.
+Specified in the design but **not built**: isolation probes (feeding a component
+oracle input from the layer below); an attribution that tells a pool miss from a
+rerank miss ("retrieval" covers both); `bench compare`; rendering of leave-one-out and
+Shapley results; a stage cache that would make the factorial cheap (each
+configuration runs the whole question set); and console dashboards with a job kind
+for runs.
 
 The design and the plans behind this live in `docs/superpowers/` (local-only, not
 part of the public release).
-
-## The golden suite (v1)
-
-Quality is also measured with the labelled suite in `eval/golden_queries.yaml`. Read that
-file for the current cases and coverage; do not rely on a copied query count. Entries
-can label expected domains, groups, source files, scope routing, keywords, and gold
-answers independently, so missing labels drop out of the corresponding metric instead
-of becoming false zeroes.
-
-```bash
-python main.py eval --retrieval-only # retrieval tier only; no generation backend
-python main.py eval                  # retrieval, answer, and calibration tiers
-python main.py eval --judge          # add the advisory LLM-judge fields
-```
-
-### What each tier measures
-
-| Tier | Measures |
-|---|---|
-| Retrieval | hit-rate@k, MRR, labelled-source recall@k, scope precision/recall, and group routing |
-| Answer | keyword recall, citation validity, deterministic groundedness floor, optional citation-auditor support, and answered rate |
-| Calibration | whether stated confidence tracks keyword recall, groundedness, and optional judge correctness |
-
-`--judge` adds advisory correctness and groundedness scores. A gold answer enables
-reference-based correctness; without one, in-process judge correctness is not treated
-as a meaningful score. Judge failures remain visible in the report.
-
-### Read these honestly
-
-The automatic tiers are **proxy metrics**, and they are framed that way on purpose:
-
-- **Keyword recall** checks that expected terms *appear* — not that the explanation is
-  correct.
-- **Retrieval hit** checks that the expected *domain* landed in the top-k — not that the
-  exact passage did. (The bench's gold locators do check the passage.)
-
-They exist to **catch regressions** cheaply and repeatedly. They do **not** certify
-answer faithfulness. The LLM judge is advisory too. Three other mechanisms help, and
-none replaces reading the cited source:
-
-1. the **second-pass citation auditor**, which checks each citation supports its sentence;
-2. the **per-answer confidence line**; and
-3. the citations themselves, which point straight back to the source.
-
-### What misses tell you
-
-A miss can be informative rather than a bug. Cross-domain questions may retrieve the
-domain where the material actually lives, and a small code artifact can lose to prose
-that repeats the same terms. Inspect the per-query rows before tuning a global default.
-
-### Reproducibility
-
-- `--retrieval-only` removes the LLM from the loop, so retrieval numbers are stable and
-  fast to regenerate.
-- For generation-side numbers, pin `generation.model` so runs are comparable.
-- Each run writes structured and Markdown reports; compare them explicitly rather than
-  hardcoding a copied baseline in documentation.
-- `--judge-export` / `--judge-import` allow an external model to grade a complete
-  bundle without giving that model access to the vault or local service.

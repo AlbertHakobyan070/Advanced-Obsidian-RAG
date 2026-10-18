@@ -75,7 +75,7 @@ class HyDE:
     def __init__(
         self,
         llm: LLMClient,
-        enabled: bool = True,
+        enabled: bool = False,
         max_tokens: int = 200,
         skip_signals: list[str] | None = None,
         cache: HydeCache | None = None,
@@ -103,7 +103,7 @@ class HyDE:
                  if hc.get("enabled") else None)
         return cls(
             llm=llm,
-            enabled=cfg.get("retrieval.use_hyde", True),
+            enabled=cfg.get("retrieval.use_hyde", False),
             max_tokens=200,
             skip_signals=cfg.get("retrieval.hyde_skip_signals", []),
             cache=cache,

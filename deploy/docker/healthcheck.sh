@@ -12,6 +12,8 @@
 #
 # The console probe is /docs: FastAPI's built-in page, a ~1 KB static string, no
 # disk, no index. (/ serves the 360 KB UI and /api/overview walks the corpus.)
+# /health needs no token, but /docs does when RAG_API_TOKEN is set, so the console
+# probe sends it then.
 set -eu
 
 API="http://127.0.0.1:${RAG_PORT:-8051}"
@@ -23,7 +25,11 @@ case "${1:-ready}" in
     ;;
   live)
     curl -fsS --max-time 4 -o /dev/null "$API/health"
-    curl -fsS --max-time 4 -o /dev/null "$CONSOLE/docs"
+    if [ -n "${RAG_API_TOKEN:-}" ]; then
+      curl -fsS --max-time 4 -o /dev/null -H "Authorization: Bearer ${RAG_API_TOKEN}" "$CONSOLE/docs"
+    else
+      curl -fsS --max-time 4 -o /dev/null "$CONSOLE/docs"
+    fi
     ;;
   *)
     echo "usage: healthcheck.sh [ready|live]" >&2
