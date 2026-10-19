@@ -178,7 +178,9 @@ The console's **Settings → Generation backends** panel does all of this with
 buttons, including writing a key into the mounted `.env` so it survives a
 rebuild. Never put a key in the YAML.
 
-The bundled proxy has its own dashboard at **http://127.0.0.1:3001**.
+The bundled proxy has its own dashboard at **http://127.0.0.1:3001**. Answers
+through it also need the proxy's own key, from that dashboard's **Keys** page, in
+`FREELLMAPI_API_KEY`; without it every chat call gets `401 Invalid API key`.
 Retrieval-only (`/search`) needs no generation provider at all.
 
 !!! warning "`[decrypt failed]` in the proxy dashboard"

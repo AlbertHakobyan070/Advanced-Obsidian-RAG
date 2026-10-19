@@ -306,6 +306,9 @@ def test_a_scoped_canvas_run_may_not_clobber_the_canonical_file():
     with pytest.raises(ValueError):
         _build_argv("ingest_canvas", {"include_path": "10 - CANVASes",
                                       "output": "data/canvas_chunks.jsonl"})
+    with pytest.raises(ValueError):        # NTFS is case-insensitive: same file
+        _build_argv("ingest_canvas", {"include_path": "10 - CANVASes",
+                                      "output": "data/CANVAS_CHUNKS.JSONL"})
 
     # Scoped WITH its own output file is the supported shape.
     argv = _build_argv("ingest_canvas", {"include_path": "10 - CANVASes",
@@ -451,6 +454,51 @@ def test_a_run_may_not_write_another_lanes_chunk_file(default_lane_files, kind, 
         _build_argv(kind, {**_RUN[kind], "output": f"data/{file}"})
     with pytest.raises(ValueError):                   # NTFS is case-insensitive: same file
         _build_argv(kind, {**_RUN[kind], "output": f"data/{file.upper()}"})
+
+
+# NTFS opens a file under other spellings than the name these guards compare: Win32
+# drops a segment's trailing dots ("chunks.jsonl." is chunks.jsonl, "data./" is data/),
+# "x::$DATA" is x's own data stream, and "./data" is data/ too. Each one got past the
+# by-name checks, and a "Data/" head was not even anchored to the active vault, so the
+# job reached ROOT/data. DATA_DIR is an empty folder here: where data/ holds the lane
+# files, resolve() maps an anchored alias back to the real name and hides the hole.
+_ALIASES = ("data/{}.", "Data/{}.", "data/{}::$DATA", "Data/{}::$DATA",
+            "./data/{}.", "data./{}.")
+
+
+@pytestmark_console
+@pytest.mark.parametrize("kind,file", _FOREIGN)
+def test_no_windows_alias_of_a_lane_file_gets_through(
+        default_lane_files, monkeypatch, tmp_path, kind, file):
+    import manage_api
+    monkeypatch.setattr(manage_api, "DATA_DIR", tmp_path)
+    for alias in _ALIASES:
+        with pytest.raises(ValueError):
+            _build_argv(kind, {**_RUN[kind], "output": alias.format(file)})
+
+
+@pytestmark_console
+@pytest.mark.parametrize("head", ["data", "Data"])
+def test_an_empty_segment_does_not_reach_the_drive_root(monkeypatch, tmp_path, head):
+    """DATA_DIR / "/x" keeps only DATA_DIR's drive, so "data//x" was written to the
+    drive root; once a "Data/" head is anchored too, "Data//x" would follow it."""
+    import manage_api
+    monkeypatch.setattr(manage_api, "DATA_DIR", tmp_path)
+    with pytest.raises(ValueError):
+        _build_argv("ingest_pdfs", {"output": f"{head}//loose_chunks.jsonl"})
+
+
+@pytestmark_console
+def test_a_data_head_in_any_case_lands_in_the_active_vault(default_lane_files,
+                                                           monkeypatch, tmp_path):
+    """NTFS reads "Data/" as "data/". Left project-relative, a whole-lane run naming
+    Data/pdf_chunks.jsonl wrote ROOT/data/pdf_chunks.jsonl: after a vault switch,
+    that is the PREVIOUS vault's pdf lane file."""
+    import manage_api
+    monkeypatch.setattr(manage_api, "DATA_DIR", tmp_path)
+    for head in ("Data", "DATA"):
+        argv = _build_argv("ingest_pdfs", {"output": f"{head}/pdf_chunks.jsonl"})
+        assert Path(argv[argv.index("--output") + 1]) == tmp_path / "pdf_chunks.jsonl"
 
 
 @pytestmark_console

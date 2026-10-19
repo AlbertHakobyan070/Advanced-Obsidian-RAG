@@ -152,11 +152,13 @@ embedding:
 providers:
   freellmapi:
     label: "FreeLLMAPI proxy"
-    description: "Local proxy that fronts free-tier providers; keys live in its own dashboard."
+    description: "Local proxy fronting free-tier providers. Chat needs FREELLMAPI_API_KEY: the proxy's own key, from its dashboard's Keys page."
     kind: openai
     base_url: "http://localhost:3001/v1"
     model: "auto"
     api_key_env: FREELLMAPI_API_KEY
+    # Optional for startup only: the query API starts and searches without it.
+    # The proxy answers every chat call 401 "Invalid API key" until it is set.
     api_key_optional: true
 
   # ---- hosted, OpenAI-compatible ----

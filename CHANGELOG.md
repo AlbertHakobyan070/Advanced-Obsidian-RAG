@@ -15,6 +15,26 @@ reconstructed on 2026-10-14 from the commit history and the session notes,
 one per shipped milestone, so read them as a map of when things landed rather
 than as release-day notes.
 
+## [0.29.1] - 2026-10-19
+
+### Fixed
+- `GET /api/vaults` answered 500 on a fresh checkout, before `data/` existed:
+  saving the vault registry now creates its folder.
+- The console no longer overwrites a vault registry it cannot read. Only a
+  missing file means "no vaults yet"; an unreadable one is an error, where it
+  used to be read as empty and saved back over every other vault.
+- The lane guards refuse other spellings of a chunk file that Windows opens as
+  the same file: a case variant (`CHUNKS.JSONL`), a trailing dot
+  (`chunks.jsonl.`), an alternate data stream (`chunks.jsonl::$DATA`) and an
+  empty path segment (`data//x`, which resolves to the drive root). `Data/`
+  is anchored to the data folder like `data/`.
+
+### Changed
+- The FreeLLMAPI proxy needs its own key (`FREELLMAPI_API_KEY`, from the Keys
+  page of its dashboard) for chat. Without it the query API still starts and
+  searches, but every generated answer fails with 401; the example config,
+  `.env` templates and setup guides now say so.
+
 ## [0.29.0] - 2026-10-19
 
 ### Added

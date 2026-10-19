@@ -291,6 +291,13 @@ def _safe_rel(p: str, *, default_dir: str = "data") -> str:
         raise ValueError("empty path")
     if ".." in p.split("/") or re.match(r"^([A-Za-z]:|/)", p):
         raise ValueError(f"path must be project-relative: {p!r}")
+    # Windows opens a file under other spellings than the name the lane guards
+    # compare: it drops a segment's trailing dots ("chunks.jsonl." is chunks.jsonl,
+    # "data./" is data/) and reads "x::$DATA" as x itself. An empty segment
+    # ("data//x") makes the tail rooted, and DATA_DIR / "/x" is the drive root.
+    if ":" in p or any(not s or s.endswith(".") for s in p.split("/")):
+        raise ValueError(f"path must name its file plainly (no ':', no empty "
+                         f"segment, no segment ending in '.'): {p!r}")
     if "/" not in p:
         p = f"{default_dir}/{p}"
     return p
@@ -314,7 +321,9 @@ def _vault_data_path(p: str, *, default_dir: str = "data") -> str:
     """
     rel = _safe_rel(p, default_dir=default_dir)
     head, _, tail = rel.partition("/")
-    if head == default_dir and tail:
+    # Any case: NTFS reads "Data/" as "data/", and left project-relative it
+    # skipped both this anchoring and resolve().
+    if head.lower() == default_dir.lower() and tail:
         return str((DATA_DIR / tail).resolve())
     return rel
 
@@ -501,8 +510,9 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
         # chunk (append upserts, it never deletes) while build_sparse_union
         # re-derives the sparse half from the JSONLs and loses the rest — a
         # silent dense/sparse drift, from a job that reported success. Same
-        # guard ingest_md carries for chunks.jsonl.
-        if prm.get("include_path") and Path(out).name == "canvas_chunks.jsonl":
+        # guard ingest_md carries for chunks.jsonl, and case-insensitive like
+        # it: on NTFS, CANVAS_CHUNKS.JSONL opens canvas_chunks.jsonl.
+        if prm.get("include_path") and Path(out).name.lower() == "canvas_chunks.jsonl":
             raise ValueError(
                 "a scoped canvas run must not write canvas_chunks.jsonl — the "
                 "loader truncates its output, so every canvas outside this "
@@ -538,7 +548,8 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
         if not prm.get("include_path"):
             raise ValueError("ingest_md requires include_path")
         out = _vault_data_path(str(prm.get("output") or ""))
-        if Path(out).name == "chunks.jsonl":
+        # Case-insensitive: on NTFS, CHUNKS.JSONL opens chunks.jsonl.
+        if Path(out).name.lower() == "chunks.jsonl":
             raise ValueError("ingest_md must not write chunks.jsonl")
         _refuse_other_lanes_file(out, "markdown")
         argv = [py, "main.py", "ingest-md",
@@ -4965,13 +4976,17 @@ _vault_lock = threading.Lock()
 
 
 def _load_vaults() -> list[dict]:
+    # Only a missing file means "no vaults yet". Anything else raises: the GET and
+    # switch routes save what they load, so [] would wipe every other vault.
     try:
         return json.loads(_VAULT_REGISTRY.read_text(encoding="utf-8"))["vaults"]
-    except Exception:
+    except FileNotFoundError:
         return []
 
 
 def _save_vaults(vaults: list[dict]) -> None:
+    # A fresh clone has no data/ until something ingests.
+    _VAULT_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
     _VAULT_REGISTRY.write_text(
         json.dumps({"vaults": vaults}, indent=2, ensure_ascii=False),
         encoding="utf-8")
