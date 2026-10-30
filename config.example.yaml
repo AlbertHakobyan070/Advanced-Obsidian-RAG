@@ -968,7 +968,7 @@ security:
 knowledge_map:
   # Where maps are staged, one folder per book and chapter. Must be OUTSIDE
   # parser.vault_path (the loader refuses otherwise).
-  staging_dir: "<runtime-dir>/canvas_maps/staging"
+  staging_dir: "data/canvas_maps/staging"
   # A run fails (nothing but its run record is written) if fewer than this share
   # of the non-hub candidate nodes end up located in the text and supported.
   min_grounded_ratio: 0.9

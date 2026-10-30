@@ -63,7 +63,7 @@ REWRITES: list[tuple[str, str, int]] = [
      '  bm25_index: "/rag_data/bm25_index.pkl"',
      1),
     # Knowledge-map staging: generated maps, outside the vault, on the volume.
-    ('  staging_dir: "<runtime-dir>/canvas_maps/staging"',
+    ('  staging_dir: "data/canvas_maps/staging"',
      '  staging_dir: "/rag_data/canvas_maps/staging"',
      1),
 

@@ -69,6 +69,14 @@ def test_the_example_config_generates_a_container_config(generator, tmp_path):
     assert tree["embedding"]["providers"]["eg2_l512"]["base_url"] == "http://embed-l512:8105/v1"
     assert tree["pdf"]["paddle_ocr"]["base_url"] == "http://paddleocr:8103"
     assert tree["paths"]["chroma_dir"] == "/rag_data/chroma_db"
+    assert tree["knowledge_map"]["staging_dir"] == "/rag_data/canvas_maps/staging"
+
+
+def test_the_example_config_names_no_machine_path():
+    """The example ships to every install, and the release sanitizer rewrites a
+    machine path in it, which moves the generator's anchor out from under it."""
+    text = (ROOT / "config.example.yaml").read_text(encoding="utf-8-sig")
+    assert not re.findall(r'"[A-Za-z]:[\\/][^"]*"', text)
 
 
 def test_a_new_loopback_url_with_no_rewrite_fails_the_build(generator, tmp_path):
