@@ -69,6 +69,7 @@ from src.ingestion.obsidian_parser import (
 from src.ingestion.pdf_loader import detect_script, should_skip_script
 from src.utils.config_loader import Config
 from src.utils.logger import get_logger
+from src.utils.provenance import ProvenanceRule, provenance_rule, stamp_generated
 
 log = get_logger(__name__)
 
@@ -171,6 +172,9 @@ def _placeholder_if_armenian(text: str, skip_scripts: set[str]) -> tuple[str, bo
 
 
 class NotebookLoader:
+    extra_skip_dirs: frozenset = frozenset()   # parser.skip_dirs, set by from_config
+    skip_roots: frozenset = frozenset()        # parser.skip_roots (lowercased), set by from_config
+
     def __init__(
         self,
         vault_path: Path,
@@ -186,6 +190,7 @@ class NotebookLoader:
         exts: set[str] | None = None,
         include_path: str | None = None,
         include_files: set[str] | None = None,
+        provenance_rule: ProvenanceRule | None = None,
     ):
         self.vault_path = Path(vault_path)
         self.output_file = Path(output_file)
@@ -199,6 +204,9 @@ class NotebookLoader:
         # metadata only, doc_ids unaffected. Same shape as the other loaders.
         self.force_domain: str | None = None
         self.force_tags: list[str] = []
+        # Its path rule stamps provenance: generated. None = no stamp (direct test
+        # constructions only); from_config passes provenance_rule(cfg).
+        self.provenance_rule = provenance_rule
         self.min_chunk = min_chunk
         self.max_chunk = max_chunk
         self.overlap = overlap
@@ -234,7 +242,7 @@ class NotebookLoader:
         figs = (cfg.path("notebooks.figures_dir") if cfg.get("notebooks.figures_dir")
                 else cfg.project_root / "data" / "notebook_figures")
         exts = cfg.get("notebooks.extensions", None)
-        return cls(
+        loader = cls(
             vault_path=Path(vault),
             output_file=out,
             min_chunk=cfg.get("notebooks.min_chunk_size", cfg.get("parser.min_chunk_size", 200)),
@@ -246,7 +254,11 @@ class NotebookLoader:
             save_figures=cfg.get("notebooks.save_figures", False),
             figures_dir=figs,
             exts={e.lower() for e in exts} if exts else None,
+            provenance_rule=provenance_rule(cfg),
         )
+        loader.extra_skip_dirs = frozenset(cfg.get("parser.skip_dirs") or [])
+        loader.skip_roots = frozenset(str(r).lower() for r in (cfg.get("parser.skip_roots") or []))
+        return loader
 
     # ---- discovery ----
 
@@ -266,8 +278,13 @@ class NotebookLoader:
         found = []
         # iter_vault_files prunes skip_parts during the walk and matches the
         # suffix, so the two filters that used to run per candidate are gone.
-        for f in iter_vault_files(self.vault_path, self.exts, skip_parts):
+        for f in iter_vault_files(self.vault_path, self.exts,
+                                  skip_parts | self.extra_skip_dirs):
             rel = f.relative_to(self.vault_path)
+            # Agent-project roots are skipped unless a run scopes a path in
+            # (the code lane's rule, code_loader.discover_files).
+            if not self.include_path and rel.parts[0].lower() in self.skip_roots:
+                continue
             if self.include_files is not None and f.name not in self.include_files:
                 continue
             if inc and inc not in rel.as_posix().lower():
@@ -523,6 +540,7 @@ class NotebookLoader:
             base_meta["has_figure"] = True
             base_meta["figure_count"] = len(fig_paths)
             base_meta["figure_images"] = ";".join(fig_paths)
+        stamp_generated(base_meta, self.provenance_rule)
 
         context = build_context_header([title], base_meta)
         # Hard piece boundaries first (ast-split code segments — E1), then the
@@ -619,6 +637,7 @@ class NotebookLoader:
 def main():
     import argparse
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from src.utils import lane_guard
     from src.utils.config_loader import load_config
 
     ap = argparse.ArgumentParser(description="Ingest native notebooks & code into RAG chunks.")
@@ -634,6 +653,7 @@ def main():
     args = ap.parse_args()
 
     cfg = load_config(args.config)
+    lane_guard.exit_if_refused(cfg, "notebooks", args.output, scoped=bool(args.exts))
     loader = NotebookLoader.from_config(cfg)
     if args.vault:
         loader.vault_path = Path(args.vault)

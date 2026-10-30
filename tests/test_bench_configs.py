@@ -127,7 +127,7 @@ def test_index_fingerprint_shape_and_bm25_sidecar(tmp_path):
                                "retrieval.cross_encoder_model": "rr-m"}.get(k, d),
         path=lambda k, d=None: {"paths.chunks_file": tmp_path / "chunks.jsonl",
                                 "paths.bm25_index": tmp_path / "bm25.pkl"}[k])
-    rag = SimpleNamespace(retriever=SimpleNamespace(
+    rag = SimpleNamespace(route_coverage=None, retriever=SimpleNamespace(
         _get_collection=lambda: SimpleNamespace(count=lambda: 7)))
     assert index_fingerprint(cfg, rag)["bm25"] is None                # no sidecar written yet
     (tmp_path / "bm25.pkl.meta.json").write_text('{"count": 5, "built_at": "t"}', encoding="utf-8")
@@ -135,3 +135,68 @@ def test_index_fingerprint_shape_and_bm25_sidecar(tmp_path):
         "dense_count": 7, "collection": "obsidian_vault", "bm25": {"count": 5, "built_at": "t"},
         "embedding": {"provider": "local", "model": "emb-m"}, "reranker": "rr-m",
         "chunk_files": chunk_files_digest(tmp_path)}
+
+
+def test_index_fingerprint_names_the_loaded_route_sidecar(tmp_path):
+    """A GM-route arm's numbers depend on the pointer sidecar: the run record names the
+    loaded one (coverage, built_at, sha256). With none loaded, the record is as before."""
+    import hashlib
+    (tmp_path / "chunks.jsonl").write_text("{}\n", encoding="utf-8")
+    cfg = SimpleNamespace(
+        get=lambda k, d=None: {"embedding.provider": "local", "embedding.local_model": "emb-m"}.get(k, d),
+        path=lambda k, d=None: {"paths.chunks_file": tmp_path / "chunks.jsonl",
+                                "paths.bm25_index": tmp_path / "bm25.pkl"}[k])
+    rag = lambda coverage: SimpleNamespace(route_coverage=coverage, retriever=SimpleNamespace(
+        _get_collection=lambda: SimpleNamespace(count=lambda: 7)))
+    before = index_fingerprint(cfg, rag(None))
+    unloaded = {"generated_rows": 3, "with_pointers": 0, "sidecar": None}    # a store with no sidecar
+    assert index_fingerprint(cfg, rag(unloaded)) == before and "route" not in before
+    sidecar = tmp_path / "route_pointers.json"
+    raw = b'{"version": 1, "built_at": "2026-10-29T00:00:00Z", "pointers": {}, "unrouted": {}}'
+    sidecar.write_bytes(raw)
+    loaded = {"generated_rows": 3, "with_pointers": 2, "sidecar": str(sidecar)}
+    got = index_fingerprint(cfg, rag(loaded))
+    assert got == {**before, "route": {**loaded, "built_at": "2026-10-29T00:00:00Z",
+                                       "sha256": hashlib.sha256(raw).hexdigest()}}
+
+
+def test_graph_ablation_shapes_and_baselines(tmp_path):
+    from eval.bench.configs import BASELINES
+    absent = tmp_path / "absent.yaml"                       # generated: the file is never read
+    got = resolve("graph", absent)
+    assert [n for n, _ in got] == ["G-off", "G-legacy", "G-e1e4"]
+    c = dict(got)
+    # the gate and decompose pinned off: no arm may shorten or re-sort the search's list
+    assert c["G-off"] == {**dict(resolve("diversity", absent))["D-off"], "gate": False, "decompose": False,
+                          "graph": None}
+    # direction pinned: the arms are defined as both-ways walks, whatever graph.direction says
+    assert c["G-legacy"]["graph"] == {"bridges": False, "cross_canvas": False, "wikilinks": False,
+                                      "direction": "both"}
+    assert c["G-e1e4"]["graph"] == {"bridges": True, "cross_canvas": True, "wikilinks": True,
+                                    "direction": "both"}
+    assert all({**o, "graph": None} == c["G-off"] for o in c.values())   # only the walk differs
+    assert BASELINES["G-legacy"] == "G-off" and BASELINES["G-e1e4"] == "G-legacy"
+    p = tmp_path / "configs.yaml"
+    p.write_text("configs:\n  wide:\n    top_k: 10\n", encoding="utf-8")
+    with pytest.raises(KeyError, match="graph"):            # the error lists the generated sets
+        resolve("nope", p)
+
+
+def test_generated_ablation_gains_route_and_its_two_pairings(tmp_path):
+    from eval.bench.configs import BASELINES, GATE_PAIRS, graph_ablation
+    arms = dict(resolve("generated", tmp_path / "x.yaml"))   # generated: the file is never read
+    assert list(arms) == ["GM-off", "GM-drop", "GM-route"]
+    assert [o["generated_mode"] for o in arms.values()] == ["off", "drop", "route"]
+    g_off = dict(graph_ablation())["G-off"]
+    for name in ("GM-off", "GM-drop"):                      # G-off plus the knob, nothing else
+        assert {k: v for k, v in arms[name].items() if k != "generated_mode"} == g_off
+    r = arms["GM-route"]                                    # ...plus the routed lane, or route == drop
+    assert "routed" in r["lanes"] and set(r["lanes"]) - {"routed"} == set(g_off["lanes"])
+    assert {k: v for k, v in r.items() if k not in ("generated_mode", "lanes")} == \
+        {k: v for k, v in g_off.items() if k != "lanes"}
+    assert BASELINES["GM-route"] == "GM-drop" and GATE_PAIRS["GM-route"] == "GM-off"
+    assert BASELINES["GM-drop"] == "GM-off"
+    p = tmp_path / "configs.yaml"
+    p.write_text("configs:\n  wide:\n    top_k: 10\n", encoding="utf-8")
+    with pytest.raises(KeyError, match="generated"):        # the error lists the new keyword
+        resolve("nope", p)

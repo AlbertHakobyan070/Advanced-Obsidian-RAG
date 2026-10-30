@@ -15,6 +15,126 @@ reconstructed on 2026-10-14 from the commit history and the session notes,
 one per shipped milestone, so read them as a map of when things landed rather
 than as release-day notes.
 
+## [0.30.0] - 2026-10-30
+
+### Added
+- Generated content (maps and summaries an LLM wrote, agent-instruction files,
+  anything under `provenance.generated_paths`) no longer grounds an answer.
+  `retrieval.generated_mode` decides what it does, and the shipped default is
+  `drop`: generated chunks are kept out of every evidence path, so a citation
+  is always authored or source text. `off` lets them compete as evidence and is
+  config only; a per-call `"off"` is a `422`. Every returned source carries its
+  `provenance`, `/answer` refuses generated ids with a `400`, and `/health` and
+  `/schema` report the mode. In the console's graph fork, generated map nodes
+  show disabled and unticked.
+- `main.py stamp-provenance (--dry-run | --yes)` stamps the rows already stored
+  with the same rule (metadata only, no re-embed, a `.bak` of each JSONL), and
+  every ingest lane now stamps new rows. Under `drop` or `route` the query
+  service refuses to start while generated rows are unstamped: `/health` is
+  `failed` and names the fix, so run the stamp once on an existing store.
+- Route mode, opt in with `generated_mode: route` in the config or `"route"` on
+  a call to `/search`, `/query`, `/compare` and `/evidence_pack`. It keeps
+  generated chunks out of the evidence as `drop` does, and lets them find the
+  primary pages they cite: those pages are ranked and cited, and a source a map
+  brought in carries `found_via`. It reads a pointer sidecar built by
+  `main.py route-pointers` or the `route_pointers` job
+  (`retrieval.route.pointers_file`), and its caps are `retrieval.route.router_k`,
+  `per_target`, `max_targets` and `max_new`. `/health` and `/schema` report
+  route coverage, the `/answer` `400` carries `routes_to`, and `/graph/expand`
+  returns `routed_ids`. Route needs `retrieval.sparse_backend: bm25s`, and a
+  call it cannot serve is a `409`. The example config and the archives stay on
+  `drop`; route is available, not the default.
+- `GET /outline` lists the primary sources by domain and course, with file
+  type, chunk count and page count, and the generated maps apart.
+  `GET /outline/{source}` gives one source's chapters with page ranges, or one
+  map's concepts with the primary pages each cites. The MCP server gains
+  `noetrix_outline` for it, so an agent that does not know the vault can look
+  before it searches.
+- `source_file` and `pages: [first, last]` on `/search`, `/query`, `/compare`
+  and `/evidence_pack` restrict every lane to one file's primary chunks, or to
+  a page range of it. The echo's `file_filter` says whether anything matched.
+  They are refused with `graph: true` and need `sparse_backend: bm25s`.
+- A graph engine for multi-hop questions, all off by default (the `graph.*`
+  switches, `canvas.footer_subpath`, `provenance.label_generated` and
+  `provenance.generated_only_confidence`). A canvas file node or a `Source:`
+  line can resolve to the note section or PDF page it cites (`graph.bridges`),
+  a walk can hop between canvases (`graph.cross_canvas`) and follow outgoing
+  wikilinks (`graph.wikilinks`), and it can be limited by `graph.edge_types`
+  and `graph.direction`. Every node reached carries the labelled path from its
+  seed. `POST /evidence_pack` takes several sub-questions and returns evidence
+  with provenance, coverage, gaps and the walk paths, and the MCP server gains
+  `noetrix_evidence_pack` and `noetrix_graph_expand`.
+- `SKILL_NAVIGATOR.md`, a new agent skill that turns a question into the right
+  calls: an intent table with graph-on and graph-off rows, how to read an
+  evidence pack, and an answer contract with claim-level citations, a
+  confidence rubric and "not in the vault" decided from the items returned.
+- Index hygiene tools for reorganising a vault. `main.py relocate --map
+  rename_map.jsonl [--dry-run|--verify]` moves indexed files across every
+  JSONL, sidecar and collection without re-embedding, after checking for
+  blockers first. `recalibrate_courses.py` re-derives course labels and leaves
+  hand retags alone. `canvas_refresh.py` refreshes the metadata of indexed
+  canvas chunks, plan first. `parser.skip_roots` keeps whole top-level folders
+  (agent workspaces, for one) out of every lane unless a run scopes them back
+  in with `--include-path`.
+- `rag map <pdf> --chapter ...` (or `--pages a-b`) turns a PDF chapter or page
+  range into a generated Obsidian canvas and a typed graph (`map.json`) in
+  which every node and edge carries verbatim quotes, located on real PDF pages
+  and checked by a pinned verifier. It writes to a staging folder outside the
+  vault and never ingests; a `map` job kind and a `knowledge_map:` config
+  section go with it, and `--export-prompts` / `--import-extract` let another
+  agent do the extract step. See `docs/knowledge-maps.md`.
+- The bench gains arms for the generated modes (`GM-off`, `GM-drop`,
+  `GM-route`) and for the graph engine (`--configs graph`), a per-hop recall
+  report, and `hop` and `strategy` fields on gold records. `bench validate`
+  refuses gold that names a generated source.
+
+### Changed
+- Generated chunks are no longer evidence by default (see `generated_mode`
+  above). The dense lanes drop them by over-fetching and checking the stored
+  `provenance` key rather than by a Chroma `$ne` filter, which slowed the main
+  dense lane from milliseconds to hundreds of milliseconds.
+- One lane guard, shared by the console, `main.py` and the loaders, refuses a
+  scoped md run that would write its lane's canonical file, any run that would
+  write another lane's file or a sidecar, and the Windows spellings of those
+  paths. `parser.skip_dirs`, which did nothing before, is now pruned by every
+  lane.
+- Delete reaches every collection, the HyPE sidecar and the parents file, keeps
+  a `.bak` of every JSONL it rewrites, and is refused while a re-embed target
+  is building. `POST /api/documents/delete` also returns `eval_gold`, the ids
+  of the eval questions whose gold names a deleted source; it warns and never
+  refuses, and the Documents tab shows it. A sets file that cannot be loaded
+  now fails the delete with a `500` before anything is removed.
+- Appending to an index refuses rows a replace would remove (stale ids of a
+  re-ingested source, or a page whose text changed) and prints the
+  delete-then-append recipe that keeps the incoming rows.
+- Web imports and md and PDF ingest stamp `provenance`. The parser reads an
+  `AI Engineering` course and `Data Science (Books)`, prefers exact folder
+  names to abbreviations, accepts frontmatter tags as a scalar, a list or
+  `#`-prefixed values, and no longer reads CSS hex colours as tags.
+- The archives leave out the working question sets (`eval/graph_sets`,
+  `eval/route_sets`) and `eval/test_ledger.jsonl`; git is where the ledger is
+  versioned.
+
+### Fixed
+- A Windows-only store corruption: chromadb sizes its pool of loaded indexes
+  from the C runtime's open-file limit, so a store with only a few
+  collections could evict an index, and a small one then failed with "Nothing
+  found on disk" while a large one came back without its newest rows. The
+  Chroma client now raises that limit before it starts, and raises an error if
+  it cannot.
+- Console retag updated only the active collection and left the others, and
+  the graph twin, on the old metadata until a later rebuild. It now updates
+  every chunk collection (the active one last), keeps a `.retag-*.bak` of each
+  JSONL, and answers `409` while a collection is building. The response keeps
+  its keys and gains `chroma_updated_by_collection`.
+- The vault registry is saved whole or not at all, so a crash, a kill or a full
+  disk mid-save no longer leaves a truncated file.
+- Graph walks were slow on PDF page bridges because the page range was sent to
+  Chroma, which compared the pages of every PDF chunk in the store. The page is
+  now tested in Python after a lookup by file alone: a walk that took about a
+  minute takes a couple of seconds with the same output, and a graph-on
+  evidence pack now fits the MCP bridge's timeouts.
+
 ## [0.29.1] - 2026-10-19
 
 ### Fixed

@@ -66,6 +66,16 @@ It is a full retrieval pipeline rather than a thin wrapper:
 
     Driving this from an LLM agent, efficiently and without fabricated citations.
 
+-   :material-connection: **[MCP server](mcp.md)**
+
+    The two services as tools for Claude Code, Claude Desktop, Codex and other
+    MCP clients.
+
+-   :material-graph-outline: **[Knowledge maps](knowledge-maps.md)**
+
+    Turn a PDF chapter into a grounded Obsidian canvas whose every node quotes
+    the book.
+
 -   :material-chart-line: **[Evaluation](evaluation.md)**
 
     The per-configuration bench, the metrics, and an honest read of what they mean.
@@ -106,6 +116,20 @@ It is a full retrieval pipeline rather than a thin wrapper:
 - **Query comparison trees** run one question under multiple presets, rerank
   methods, or generation backends and report source membership, rank shifts and
   overlap.
+- **Generated content is not evidence.** Maps and summaries an LLM wrote are
+  kept out of every evidence path by default (`retrieval.generated_mode`), so a
+  citation is authored or source text, and each source reports its `provenance`.
+  The optional `route` mode lets them find the primary pages they cite; a source
+  found that way carries `found_via`. See [Route mode](api.md#route-mode).
+- **An outline and file filters.** `GET /outline` says what the vault holds, by
+  domain and course with chunk and page counts, and `source_file` / `pages`
+  restrict a search to one file or a page range of it. See
+  [Start from the outline](agents.md#start-from-the-outline-when-you-do-not-know-the-vault).
+- **A Navigator engine and skill** for multi-hop questions: `POST /evidence_pack`
+  searches several sub-questions at once and returns evidence with provenance,
+  coverage and gaps, optionally walking canvas graphs (switches off by default),
+  and the `noetrix-navigator` skill (`SKILL_NAVIGATOR.md`) turns a question into
+  the right calls. See [Evidence pack](api.md#evidence-pack).
 - **Stable evidence ids** connect `/search`, `/query` and `/compare` results to
   direct `/chunks/{id}` lookup when the source reports `lookup_available: true`.
 - **Provider discovery and per-query overrides** expose resolved backend/model

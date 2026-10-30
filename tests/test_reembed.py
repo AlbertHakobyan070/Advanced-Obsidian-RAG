@@ -336,7 +336,8 @@ def _bench_args(*argv):
 def test_the_run_record_names_the_collection_and_the_registry_model_and_cap(world, tmp_path):
     from eval.bench.fingerprint import index_fingerprint
     from eval.bench.report import _header
-    rag = SimpleNamespace(retriever=SimpleNamespace(_get_collection=lambda: SimpleNamespace(count=lambda: 3)))
+    rag = SimpleNamespace(route_coverage=None,
+                          retriever=SimpleNamespace(_get_collection=lambda: SimpleNamespace(count=lambda: 3)))
     cfg = Config({**world.cfg.as_dict(), "paths": {**world.cfg.as_dict()["paths"], "collection_name": "eg2_new"}},
                  world.cfg.project_root)
     index = index_fingerprint(cfg, rag)

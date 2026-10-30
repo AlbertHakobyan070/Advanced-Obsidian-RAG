@@ -403,9 +403,11 @@ class Drafter:
 
     def __init__(self, suite: str, store: _SuiteFile, llm, fetch: Fetch, gold_chunks: dict, *,
                  max_score: float, max_calls: int | None = None,
-                 sleep: Callable[[float], None] = time.sleep, log: Callable[[str], None] = _say):
+                 sleep: Callable[[float], None] = time.sleep, log: Callable[[str], None] = _say,
+                 rule=None):
         self.suite, self.store, self.llm, self.fetch, self.gold_chunks = suite, store, llm, fetch, gold_chunks
         self.max_score, self.max_calls, self.sleep, self.log = max_score, max_calls, sleep, log
+        self.rule = rule                     # provenance_rule(cfg) for validate(); None = stored keys only
         self.system = _system(suite)
         self.calls = 0
         self.count: Counter = Counter()      # accepted, retries, twins, llm_errors
@@ -581,7 +583,7 @@ class Drafter:
             return None, "invalid:schema", str(e)
         # The real chunks win over a twin hit's text; validate() needs the twin's file
         # present, and the chunk pass only loaded the seed files.
-        findings = [f for f in validate([q], {**twin_chunks, **self.gold_chunks})
+        findings = [f for f in validate([q], {**twin_chunks, **self.gold_chunks}, self.rule)
                     if f.level == "error" or f.code in _BLOCKING_WARNINGS]
         if findings:
             return None, f"invalid:{findings[0].code}", "; ".join(f"{f.code}: {f.message}" for f in findings)
@@ -697,7 +699,7 @@ class Drafter:
 def draft_suite(suite: str, llm, fetch: Fetch, *, seeds_path, sets_dir, data_dir, n: int,
                 max_score: float, max_calls: int | None = None,
                 sleep: Callable[[float], None] = time.sleep,
-                log: Callable[[str], None] = _say) -> Drafter:
+                log: Callable[[str], None] = _say, rule=None) -> Drafter:
     """Draft `suite` until its file holds `n` live questions, the pack is used up
     or --max-calls is reached. Returns the Drafter; print its summary()."""
     records = load_pack(seeds_path)
@@ -712,6 +714,6 @@ def draft_suite(suite: str, llm, fetch: Fetch, *, seeds_path, sets_dir, data_dir
             log(f"reading the chunk files for {len(files)} seed file(s)...")
         gold_chunks = load_gold_chunks(Path(data_dir), files)
     drafter = Drafter(suite, store, llm, fetch, gold_chunks, max_score=max_score,
-                      max_calls=max_calls, sleep=sleep, log=log)
+                      max_calls=max_calls, sleep=sleep, log=log, rule=rule)
     drafter.run(todo)
     return drafter

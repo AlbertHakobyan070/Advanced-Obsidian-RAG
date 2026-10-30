@@ -445,8 +445,12 @@ def _stub_the_heavy_builders(monkeypatch):
     captures through); the gate, reranker and context lanes are the real ones."""
     import src.pipeline as P
     stand_in = SimpleNamespace(from_config=lambda *args, **kwargs: SimpleNamespace())
-    for name in ("Embedder", "LLMClient", "HybridRetriever", "HyDE", "Generator", "GraphExpander"):
+    for name in ("Embedder", "LLMClient", "HyDE", "Generator", "GraphExpander"):
         monkeypatch.setattr(P, name, stand_in)
+    # from_config reads retriever.bm25_index for the provenance invariant; no file
+    # there, so the invariant reads nothing and these tests test only the gate.
+    monkeypatch.setattr(P, "HybridRetriever", SimpleNamespace(
+        from_config=lambda *a, **k: SimpleNamespace(bm25_index=ROOT / "no-such-bm25.pkl")))
     monkeypatch.setattr(P, "configure_logging", lambda **kwargs: None)
 
 

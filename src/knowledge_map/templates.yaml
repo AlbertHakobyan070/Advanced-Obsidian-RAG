@@ -1,0 +1,48 @@
+# Extraction templates (spec 3.3). The classifier reads `purpose`; `guidance` goes
+# into the extraction prompt. layer_edges are the edge types that order nodes
+# top-to-bottom inside a section group.
+
+concept:
+  purpose: "Theory and explanation: a chapter that defines ideas and shows how they relate."
+  node_kinds: [concept, figure]
+  edge_types: [is-a, part-of, example-of, prerequisite-of, leads-to, causes, contrasts-with, implements, uses, defines]
+  layer_edges: [prerequisite-of, leads-to]
+  guidance: |
+    One node per idea the text defines or explains; skip passing mentions.
+    Prefer is-a, part-of and defines for structure; prerequisite-of only when the text says one idea is needed first.
+    Every node and every stated edge needs short verbatim quotes from the text.
+    A figure node may quote only its caption or the text around it; never describe the image itself.
+
+comparison:
+  purpose: "Taxonomies, styles and trade-offs: a chapter that sets options side by side and weighs them."
+  node_kinds: [option, characteristic, concept, figure]
+  edge_types: [is-a, contrasts-with, has-trade-off, suits, rated-on, uses]
+  layer_edges: []
+  guidance: |
+    One option node per alternative being compared; one characteristic node per dimension they are compared on.
+    Use contrasts-with between options, has-trade-off for a stated cost, suits for a stated fit, rated-on for a stated rating.
+    Record only comparisons the text states; do not rank options yourself.
+    Every node and every stated edge needs short verbatim quotes from the text.
+    A figure node may quote only its caption or the text around it; never describe the image itself.
+
+procedure:
+  purpose: "How-to, system design, pipelines and schemas: a chapter that describes steps, artifacts and decisions."
+  node_kinds: [step, artifact, decision, concept, figure]
+  edge_types: [precedes, produces, requires, part-of, uses, alternative-to]
+  layer_edges: [precedes]
+  guidance: |
+    One step node per action in order; precedes links consecutive steps the text orders.
+    An artifact is something a step produces or requires; a decision is a point where the text offers a choice.
+    Use alternative-to only between options the text names as alternatives.
+    Every node and every stated edge needs short verbatim quotes from the text.
+    A figure node may quote only its caption or the text around it; never describe the image itself.
+
+outline:
+  purpose: "Fallback when the chapter fits no other family: a plain outline of its main topics."
+  node_kinds: [concept]
+  edge_types: [part-of, leads-to]
+  layer_edges: [leads-to]
+  guidance: |
+    One node per main topic, in reading order; part-of for sub-topics, leads-to for the order the text follows.
+    Keep summaries short and stay close to the text's own words.
+    Every node and every stated edge needs short verbatim quotes from the text.

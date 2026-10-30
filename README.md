@@ -91,6 +91,13 @@ the query calls for it.
   merely mentions the keyword. Detecting code intent, skipping HyDE, widening the
   pool and reserving a filtered lane for script/notebook chunks brings real code
   back to the top.
+- **Generated content is not evidence.** Maps and summaries an LLM wrote,
+  agent-instruction files and anything under `provenance.generated_paths` are
+  kept out of every evidence path by default (`retrieval.generated_mode: drop`),
+  so a citation is always authored or source text, and every returned source
+  carries its `provenance`. `route` is optional: generated chunks still never
+  count as evidence, but they can find the primary pages they cite, and a source
+  found that way carries `found_via`. See [Route mode](docs/api.md#route-mode).
 - **Reranking you can choose.** A cross-encoder re-scores the fused candidates
   against the query for precision at the top. The model is swappable, it can run
   on a GPU, out-of-process behind an HTTP endpoint, or be replaced by a
@@ -130,6 +137,25 @@ curl -s -X POST http://127.0.0.1:8051/query \
 Every response echoes exactly what ran (`retrieval: {preset, rerank_top_k,
 hyde_used, …}`), so results are always explainable.
 
+### Look at the vault, then narrow to a file
+
+`GET /outline` lists what the vault holds: the primary sources by domain and
+course, with file type, chunk count and page count, and the generated maps apart.
+`GET /outline/{source}` gives one source's chapters with their page ranges. Once
+you know where the answer lives, `source_file` and `pages: [first, last]` on
+`/search`, `/query`, `/compare` and `/evidence_pack` restrict every lane to that
+file's primary chunks, or to a page range of it:
+
+```bash
+curl -s -X POST http://127.0.0.1:8051/search \
+  -H "Content-Type: application/json" \
+  -d '{"q": "bias-variance tradeoff", "source_file": "Books/Statistics.pdf", "pages": [40, 55]}'
+```
+
+The echo's `file_filter` says whether anything matched. The filters need
+`retrieval.sparse_backend: bm25s` and are refused with `graph: true`; the full
+rules are in the [API reference](docs/api.md#ask-and-search).
+
 ### Say what "best" means
 
 Results can be entirely on-topic and still be the wrong *kind* of thing. A
@@ -161,9 +187,10 @@ graph is visible to the embedder, the reranker and the model with no
 retrieval-time cost. On top of that sits **graph mode**, a separate endpoint
 rather than a knob on the main query, and an **experimental feature that ships
 switched off** (`graph.enabled: false`; the console's Settings > Experimental
-features panel switches it on). The cost of the traversal is measured;
-its retrieval benefit is not, and a mode nobody has scored on the bench's
-labelled question sets does not belong in the default workspace:
+features panel switches it on). It is not part of the default workspace; the
+bench can score what it adds on your own question sets
+(`python main.py bench run --configs graph`, see
+[`docs/evaluation.md`](docs/evaluation.md)):
 
 ```bash
 curl -s -X POST http://127.0.0.1:8051/graph/expand \
@@ -189,6 +216,17 @@ of the same idea is `canvas.context_depth`, which inlines a neighbour's text
 into a chunk so the chunk is self-contained — opt-in, because it duplicates text
 across chunks, and the ingest run reports the measured inflation rather than
 assuming it.
+
+For multi-hop questions a further set of `graph.*` switches, all off by default,
+widens the walk: a canvas file node or a `Source:` line can resolve to the note
+section or PDF page it cites (`graph.bridges`), a walk can hop between canvases
+(`graph.cross_canvas`) and follow outgoing wikilinks (`graph.wikilinks`), and
+every node reached carries the labelled path from its seed. `POST /evidence_pack`
+takes two to four sub-questions and returns the evidence with provenance, which
+sub-questions it covers, the gaps, and those walk paths, in one call that writes no
+answer. See [Graph mode](docs/api.md#graph-mode) and
+[Evidence pack](docs/api.md#evidence-pack); the `noetrix-navigator` skill
+(`SKILL_NAVIGATOR.md`) turns a question into the right calls.
 
 ### Weight the lanes you fuse
 
@@ -275,8 +313,9 @@ needed, no tokens spent. Management operations carry a `read` / `mutating` /
 - **An MCP server.** `mcp_server.py` exposes both services as
   [Model Context Protocol](https://modelcontextprotocol.io) tools, over stdio
   (`rag mcp` on Windows) or streamable HTTP (`--http`; the container serves it on
-  `:8053`). Named tools cover the frequent calls (search, query, compare, a
-  chunk, a job's progress, the engines), and a dispatcher per permission tier
+  `:8053`). Named tools cover the frequent calls (search, query, compare, the vault
+  outline, an evidence pack, a graph walk, a chunk, a job's progress, the
+  engines), and a dispatcher per permission tier
   reaches the other JSON routes. Each tool carries its tier as MCP annotations,
   and the mutating and destructive ones make Claude Code ask before every call.
   It is a plain HTTP client of the two services and never loads the pipeline.
@@ -491,6 +530,11 @@ started from), and the console's header chip shows what each part of an install
 is running beside the release notes. The documentation site renders the
 changelog as **[Release notes](docs/release-notes.md)**.
 
+The agent skills ship in the repository root: `SKILL.md` (`personal-rag`,
+retrieval and cited answers), `SKILL_RAGOPS.md` (`rag-ops`, corpus operations) and
+`SKILL_NAVIGATOR.md` (`noetrix-navigator`, multi-hop evidence packs with
+claim-level citations).
+
 ## Repository layout
 
 ```
@@ -515,7 +559,9 @@ src/
                # graph_twin (graph mode's own seed index)
   retrieval/   # retriever (hybrid + RRF + code lane), reranker (+ experimental laya_reranker),
                # relevance_gate, hyde (+ disk cache), scope, decompose, diversity,
-               # context_expand, graph_expand, omnisearch_client, sparse_tantivy
+               # context_expand, graph_expand, route (generated_mode route's pointer
+               # sidecar), outline (GET /outline), evidence_pack, omnisearch_client,
+               # sparse_tantivy
   generation/  # generator — grounded answers + citation verification
   llm/         # unified OpenAI-/Anthropic-compatible client, and the bench's replay store
   prompts/     # versioned YAML prompt templates + loader

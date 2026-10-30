@@ -45,6 +45,7 @@ from src.ingestion.canvas_loader import (
     _collapse,
     _describe_target,
     _smallest_containing_group,
+    edge_ends,
 )
 from src.ingestion.code_loader import DEFAULT_LANGUAGE_MAP
 from src.ingestion.obsidian_parser import clean_text, parse_frontmatter
@@ -76,8 +77,7 @@ def _says_something(label: str) -> bool:
 
 def arrow(edge: dict) -> str:
     """The arrow as drawn. JSON Canvas defaults: fromEnd none, toEnd arrow."""
-    back = (edge.get("fromEnd") or "none") == "arrow"
-    ahead = (edge.get("toEnd") or "arrow") == "arrow"
+    back, ahead = edge_ends(edge)
     return {(False, True): "→", (True, True): "↔",
             (False, False): "—", (True, False): "←"}[(back, ahead)]
 

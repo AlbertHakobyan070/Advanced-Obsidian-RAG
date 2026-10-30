@@ -148,3 +148,60 @@ def test_missing_index_details_do_not_break_the_header():
     assert "dense" not in text.split("## ")[0]
     text = render(SUMMARY, {**META, "index": {"dense_count": 3, "bm25": None}})
     assert "dense 3" in text and "bm25 n/a" in text
+
+
+# sha256 of render(SUMMARY, META) on the code before the graph sections existed:
+# `bench report` re-renders old runs, and theirs must come out exactly as they did.
+PRE_SLICE_RENDER_SHA256 = "e1823d9e124fec68b044325f0d2d69cbf4f273bcfbb8bfe11d2eb268080bde1c"
+
+
+def test_graph_sections_only_when_present():
+    import hashlib
+    assert hashlib.sha256(render(SUMMARY, META).encode("utf-8")).hexdigest() == PRE_SLICE_RENDER_SHA256
+    g = copy.deepcopy(SUMMARY)
+    g["R3-routing"]["graph"] = {"added": 2.5, "added_in_final": 1.25, "gold_via_graph": 0.5,
+                                "generated_share": 0.125, "seeded": 0.75}
+    g["R4-code"]["graph"] = {"added": 1.0, "added_in_final": 0.0, "gold_via_graph": None,
+                             "generated_share": 0.0, "seeded": 0.0}       # no answerable row
+    g["R3-routing"]["by_hop"] = {"1": {"mean": 0.75, "n": 4}, "2": {"mean": 0.5, "n": 4}}
+    g["R4-code"]["by_hop"] = {"1": {"mean": 0.6, "n": 3}}
+    g["R3-routing"]["by_strategy"] = {"synthesis": {"ndcg@10": _m(0.55, 0.4, 0.7, 6)}}
+    text = render(g, META)
+    graph = text.split("## Graph contribution")[1].split("\n## ")[0]
+    assert "| R3-routing | 2.50 | 1.25 | 0.50 | 0.125 | 0.75 |" in graph
+    assert "| R4-code | 1.00 | 0.00 | – | 0.000 | 0.00 |" in graph
+    assert "seeded = " in graph                              # the text says what the walk is credited with
+    assert "| R2-hybrid |" not in graph                     # a config that never walked has no row
+    hop = text.split("## Recall@10 by hop")[1].split("\n## ")[0]
+    assert "| config | hop 1 | hop 2 |" in hop
+    assert "| R3-routing | 0.750 (n=4) | 0.500 (n=4) |" in hop and "| R4-code | 0.600 (n=3) | – |" in hop
+    strategy = text.split("## nDCG@10 by strategy")[1].split("\n## ")[0]
+    assert "synthesis (n=6, *diag*)" in strategy and "| R3-routing | 0.550 |" in strategy
+    assert "| R2-hybrid | – |" in strategy                  # no strategy rows: a dash, not a crash
+
+
+def test_report_renders_the_route_block_prefix_strata_and_the_second_pairing():
+    r = copy.deepcopy(SUMMARY)
+    r["R4-code"]["route"] = {"router_hits": 4.0, "routed": 2.5, "unrouted": 1.5, "targets": 2.0,
+                             "targets_missing": 0.25, "new": 3.0}
+    r["R4-code"]["paired_also"] = [{"vs": "R2-hybrid", "n": 50, "ndcg@10": {"mean": 0.06, "lo": 0.02, "hi": 0.1},
+                                    "hit@5_mcnemar_p": 0.01}]
+    for name, c in r.items():
+        if name != "R2-hybrid":                             # a config without by_prefix gets no row
+            c["by_prefix"] = {"rtc": {"ALL": {"ndcg@10": _m(0.5, 0.4, 0.6, 40)},
+                                      "books": {"ndcg@10": _m(0.6, 0.4, 0.8, 12)}},
+                              "rtu": {"ALL": {"ndcg@10": _m(0.3, 0.2, 0.4, 35)},
+                                      "multihop": {"ndcg@10": _m(0.2, 0.1, 0.3, 30)}}}
+    text = render(r, META)
+    lines = text.splitlines()
+    also = next(l for l in lines if l.startswith("| R4-code vs R2-hybrid"))
+    assert "+0.060 [+0.020, +0.100]" in also and "0.010" in also and also.rstrip(" |").endswith("yes")
+    assert any(l.startswith("| R4-code vs R3-routing") for l in lines)        # the first pairing stays
+    route = text.split("## Routed lane")[1].split("\n## ")[0]
+    assert "| config | router hits | routed | unrouted | targets | targets missing | new |" in route
+    assert "| R4-code | 4.00 | 2.50 | 1.50 | 2.00 | 0.25 | 3.00 |" in route and "| R3-routing |" not in route
+    rtc = text.split("## nDCG@10 by route stratum rtc")[1].split("\n## ")[0]
+    assert "| config | ALL (n=40) | books (n=12, *diag*) |" in rtc
+    assert "| R4-code | 0.500 | 0.600 |" in rtc and "| R2-hybrid |" not in rtc
+    rtu = text.split("## nDCG@10 by route stratum rtu")[1].split("\n## ")[0]
+    assert "| config | ALL (n=35) | multihop (n=30) |" in rtu and "| R3-routing | 0.300 | 0.200 |" in rtu

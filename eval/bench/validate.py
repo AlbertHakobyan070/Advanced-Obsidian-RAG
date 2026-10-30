@@ -7,7 +7,9 @@ the whole design:
   error  the question cannot be scored as written. A gold file that is not in
          the corpus, or a locator (pages / heading) that no chunk of that file
          satisfies, scores 0 for EVERY configuration and so masquerades as a
-         retrieval failure. The CLI exits 1 on any error.
+         retrieval failure. So is required gold that only generated chunks
+         (provenance: generated) satisfy: a graph walk would score by finding
+         its own summaries. The CLI exits 1 on any error.
   warn   the question can be scored but may not measure retrieval well: a
          nugget the gold text does not back up, a question lifted from the gold
          text, a near-duplicate. These are lexical heuristics — they flag, a
@@ -34,9 +36,11 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
+from eval.bench.metrics import required
 from eval.bench.questions import SUITES, Question
 from eval.bench.relevance import chunk_matches, norm_file
 from src.embeddings.embedder import iter_jsonl_records
+from src.utils.provenance import provenance_of
 
 # Rule constants. They define what the checks MEAN (spec §3), so they live next
 # to the rules rather than in config.yaml, like the suite quotas in questions.py.
@@ -170,13 +174,19 @@ def _near_duplicates(questions: list[Question]) -> list[Finding]:
     return out
 
 
-def validate(questions: list[Question], gold_chunks: dict[str, list[dict]]) -> list[Finding]:
+def validate(questions: list[Question], gold_chunks: dict[str, list[dict]],
+             rule=None) -> list[Finding]:
     """Findings for `questions`, in question order (then gold order, then rule
-    order), with the near-duplicate pairs last."""
+    order), with the near-duplicate pairs last. `rule` is provenance_rule(cfg),
+    the rule graph_search resolves provenance with; a caller without a config
+    passes none, and then only a chunk's own provenance key counts."""
+    rule = {} if rule is None else rule
     findings: list[Finding] = []
     for q in questions:
         matched: list[dict] = []
-        for g in q.gold:
+        must = set(required(q.gold))         # the entries the metrics score (none flagged = all)
+        for n, g in enumerate(q.gold):
+            entry: list[dict] = []           # every chunk that satisfies this entry or a twin
             for s in g.sources():            # the entry itself, then each twin
                 kind = "gold" if s is g else "alternative"
                 chunks = gold_chunks.get(norm_file(s.file))
@@ -190,6 +200,13 @@ def validate(questions: list[Question], gold_chunks: dict[str, list[dict]]) -> l
                                             f"no chunk of {s.file!r} satisfies {_locator(s)}"))
                     continue
                 matched += hits
+                entry += hits
+            # Scored gold that only LLM-written chunks satisfy lets a graph walk score by
+            # finding its own summaries (docs/evaluation.md, graph question sets).
+            if n in must and entry and all(provenance_of(c["meta"], rule) == "generated" for c in entry):
+                findings.append(Finding(q.id, "error", "gold-generated",
+                                        f"required gold {g.file!r} matches only generated chunks; a "
+                                        f"generated source may only be required: false context"))
         if matched:
             findings += _check_text(q, matched)
     findings += _near_duplicates(questions)

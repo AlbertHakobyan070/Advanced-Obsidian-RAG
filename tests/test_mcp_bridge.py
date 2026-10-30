@@ -550,3 +550,63 @@ def test_the_console_maps_param_spelling_is_refused_naming_the_real_one(live):
     names jid, before any HTTP call."""
     result = _call(live.server, "noetrix_read", {"op": "GET /api/jobs/{id}", "params": {"id": "abc"}})
     assert result.is_error and "jid" in result.content[0].text
+
+
+def test_navigator_tools_are_listed_with_their_annotations(live, routes):
+    """Slice D T8. The evidence pack runs up to evidence_pack.max_sub_questions
+    searches (each may call HyDE or decomposition), so it is open-world and gets
+    the query timeout; the walk never reaches a model."""
+    tools = _list(live.server)
+    pack, walk = tools["noetrix_evidence_pack"], tools["noetrix_graph_expand"]
+    assert pack.annotations.read_only_hint is True and walk.annotations.read_only_hint is True
+    assert pack.annotations.open_world_hint is True
+    assert walk.annotations.open_world_hint is False
+    assert pack.meta is None and walk.meta is None
+    assert "noetrix_get_chunk" in pack.description
+    assert K.timeout_for(routes["POST /evidence_pack"], {}, TIMEOUTS) == TIMEOUTS["query"]
+    assert K.timeout_for(routes["POST /graph/expand"], {}, TIMEOUTS) == TIMEOUTS["default"]
+
+
+def test_the_evidence_tools_carry_the_provenance_guidance(live):
+    """route-then-cite §5.6: the three tools that return evidence say how to read its
+    provenance, relative to the mode noetrix_health reports, and (route, S2) found_via."""
+    assert T._PROVENANCE == (
+        "Each source says its provenance (authored, source or generated). Unless noetrix_health shows "
+        "generated_mode off, the server keeps generated chunks (maps, summaries, agent files) out of the "
+        "evidence; under off, cite only authored or source. "
+        "`found_via` names the map that found a source; cite the source, not the map.")
+    tools = _list(live.server)
+    for name in ("noetrix_search", "noetrix_query", "noetrix_evidence_pack"):
+        assert tools[name].description.endswith(T._PROVENANCE), name
+
+
+def test_noetrix_outline_is_a_named_tool(live):
+    """route-then-cite §5.7: the outline is what a cold agent finds first. It reads no
+    model; one source's chapters come through GET /outline/{source}, whose path the
+    client quotes whole."""
+    from src.utils.provenance import ProvenanceRule
+    tools = _list(live.server)
+    tool = tools["noetrix_outline"]
+    assert tool.annotations.read_only_hint is True and tool.annotations.open_world_hint is False
+    assert tool.meta is None
+    assert tool.description.endswith("Start here when you do not know the vault: the sources by course, "
+                                      "with chapters; maps are listed apart and are not evidence.")
+    assert set(tool.input_schema["properties"]) == {"limit", "offset", "domain", "course"}
+    meta = {"source_file": "Books/b.pdf", "file_type": "pdf", "provenance": "source", "domain": "ai",
+            "course_name": "AI Eng", "page_start": 2, "page_end": 2, "chapter": "1 Foundations"}
+    payload = {"ids": ["b-p2"], "documents": ["x"], "metadatas": [meta]}
+    rag = live.apps.query._STATE["rag"]
+    rag.outline = {"groups": [{"domain": "ai", "course": "AI Eng", "sources": [
+        {"source_file": "Books/b.pdf", "file_type": "pdf", "chunks": 1, "pages": 1}]}],
+        "maps": [{"source_file": "Maps/m (generated).canvas", "chunks": 3}]}
+    rag.provenance_map = ProvenanceRule(by_file_type={"pdf": "source"})
+    rag.retriever = SimpleNamespace(_get_bm25=lambda: payload, route_pointers=None)
+    result = _call(live.server, "noetrix_outline", {"limit": 5})
+    body = json.loads(result.content[0].text)
+    assert not result.is_error and body["total"] == 1 and body["maps"] == rag.outline["maps"]
+    assert live.apps.sent[-1]["url"].endswith("/outline") and live.apps.sent[-1]["params"] == {"limit": 5}
+    source = _call(live.server, "noetrix_read", {"op": "GET /outline/{source}",
+                                                 "params": {"source": "Books/b.pdf"}})
+    assert json.loads(source.content[0].text)["chapters"] == [
+        {"chapter": "1 Foundations", "page_start": 2, "page_end": 2, "chunks": 1}]
+    assert live.apps.sent[-1]["url"].endswith("/outline/Books%2Fb.pdf")

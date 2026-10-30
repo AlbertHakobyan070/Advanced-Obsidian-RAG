@@ -188,10 +188,12 @@ def _cmd_validate(args) -> None:
               "(a partial cache would hide the other suites' gold texts from the review queue)")
     sets = _sets_dir(args)
     from eval.bench.validate import load_gold_chunks, quota_table, validate, write_review_cache
+    from src.utils.provenance import provenance_rule
 
     questions = _load(sets, suites=suites)
+    rule = provenance_rule(load_config(args.config))        # graph_search's rule: a bad value fails here
     gold_chunks = load_gold_chunks(_data_dir(args), {s.file for q in questions for g in q.gold for s in g.sources()})
-    findings = validate(questions, gold_chunks)
+    findings = validate(questions, gold_chunks, rule)
 
     by_code: dict[str, list] = {}
     for f in findings:
@@ -257,6 +259,7 @@ def _cmd_draft(args) -> None:
     data_dir = _data_dir(args)
     from eval.bench import draft
     from src.llm.llm_client import LLMClient
+    from src.utils.provenance import provenance_rule
 
     cfg = load_config(args.config)
     # The query API's address is the console's own setting (webui.rag_api, same default).
@@ -269,7 +272,7 @@ def _cmd_draft(args) -> None:
         drafter = draft.draft_suite(
             args.suite, llm, draft.http_fetch(search_url), seeds_path=pack, sets_dir=sets,
             data_dir=data_dir, n=args.n or SUITES[args.suite], max_score=args.max_score,
-            max_calls=args.max_calls)
+            max_calls=args.max_calls, rule=provenance_rule(cfg))
     except (SchemaError, draft.DraftError) as e:
         _fail(str(e))
     print("\n" + drafter.summary())
@@ -333,7 +336,7 @@ def add_bench_parser(subparsers) -> None:
     r.add_argument("--unseal-test", action="store_true", dest="unseal_test",
                    help="allow a sealed split; every opening is appended to eval/test_ledger.jsonl")
     r.add_argument("--configs", default="ladder", metavar="SPEC",
-                   help="ladder | loo | factorial | routing | hyde | diversity | decompose, or comma-separated names from "
+                   help="ladder | loo | factorial | routing | hyde | diversity | decompose | graph | generated, or comma-separated names from "
                         "eval/configs.yaml (default: ladder)")
     r.add_argument("--limit", type=int, default=None, metavar="N",
                    help="run only the first N questions of the split (smoke runs)")

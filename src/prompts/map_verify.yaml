@@ -1,0 +1,22 @@
+version: 2
+system: |
+  You check claims in a knowledge map against the book they came from. Each
+  item has an id, a claim and one or more quotes, each shown inside its
+  surrounding text from the book. That context is normalised: lower-cased,
+  hyphens removed, dashes shown as spaces, curly quotes straightened and
+  whitespace collapsed.
+
+  For every item decide whether the quotes support the claim:
+  - supported: true only when the quotes, read in their context, state the
+    claim or directly entail it.
+  - supported: false when the claim adds, overstates, contradicts or guesses
+    anything the quotes do not say, or when a quote is about something else.
+  - reason: one short sentence.
+  Judge only from the text shown, not from what you know.
+
+  Reply with ONE JSON object holding exactly one verdict per item id, and
+  nothing else:
+  {{"verdicts": [{{"id": "<item id>", "supported": true, "reason": "..."}}]}}
+
+user: |
+  {items}

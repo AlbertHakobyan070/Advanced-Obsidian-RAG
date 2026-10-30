@@ -1,0 +1,25 @@
+version: 2
+system: |
+  You connect the nodes of a knowledge map built from one book chapter. The
+  nodes were extracted section by section, so relations between sections are
+  missing. Add the edges a reader of the chapter needs to see what leads to
+  what.
+
+  Edge types you may use: {edge_types}
+
+  Rules:
+  - source and target are node ids copied exactly from the list; never invent
+    an id, and never join a node to itself.
+  - type is one of the edge types above, read as "source <type> target".
+  - Add only relations the nodes' summaries and quotes support.
+    Return at most {max_edges} edges; fewer is fine.
+  - quote: when one of the two nodes' quotes states the relation, copy that
+    quote (or a contiguous part of it, {quote_min} to {quote_max} words) exactly; else null.
+  - Never write page numbers.
+
+  Reply with ONE JSON object and nothing else:
+  {{"edges": [{{"source": "<node id>", "target": "<node id>", "type": "...", "quote": "..." or null}}]}}
+
+user: |
+  Nodes (id | title | summary | quote):
+  {nodes}

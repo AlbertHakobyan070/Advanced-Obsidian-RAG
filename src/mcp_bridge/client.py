@@ -22,9 +22,10 @@ LABEL = {"query": "the query API", "console": "the console"}
 RETRY_INTERVAL_S = 1.0
 JOB_LOG = "GET /api/jobs/{jid}/log"
 # The routes that may call the generation model (HyDE and decomposition on
-# /search, generation on /query, /answer and query-mode /compare).
+# /search and on each of /evidence_pack's searches, one per sub-question up to
+# evidence_pack.max_sub_questions; generation on /query, /answer and query-mode /compare).
 _TIMEOUT_KEY = {"POST /search": "query", "POST /query": "query", "POST /answer": "query",
-                "POST /compare": "compare"}
+                "POST /compare": "compare", "POST /evidence_pack": "query"}
 
 
 @dataclass

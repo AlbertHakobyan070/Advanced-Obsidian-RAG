@@ -111,14 +111,47 @@ def decompose_ablation() -> list[tuple[str, dict]]:
             ("Q-on-cap2", {**base, "decompose": True, "max_per_file": 2})]
 
 
+def graph_ablation() -> list[tuple[str, dict]]:
+    """G-off: the search alone. G-legacy: plus today's walk (canvas edges only).
+    G-e1e4: plus bridges, cross-canvas hops and wikilinks (E4 at its defaults: both
+    directions, no type filter - typed walks are per question, chosen by the agent).
+    Over D-off (HyDE off: no LLM in the loop), with the same final top_k. The relevance
+    gate and decompose are pinned off (graph_search does not re-apply them after its
+    union rerank, so either would give the arms different budgets), and so is the
+    direction; run_bench refuses a configured graph.edge_types, which a per-call walk
+    cannot undo."""
+    base = {**dict(diversity_ablation())["D-off"], "gate": False, "decompose": False}
+    walk = {"bridges": False, "cross_canvas": False, "wikilinks": False, "direction": "both"}
+    return [("G-off", {**base, "graph": None}),
+            ("G-legacy", {**base, "graph": dict(walk)}),
+            ("G-e1e4", {**base, "graph": {**walk, "bridges": True, "cross_canvas": True, "wikilinks": True}})]
+
+
+def generated_ablation() -> list[tuple[str, dict]]:
+    """retrieval.generated_mode (route-then-cite §5.8) over G-off: GM-off lets generated
+    chunks compete as evidence, GM-drop keeps them out of every lane, GM-route swaps
+    them for the primary pages they cite. GM-route also lists the `routed` lane: G-off
+    names its lanes and retrieve() runs none outside that list, so without it route ==
+    drop. `graph: None` keeps the arms on graph_search, so the run reports
+    generated_share. off is config-only over HTTP; in-process, search() takes it per call."""
+    base = dict(graph_ablation())["G-off"]
+    return [(f"GM-{mode}", {**base, "generated_mode": mode}) for mode in ("off", "drop")] + [
+        ("GM-route", {**base, "generated_mode": "route", "lanes": sorted([*base["lanes"], "routed"])})]
+
+
 # config -> the config the report pairs it with (B minus A): each ladder rung against
 # the rung before it, each routing variant and H-on against their reference.
 BASELINES: dict[str, str] = {
     **{b: a for (a, _), (b, _) in zip(LADDER, LADDER[1:])},
     "F-noscope": "F-full", "F-noboost": "F-full", "F-none": "F-full", "H-on": "H-off",
     "D-cap2": "D-off", "D-cap3": "D-off", "Q-on": "Q-off", "Q-on-cap2": "Q-off",
+    "G-legacy": "G-off", "G-e1e4": "G-legacy", "GM-drop": "GM-off", "GM-route": "GM-drop",
     "rr-bge-m3-http": "rr-minilm",          # named configs in eval/configs.yaml (Laya step 0)
 }
+
+# config -> a second config it is paired with too, as summary[config]["paired_also"]: the
+# route-then-cite gate reads GM-route against GM-drop (paired) and against GM-off.
+GATE_PAIRS: dict[str, str] = {"GM-route": "GM-off"}
 
 
 def ladder() -> list[tuple[str, dict]]:
@@ -161,8 +194,8 @@ def load_named(path) -> dict[str, dict]:
 
 def resolve(spec: str, path) -> list[tuple[str, dict]]:
     """A `--configs` value to [(name, overrides)]: `ladder`, `loo`, `factorial`,
-    `routing`, `hyde`, `diversity` or `decompose` (generated; `path` is not read),
-    or comma-separated names from `path`."""
+    `routing`, `hyde`, `diversity`, `decompose`, `graph` or `generated` (generated; `path`
+    is not read), or comma-separated names from `path`."""
     if spec == "ladder":
         return ladder()
     if spec == "loo":
@@ -177,11 +210,16 @@ def resolve(spec: str, path) -> list[tuple[str, dict]]:
         return diversity_ablation()
     if spec == "decompose":
         return decompose_ablation()
+    if spec == "graph":
+        return graph_ablation()
+    if spec == "generated":
+        return generated_ablation()
     named = load_named(path)
     out = []
     for name in (n.strip() for n in spec.split(",")):
         if name not in named:
             raise KeyError(f"unknown config {name!r}; known: {', '.join(sorted(named)) or '(none)'} "
-                           f"(or one of ladder, loo, factorial, routing, hyde, diversity, decompose)")
+                           f"(or one of ladder, loo, factorial, routing, hyde, diversity, decompose, graph, "
+                           f"generated)")
         out.append((name, named[name]))
     return out

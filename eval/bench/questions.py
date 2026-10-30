@@ -47,6 +47,9 @@ TIERS = ("T1", "T2", "T3", "T4")
 SPLITS = ("dev", "test")
 STATUSES = ("draft", "verified", "edited", "rejected")
 AUTHORS = ("draft", "owner")
+# What a question asks the system to do (spec §1.1); optional, so the bench can
+# report graph walks per question shape (a `fact` control must not regress).
+STRATEGIES = ("fact", "explain", "prerequisites", "compare", "synthesis", "procedure", "history")
 
 # fullmatch, not `^...$`: `$` also matches before a trailing newline, and \d
 # also matches non-ASCII digits.
@@ -57,8 +60,8 @@ _ID_RE = re.compile(r"[a-z]+-[0-9]{4}")
 # its gold entry, so it is required exactly when that entry is) and no
 # alternatives of its own.
 _TOP_KEYS = ("id", "question", "suite", "tier", "split", "answerable", "gold", "nuggets",
-             "expect_course", "provenance", "notes")
-_GOLD_KEYS = ("file", "pages", "heading", "required", "alternatives")
+             "expect_course", "provenance", "notes", "strategy")
+_GOLD_KEYS = ("file", "pages", "heading", "required", "alternatives", "hop")
 _ALT_KEYS = ("file", "pages", "heading")
 _PROV_KEYS = ("author", "drafted_by", "seed_chunks", "status", "reviewed_at")
 
@@ -78,6 +81,7 @@ class GoldSource:
     # them, retrieving the twin would score as a miss. Each carries its own locator;
     # an alternative has no alternatives of its own.
     alternatives: tuple["GoldSource", ...] = ()
+    hop: int | None = None                 # graph questions: 1 = the first fact the chain needs
 
     def sources(self) -> tuple["GoldSource", ...]:
         return (self, *self.alternatives)
@@ -96,6 +100,7 @@ class Question:
     expect_course: str | None
     provenance: dict
     notes: str = ""
+    strategy: str | None = None            # one of STRATEGIES, or None
 
 
 def _is_int(x) -> bool:
@@ -132,15 +137,18 @@ def _gold_from_dict(g, err, nested: bool = False) -> GoldSource:
     heading = g.get("heading")
     required = g.get("required", True)
     alts = g.get("alternatives") or []
+    hop = g.get("hop")
     if heading is not None and not isinstance(heading, str):
         raise err(f"gold heading must be a string, got {heading!r}")
     if not isinstance(required, bool):
         raise err(f"gold 'required' must be true or false, got {required!r}")
     if not isinstance(alts, list):
         raise err(f"gold alternatives must be a list, got {alts!r}")
+    if hop is not None and not (_is_int(hop) and hop >= 1):
+        raise err(f"gold hop must be an int of at least 1, got {hop!r}")
     return GoldSource(file=g["file"], pages=None if pages is None else _pages(pages, err),
                       heading=heading, required=required,
-                      alternatives=tuple(_gold_from_dict(a, err, nested=True) for a in alts))
+                      alternatives=tuple(_gold_from_dict(a, err, nested=True) for a in alts), hop=hop)
 
 
 def question_from_dict(d: dict, where: str) -> Question:
@@ -202,11 +210,14 @@ def question_from_dict(d: dict, where: str) -> Question:
         raise err(f"expect_course must be a string or null, got {expect_course!r}")
     if notes is not None and not isinstance(notes, str):
         raise err(f"notes must be a string or null, got {notes!r}")
+    strategy = d.get("strategy")
+    if strategy is not None and strategy not in STRATEGIES:
+        raise err(f"strategy {strategy!r} is not one of {', '.join(STRATEGIES)} (or null)")
 
     return Question(
         id=qid, question=d["question"], suite=d["suite"], tier=d["tier"], split=split,
         answerable=answerable, gold=gold, nuggets=list(raw_nuggets),
-        expect_course=expect_course, provenance=dict(prov), notes=notes or "")
+        expect_course=expect_course, provenance=dict(prov), notes=notes or "", strategy=strategy)
 
 
 def _gold_to_dict(g: GoldSource) -> dict:
@@ -216,6 +227,8 @@ def _gold_to_dict(g: GoldSource) -> dict:
     if g.heading is not None:
         out["heading"] = g.heading
     out["required"] = g.required
+    if g.hop is not None:                      # only when set, like strategy: old files dump unchanged
+        out["hop"] = g.hop
     if g.alternatives:                         # written only when present: most entries have none
         out["alternatives"] = [{k: v for k, v in _gold_to_dict(a).items() if k != "required"}
                                for a in g.alternatives]
@@ -224,12 +237,15 @@ def _gold_to_dict(g: GoldSource) -> dict:
 
 def question_to_dict(q: Question) -> dict:
     """Plain dict in schema order (spec §3.2), ready for yaml/json."""
-    return {
+    out = {
         "id": q.id, "question": q.question, "suite": q.suite, "tier": q.tier,
         "split": q.split, "answerable": q.answerable,
         "gold": [_gold_to_dict(g) for g in q.gold], "nuggets": list(q.nuggets),
         "expect_course": q.expect_course, "provenance": dict(q.provenance), "notes": q.notes,
     }
+    if q.strategy is not None:
+        out["strategy"] = q.strategy
+    return out
 
 
 def load_sets(sets_dir, suites=None, include_rejected: bool = False) -> list[Question]:

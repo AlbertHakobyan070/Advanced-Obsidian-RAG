@@ -107,3 +107,15 @@ def test_the_registry_vision_flag_reaches_the_client(monkeypatch):
               "generation": {"provider": "openai", "model": "auto"}}
     assert LLMClient.from_config(Config(shadow, ROOT)).vision is False
     assert LLMClient.from_provider_override(Config(shadow, ROOT), "local").vision is False
+
+
+def test_json_mode_reaches_only_the_openai_compatible_branch():
+    llm, calls = _client("openai")
+    llm.complete("sys", "usr", json_mode=True)
+    assert calls[0]["response_format"] == {"type": "json_object"}
+    llm, calls = _client("openai")
+    llm.complete("sys", "usr")
+    assert "response_format" not in calls[0]
+    llm, calls = _client("anthropic")
+    llm.complete("sys", "usr", json_mode=True)
+    assert "response_format" not in calls[0]

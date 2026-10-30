@@ -46,7 +46,7 @@ def test_changelog_versions_and_dates_descend_and_every_entry_says_something():
         assert any(e["sections"].values()), f"{e['version']} has no items"
 
 
-@pytest.mark.parametrize("name", ["SKILL.md", "SKILL_RAGOPS.md"])
+@pytest.mark.parametrize("name", ["SKILL.md", "SKILL_RAGOPS.md", "SKILL_NAVIGATOR.md"])
 def test_each_skill_states_the_version(name):
     if not (ROOT / name).is_file():
         pytest.skip(f"{name} is not in the public release; the skills ship from their own repo")

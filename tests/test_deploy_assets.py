@@ -97,6 +97,81 @@ def test_the_personal_generator_runs_on_the_live_config(tmp_path):
     assert mod.main(["x", str(ROOT / "config.yaml"), str(out)]) == 0
 
 
+# retrieval.generated_mode's value, read from the raw line as the personal generator
+# reads it: quoted or bare, because YAML reads a bare off as false.
+_MODE_LINE = r"(?m)^(  generated_mode:)[ \t]+(\S+).*$"
+
+
+def _live_config_text() -> str:
+    if not (DEPLOY / "package" / "make_personal_config.py").is_file():
+        pytest.skip("deploy/package is the author's own packaging; not in the public release")
+    if not (ROOT / "config.yaml").is_file():
+        pytest.skip("no live config.yaml in this checkout")
+    return (ROOT / "config.yaml").read_text(encoding="utf-8")
+
+
+def _personal(tmp_path: Path, text: str) -> str:
+    src = tmp_path / "config.yaml"
+    src.write_text(text, encoding="utf-8")
+    out = tmp_path / "personal.yaml"
+    mod = _load(DEPLOY / "package" / "make_personal_config.py", "make_personal_config")
+    assert mod.main(["x", str(src), str(out)]) == 0
+    return out.read_text(encoding="utf-8")
+
+
+def _with_mode_line(line: str) -> str:
+    """The live config with its generated_mode line replaced by `line`, verbatim."""
+    live = re.sub(_MODE_LINE, lambda m: line, _live_config_text(), count=1)
+    assert line in live.splitlines()                             # the input really holds it
+    return live
+
+
+@pytest.mark.parametrize("tail", [' "off"', " off", " route", " drop", '  "off"'],
+                         ids=["quoted-off", "bare-off", "route", "drop", "two-spaces"])
+def test_bundles_stay_on_drop(tmp_path, tail):
+    """A bundle never ships off or route (spec §6, S2 bundles), whatever the PC runs:
+    quoted "off" is the live line, a bare off parses as false, and drop needs no rewrite."""
+    out = _personal(tmp_path, _with_mode_line("  generated_mode:" + tail))
+    assert yaml.safe_load(out)["retrieval"]["generated_mode"] == "drop"
+
+
+def test_a_quoted_drop_is_left_alone_and_ships_drop(tmp_path):
+    line = '  generated_mode: "drop"'
+    out = _personal(tmp_path, _with_mode_line(line))
+    assert line in out.splitlines() and yaml.safe_load(out)["retrieval"]["generated_mode"] == "drop"
+
+
+def test_a_tab_after_the_colon_fails_before_anything_ships(tmp_path):
+    """PyYAML, which the service loads config.yaml with too, refuses a tab after the
+    colon, so no live config can carry one: the generator fails on it and writes nothing."""
+    with pytest.raises(yaml.YAMLError):
+        _personal(tmp_path, _with_mode_line('  generated_mode:\t"off"'))
+    assert not (tmp_path / "personal.yaml").exists()
+
+
+def test_a_mode_spelling_the_rewrite_cannot_match_fails_the_build(tmp_path):
+    live = _with_mode_line('  "generated_mode": "off"')         # valid YAML; not the anchored spelling
+    assert yaml.safe_load(live)["retrieval"]["generated_mode"] == "off"
+    with pytest.raises(SystemExit, match="retrieval.generated_mode"):
+        _personal(tmp_path, live)
+
+
+def test_a_live_config_without_the_mode_key_needs_no_rewrite(tmp_path):
+    live = re.sub(_MODE_LINE + r"\n", "", _live_config_text(), count=1)
+    assert re.search(_MODE_LINE, live) is None
+    assert "generated_mode" not in yaml.safe_load(_personal(tmp_path, live))["retrieval"]   # missing = drop
+
+
+@pytest.mark.parametrize("mode", ['"off"', "route"])
+def test_the_docker_config_is_on_drop(generator, tmp_path, mode):
+    assert _generate(generator, tmp_path)["retrieval"]["generated_mode"] == "drop"
+    text = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
+    text, hits = re.subn(_MODE_LINE, rf"\1 {mode}", text, count=1)
+    assert hits == 1
+    with pytest.raises(SystemExit, match="retrieval.generated_mode"):    # an example that drifts fails the build
+        _generate(generator, tmp_path, text)
+
+
 # ---------------------------------------------------------------------------
 # Images and compose
 # ---------------------------------------------------------------------------
@@ -206,7 +281,7 @@ def test_the_build_context_rules_keep_the_corpus_and_secrets_out():
     rules = {ln.strip() for ln in (DOCKER / "Dockerfile.dockerignore").read_text(encoding="utf-8").splitlines()
              if ln.strip() and not ln.lstrip().startswith("#")}
     for must in ("**/.env", "**/data", "**/rag_data", "**/*.jsonl", "**/*.pkl", "**/config.yaml",
-                 "eval/sets", "eval/runs", "eval/seeds"):
+                 "eval/sets", "eval/graph_sets", "eval/route_sets", "eval/runs", "eval/seeds"):
         assert must in rules, f"Dockerfile.dockerignore does not exclude {must}"
     assert "!**/.env.example" in rules
     for sidecar in ("ocr-sidecar", "embed-sidecar"):
@@ -311,7 +386,9 @@ def test_the_ignore_rules_behave_as_documented_in_both_layouts():
                         "deploy/docker/healthcheck.sh"]
     sent_never = ["data/chunks.jsonl", "data/vaults/x/chroma_db/chroma.sqlite3", "rag_data/bm25_index.pkl",
                   ".env", "deploy/docker/.env", "config.yaml", "deploy/docker/config.docker.yaml",
-                  "eval/sets/books.yaml", "eval/runs/r1/run.json", "eval/seeds/s.jsonl", ".git/config",
+                  "eval/sets/books.yaml", "eval/graph_sets/pilot-multihop.yaml",
+                  "eval/route_sets/route-covered.yaml", "eval/runs/r1/run.json",
+                  "eval/seeds/s.jsonl", ".git/config",
                   "logs/jobs/j1.log", "src/ingestion/__pycache__/x.pyc"]
     assert not [p for p in kept_in_checkout if _ignored(p, rules)]
     assert [p for p in sent_never if not _ignored(p, rules)] == []

@@ -15,7 +15,9 @@ or the cross-encoder) are counted beside the table, never averaged into it.
 """
 from __future__ import annotations
 
-from eval.bench.questions import AUTHORS, SUITES
+from eval.bench.questions import AUTHORS, STRATEGIES, SUITES
+from eval.bench.route_strata import STRATA_PREFIXES
+from src.utils.timing import ROUTE_KEYS
 
 DIAG_BELOW = 30        # a suite scored on fewer questions than this is diagnostic only
 DASH = "–"             # an empty cell: the config has no number for it
@@ -74,13 +76,11 @@ def _metric_table(summary: dict) -> list[str]:
 def _ladder_table(summary: dict) -> list[str]:
     rows = []
     for name, c in summary.items():
-        p = c.get("paired")
-        if not p:
-            continue
-        d = p["ndcg@10"]
-        real = "yes" if d["lo"] > 0 or d["hi"] < 0 else "no"
-        rows.append([f"{name} vs {p['vs']}", str(p["n"]), _signed(d),
-                     f"{p['hit@5_mcnemar_p']:.3f}", real])
+        for p in filter(None, [c.get("paired"), *c.get("paired_also", [])]):
+            d = p["ndcg@10"]
+            real = "yes" if d["lo"] > 0 or d["hi"] < 0 else "no"
+            rows.append([f"{name} vs {p['vs']}", str(p["n"]), _signed(d),
+                         f"{p['hit@5_mcnemar_p']:.3f}", real])
     if not rows:
         return []
     return ["## Ladder steps and spec baselines (paired)", "",
@@ -119,6 +119,74 @@ def _author_table(summary: dict) -> list[str]:
                         "`draft` = drafted by a model, `owner` = hand-written. ")
 
 
+def _strategy_table(summary: dict) -> list[str]:
+    if not any("by_strategy" in c for c in summary.values()):   # no scored question named a strategy
+        return []
+    # a config none of whose scored rows named one has no by_strategy: dashes, not a KeyError
+    return _group_table({name: {**c, "by_strategy": c.get("by_strategy", {})} for name, c in summary.items()},
+                        "by_strategy", STRATEGIES, "strategy")
+
+
+def _prefix_tables(summary: dict) -> list[str]:
+    """One by_suite-style table per route stratum, over the configs that carry by_prefix."""
+    out = []
+    for p in STRATA_PREFIXES:
+        strata = {name: {"by_prefix": c["by_prefix"][p]} for name, c in summary.items() if "by_prefix" in c}
+        out += _group_table(strata, "by_prefix", ["ALL", *SUITES], f"route stratum {p}",
+                            "`rtc` = gold a generated chunk's route pointer covers, `rtu` = in-domain gold "
+                            "no pointer covers; `ALL` = every scored question of the stratum. ")
+    return out
+
+
+def _route_table(summary: dict) -> list[str]:
+    rows = [[name] + [f"{c['route'][k]:.2f}" for k in ROUTE_KEYS]
+            for name, c in summary.items() if c.get("route")]
+    if not rows:
+        return []
+    return ["## Routed lane", "",
+            "Means per question, over the rows without an error, of the retrieval echo's `route` "
+            "(generated_mode: route). router hits = generated chunks the router search found; routed / "
+            "unrouted = those the route sidecar has targets for / none for; targets = distinct cited spans "
+            "taken; targets missing = cited spans whose file is not in the store; new = routed chunks no "
+            "other lane had found.", ""] \
+        + _table(["config"] + [k.replace("_", " ") for k in ROUTE_KEYS], rows) + [""]
+
+
+def _graph_table(summary: dict) -> list[str]:
+    rows = []
+    for name, c in summary.items():
+        g = c.get("graph")
+        if g:
+            via = DASH if g["gold_via_graph"] is None else f"{g['gold_via_graph']:.2f}"
+            rows.append([name, f"{g['added']:.2f}", f"{g['added_in_final']:.2f}",
+                         via, f"{g['generated_share']:.3f}", f"{g['seeded']:.2f}"])
+    if not rows:
+        return []
+    return ["## Graph contribution", "",
+            "Means per question, over the rows without an error. added = chunks the walk brought "
+            "in by following an edge (hop 1 or more, bridges included); added in final = those the "
+            "union rerank kept; gold via graph = required gold in the top 10 found only through "
+            "walked chunks and absent from the search's own top 10 before the union rerank, per "
+            "answerable question; generated share = generated chunks / the final list; seeded = "
+            "chunks the walk's own query seeding added (canvas hits the search lacked, reached by "
+            "no edge, never credited to the walk, but in the union rerank, so a G-legacy vs G-off "
+            "delta includes them).", ""] \
+        + _table(["config", "added", "added in final", "gold via graph", "generated share", "seeded"],
+                 rows) + [""]
+
+
+def _hop_table(summary: dict) -> list[str]:
+    hops = sorted({h for c in summary.values() for h in c.get("by_hop", {})}, key=int)
+    if not hops:
+        return []
+    rows = [[name] + [f"{c['by_hop'][h]['mean']:.3f} (n={c['by_hop'][h]['n']})" if h in c["by_hop"] else DASH
+                      for h in hops]
+            for name, c in summary.items() if c.get("by_hop")]
+    return ["## Recall@10 by hop", "",
+            "Required gold per hop of the chain; n = scored questions whose gold names that hop.", ""] \
+        + _table(["config"] + [f"hop {h}" for h in hops], rows) + [""]
+
+
 def _latency_table(summary: dict) -> list[str]:
     stages: list[str] = []
     for c in summary.values():
@@ -151,6 +219,8 @@ def render(summary: dict, meta: dict) -> str:
     out = [f"# Bench run {meta['run_id']}", "", *_header(summary, meta), "",
            "## Retrieval by configuration", "", *_metric_table(summary), "",
            *_ladder_table(summary), *_suite_table(summary), *_author_table(summary),
+           *_strategy_table(summary), *_prefix_tables(summary), *_graph_table(summary),
+           *_route_table(summary), *_hop_table(summary),
            *_latency_table(summary), "",
            "## Errors", "", *_errors(summary), ""]
     return "\n".join(out)

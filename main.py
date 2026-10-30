@@ -13,6 +13,16 @@ Build the corpus
                                                # re-embed into a NEW collection, resumably;
                                                # the active one is never written
     python main.py graph-embed                 # rebuild <collection>__graph from scratch
+    python main.py relocate --map rename_map.jsonl [--dry-run|--verify]
+                                               # metadata-only move of indexed files
+                                               # (servers down)
+    python main.py stamp-provenance --dry-run|--yes
+                                               # metadata-only provenance: generated stamp
+                                               # by the rule (--yes: servers down)
+    python main.py route-pointers [--out PATH] # route mode's pointer sidecar
+                                               # (generated chunk -> cited pages)
+    python main.py map PDF --chapter T|--pages A-B   # grounded knowledge map into the staging
+                                               # folder; --estimate FOLDER inventories PDFs
 
 Ingest lanes (each writes its own *_chunks.jsonl; then `index --append` it)
     ingest-pdfs | ingest-notebooks | ingest-code | ingest-canvas | ingest-md
@@ -43,6 +53,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from eval.bench.cli import add_bench_parser
+from src import index_ops
+from src.utils import lane_guard
 from src.utils.config_loader import load_config
 from src.utils.console import force_utf8_console
 from src.utils.logger import configure_logging, get_logger
@@ -153,7 +165,11 @@ def cmd_index(args):
 
     emb = Embedder.from_config(cfg)
     if getattr(args, "append", None):
-        stats = emb.append_indexes(Path(args.append))
+        try:
+            stats = emb.append_indexes(Path(args.append))
+        except index_ops.ReplaceRequired as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(2)
         if stats["appended"] == 0:
             # An append that appends nothing is always an upstream mistake
             # (empty/misfiltered ingest). Fail loudly so job queues show it red.
@@ -183,6 +199,11 @@ def cmd_ingest_pdfs(args):
         
     cfg = load_config(args.config)
     _bootstrap_logging(cfg)
+    lane_guard.exit_if_refused(
+        cfg, "pdf", args.output,
+        scoped=any((args.include_path, args.exclude_path, getattr(args, "include_files", None),
+                    args.only_books, args.skip_books, args.max_pages,
+                    getattr(args, "pages", None))))
     from src.ingestion.pdf_loader import PDFLoader, load_skip_set
 
     loader = PDFLoader.from_config(cfg)
@@ -248,6 +269,9 @@ def cmd_ingest_pdfs(args):
 def cmd_ingest_notebooks(args):
     cfg = load_config(args.config)
     _bootstrap_logging(cfg)
+    lane_guard.exit_if_refused(
+        cfg, "notebooks", args.output,
+        scoped=any((args.include_path, args.include_files, args.exts)))
     from src.ingestion.ipynb_loader import NotebookLoader
 
     loader = NotebookLoader.from_config(cfg)
@@ -278,6 +302,9 @@ def cmd_ingest_notebooks(args):
 def cmd_ingest_code(args):
     cfg = load_config(args.config)
     _bootstrap_logging(cfg)
+    lane_guard.exit_if_refused(
+        cfg, "code", args.output,
+        scoped=any((args.include_path, args.exclude_path, args.include_files, args.exts)))
     from src.ingestion.code_loader import CodeLoader
 
     loader = CodeLoader.from_config(cfg)
@@ -311,6 +338,7 @@ def cmd_ingest_code(args):
 def cmd_ingest_canvas(args):
     cfg = load_config(args.config)
     _bootstrap_logging(cfg)
+    lane_guard.exit_if_refused(cfg, "canvas", args.output, scoped=bool(args.include_path))
     from src.ingestion.canvas_loader import CanvasLoader
 
     loader = CanvasLoader.from_config(cfg)
@@ -344,6 +372,9 @@ def cmd_ocr_studio_ingest(args):
     canonical one). The console queues `index --append` of it next."""
     cfg = load_config(args.config)
     _bootstrap_logging(cfg)
+    # Alias and cross-lane refusal only: the console pins the name to
+    # ocrstudio_*_chunks.jsonl, and this lane has no canonical file to protect.
+    lane_guard.exit_if_refused(cfg, "ocrstudio", args.output, scoped=False)
     from src.ocr_studio.ingest import build_chunks, write_chunks
 
     vault = Path(cfg.get("pdf.vault_path") or cfg.get("parser.vault_path"))
@@ -366,13 +397,17 @@ def cmd_ingest_md(args):
     scoped runs (parents_md.jsonl is a whole-vault artifact)."""
     cfg = load_config(args.config)
     _bootstrap_logging(cfg)
+    lane_guard.exit_if_refused(cfg, "markdown", args.output, scoped=True)   # --include-path is required
     from src.ingestion.obsidian_parser import ObsidianParser
+    from src.utils.provenance import provenance_rule
 
     vault = args.vault or cfg.get("parser.vault_path") or cfg.get("pdf.vault_path")
     parser = ObsidianParser(vault, config={
         "chunking": args.chunking or cfg.get("parser.chunking", "heading"),
         "include_path": args.include_path,
+        "skip_dirs": list(cfg.get("parser.skip_dirs") or []),
         "skip_roots": [],                      # include_path is the scope here
+        "provenance_rule": provenance_rule(cfg),
     })
     docs = parser.parse_all()
     if not docs:
@@ -529,6 +564,234 @@ def cmd_stamp(args):
         if twin in existing and read_sidecar(chroma_dir, twin) is None:
             print(f"   HyPE collection {twin!r} is not stamped: "
                   f"`rag stamp --collection {twin}` verifies it too.")
+
+
+def _print_relocate_plan(p):
+    """The relocate dry-run: one block per row, the batch totals, and whether apply would run."""
+    shown = set()
+    for r in p["rows"]:
+        files = ", ".join(f"{f}: {n}" for f, n in r["jsonl"].items()) or "none"
+        print(f"[{r['n']}] {r['old_sf']}")
+        print(f" -> {r['new_sf']}")
+        print(f"    n_chunks {r['n_chunks']} | jsonl ids {r['ids']} ({files}) | "
+              f"parents {r['parents']} | hype {r['hype']}")
+        print("    " + " | ".join(f"{c} {n}" for c, n in r["cols"].items()))
+        ocr = r["ocr_dir"].name if r["ocr_dir"] else "none"
+        disk = (f"new {'present' if r['disk_new'] else 'MISSING'}, "
+                f"old {'absent' if r['disk_old_gone'] else 'PRESENT'}")
+        print(f"    ocr_studio: {ocr} | eval gold lines: {r['eval']} | disk: {disk}")
+        for w in r["warnings"]:
+            print(f"    warn: {w}")
+            shown.add(w)
+    for w in p["warnings"]:
+        if w not in shown:
+            print(f"warn: {w}")
+    print("TOTAL  " + " · ".join(f"{k} {v}" for k, v in p["totals"].items()))
+    if p["blockers"]:
+        print("Apply would: REFUSE")
+        for b in p["blockers"]:
+            print(f"  - {b}")
+    else:
+        print("Apply would: PROCEED")
+
+
+def cmd_relocate(args):
+    cfg = load_config(args.config)
+    _bootstrap_logging(cfg)
+    up = index_ops.answering_ports(cfg)
+    if up:
+        ports = ", ".join(":" + str(p) for p in up)
+        print(f"ERROR: {ports} answers. Stop :8051, :8052 and Streamlit first "
+              f"(a live reader blocks Chroma's writes)", file=sys.stderr)
+        sys.exit(2)
+    from src.utils.chroma_client import persistent_client
+
+    client = persistent_client(cfg.path("paths.chroma_dir"))
+    try:
+        moves, quarantined = index_ops.load_map(args.map)
+        if args.verify:
+            failures = index_ops.verify(cfg, moves, quarantined, client)
+            for line in failures:
+                print(f"FAIL: {line}")
+            if failures:
+                sys.exit(1)
+            print(f"PASS: {len(moves)} moved file(s) and {len(quarantined)} quarantine row(s) verified")
+            return
+        if args.dry_run:
+            p = index_ops.plan(cfg, moves, quarantined, client)
+            _print_relocate_plan(p)
+            if p["blockers"]:
+                sys.exit(1)
+            return
+        done = index_ops.apply(cfg, moves, quarantined, client)
+    except index_ops.RelocateError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(2)
+
+    print(f"Relocated {len(moves)} file(s): " + " · ".join(
+        [f"jsonl {sum(done['jsonl'].values())}", f"parents {done['parents']}", f"hype {done['hype']}"]
+        + [f"{c} {n}" for c, n in done["collections"].items()] + [f"ocr_studio {done['ocr_studio']}"]))
+    print(f"NEXT: python rebuild_bm25.py (servers still down), then main.py relocate --map {args.map} "
+          f"--verify. Relocated files: re-ingest only as REPLACE (contract 2.6).")
+
+
+def cmd_stamp_provenance(args):
+    cfg = load_config(args.config)
+    _bootstrap_logging(cfg)
+    from src.utils.chroma_client import persistent_client
+    from src.utils.provenance import provenance_rule
+
+    rule = provenance_rule(cfg)
+    chroma_dir = cfg.path("paths.chroma_dir")
+    client = persistent_client(chroma_dir)
+    try:
+        index_ops.refuse_if_building(chroma_dir, client)
+    except index_ops.StoreBusy as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(2)
+    if args.yes:
+        up = index_ops.answering_ports(cfg)
+        if up:
+            ports = ", ".join(":" + str(p) for p in up)
+            print(f"ERROR: {ports} answers. Stop :8051, :8052 and Streamlit first "
+                  f"(a live reader blocks Chroma's writes)", file=sys.stderr)
+            sys.exit(2)
+    try:
+        p = (index_ops.stamp_provenance if args.yes else index_ops.provenance_plan)(cfg, client, rule)
+    except index_ops.ProvenanceStampError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(2)
+    for sf, n in sorted(p["files"].items()):
+        print(f"{sf}: {n} row(s)")
+    for name, n in sorted(p["unparseable"].items()):
+        print(f"warn: {name}: {n} unparseable line(s); the stamp passes them through untouched "
+              f"and cannot read their provenance")
+    print("stamp  " + " · ".join([f"{f} {n}" for f, n in p["jsonl"].items()]
+                                 + [f"{c} {n}" for c, n in p["chroma"].items()] or ["nothing"]))
+    t = p["totals"]
+    print(f"TOTAL  jsonl ids {t['jsonl_ids']} · bm25 {t['bm25']} · "
+          + " · ".join(f"{c} {n}" for c, n in t["chroma"].items()))
+    if not args.yes:
+        print(f"Dry run: {len(p['ids'])} id(s) would be stamped provenance: generated. Nothing was written")
+        return
+    print(f"Stamped {len(p['ids'])} id(s) provenance: generated")
+    print(f"NEXT: {sys.executable} rebuild_bm25.py, then restart :8051")
+
+
+def cmd_route_pointers(args):
+    from collections import Counter
+
+    from src.retrieval.route import build_pointers, write_pointers
+    from src.utils.provenance import provenance_rule
+
+    cfg = load_config(args.config)
+    _bootstrap_logging(cfg)
+    # --out never reads the route block, so a scratch sidecar can be built from a config
+    # that has none. A relative --out is from the cwd.
+    if args.out:
+        out = Path(args.out).absolute()
+    elif cfg.get("retrieval.route.pointers_file"):
+        out = cfg.path("retrieval.route.pointers_file")
+    else:
+        raise ValueError("route-pointers needs retrieval.route.pointers_file in config.yaml "
+                         "(the retrieval.route block), or --out PATH")
+    lane_guard.refuse_alias(str(out))
+    if out.name.lower().endswith(".jsonl") or out.name.lower() in lane_guard.sidecar_names(cfg):
+        raise ValueError(f"{out.name}: the pointer sidecar is one JSON file, never a chunk JSONL "
+                         f"(it would join the sparse union) or the parents or HyPE sidecar: "
+                         f"name it route_pointers.json")
+    if not index_ops.chunk_jsonls(cfg):
+        raise ValueError(f"no chunk JSONL at {cfg.path('paths.chunks_file')} or beside it: "
+                         f"refusing to write an empty sidecar. Point --config at the config "
+                         f"whose data folder holds the corpus")
+    vault = cfg.path("parser.vault_path")
+    if not vault.is_dir():
+        raise ValueError(f"parser.vault_path {vault} is not a folder: the notes' frontmatter "
+                         f"cannot be read, so every note would be unrouted")
+    data = build_pointers(cfg, provenance_rule(cfg))
+    write_pointers(out, data)
+    print(f"route pointers: {len(data['pointers'])} routed · {len(data['unrouted'])} unrouted "
+          f"(generated rows) -> {out}")
+    for why, n in Counter(data["unrouted"].values()).most_common(10):
+        print(f"  {n:>6}  {why}")
+
+
+def _page_range(s: str) -> tuple[int, int]:
+    import re
+
+    m = re.fullmatch(r"(\d+)-(\d+)", s)
+    if not m:
+        raise argparse.ArgumentTypeError(f"{s!r} is not a page range like 140-240")
+    return int(m[1]), int(m[2])
+
+
+def _map_estimate(kcfg, folder):
+    """Inventory per PDF, plus a projection from the finished runs under the staging root."""
+    import json
+
+    from src.knowledge_map.scout import inventory
+
+    rows = inventory(Path(folder), kcfg)
+    if not rows:
+        print(f"no PDFs under {folder}")
+        return
+    for r in rows:
+        print(f"{r['file']}  pages {r['pages']}  text {r['text_pages']}  scanned {r['scanned_pages']}  "
+              f"toc_chapters {r['toc_chapters']}  captions {r['captions']}  images {r['images']}")
+    rates = []                                       # (tokens/page, seconds/page) per ok run
+    for f in sorted(kcfg.staging_dir.rglob("run.json")):
+        rec = json.loads(f.read_text(encoding="utf-8"))
+        if rec.get("status") != "ok":
+            continue
+        a, b = rec["source"]["pages"]
+        t = rec["totals"]
+        rates.append(((t["input_tokens"] + t["output_tokens"]) / (b - a + 1), t["wall_seconds"] / (b - a + 1)))
+    if not rates:
+        print("no finished runs under the staging root yet: token and time rates come after the first runs")
+        return
+    tok = sum(r[0] for r in rates) / len(rates)
+    sec = sum(r[1] for r in rates) / len(rates)
+    print(f"projection from {len(rates)} finished run(s): {tok:.1f} tokens/page, {sec:.1f} s/page")
+    for r in rows:
+        n = r["text_pages"]
+        print(f"{r['file']}: ~{round(tok * n)} tokens, ~{sec * n / 60:.1f} min if all {n} text pages were mapped")
+
+
+def cmd_map(args):
+    cfg = load_config(args.config)
+    _bootstrap_logging(cfg)
+    from src.knowledge_map.config import load_km_config
+    from src.knowledge_map.run import run_map
+
+    try:
+        if args.estimate:
+            return _map_estimate(load_km_config(cfg), args.estimate)
+        if not args.pdf:
+            raise ValueError("pass a PDF (or --estimate FOLDER)")
+        if (args.chapter is None) == (args.pages is None):
+            raise ValueError("pass exactly one of --chapter or --pages")
+        rec = run_map(cfg, Path(args.pdf), chapter=args.chapter, pages=args.pages, template=args.template,
+                      dry_run=args.dry_run,
+                      export_prompts=Path(args.export_prompts) if args.export_prompts else None,
+                      import_extract=Path(args.import_extract) if args.import_extract else None,
+                      title=args.title, argv=sys.argv[1:])
+    except ValueError as e:                          # ScoutError is a ValueError
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(2)
+    if rec["status"] == "failed":
+        print(f"FAILED: {rec['reason']}", file=sys.stderr)
+        print(f"NEXT: checkpoints are kept under {rec['folder']}\\.work; fix the cause and rerun the same command "
+              f"to resume. The run record is in {rec['folder']}\\runs", file=sys.stderr)
+        sys.exit(1)
+    if rec["status"] == "dry_run":
+        print("NEXT: rerun without --dry-run to build the map")
+    elif rec["status"] == "exported":
+        print("NEXT: write each extract-<unit>.json reply, then rerun with --import-extract DIR")
+    else:
+        print(f"NEXT: the map is in {rec['folder']} (canvas, map.json, run.json); nothing was ingested")
+        print("NEXT: to place it by hand, copy the .canvas into a vault folder listed in provenance.generated_paths "
+              "(or keep the '(generated)' name), then run ingest-canvas and "
+              "index --append data/canvas_chunks.jsonl")
 
 
 def cmd_serve(args):
@@ -780,6 +1043,61 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Embed only N graph chunks, for a smoke test. The result stays "
                          "'building' (never served)")
     ge.set_defaults(func=cmd_graph_embed)
+
+    rl = sub.add_parser("relocate",
+                        help="Metadata-only move of indexed files to new vault paths from a "
+                             "rename_map.jsonl: every chunk JSONL, parents, HyPE, every Chroma "
+                             "collection, OCR Studio. Ids, text and vectors untouched. Canvas files "
+                             "are refused (REPLACE them). Servers must be down")
+    rl.add_argument("--map", required=True, metavar="JSONL",
+                    help="The approved rename_map.jsonl (rows with kind file and indexed true)")
+    mode = rl.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true",
+                      help="Print the plan and change nothing; exit 1 if apply would refuse")
+    mode.add_argument("--verify", action="store_true",
+                      help="After apply and rebuild_bm25.py: check the result; exit 1 on a failure")
+    rl.set_defaults(func=cmd_relocate)
+
+    sp = sub.add_parser("stamp-provenance",
+                        help="Metadata-only stamp of provenance: generated on the rows the "
+                             "provenance rule calls generated whose stored key says otherwise: "
+                             "every chunk JSONL and chunk collection. Ids, text and vectors "
+                             "untouched; HyPE and the graph twin are not written")
+    mode = sp.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--dry-run", action="store_true",
+                      help="Print the plan and its totals and change nothing (servers may be up)")
+    mode.add_argument("--yes", action="store_true",
+                      help="Apply: Chroma first, then the JSONLs (with a .bak). Servers must be down")
+    sp.set_defaults(func=cmd_stamp_provenance)
+
+    rp = sub.add_parser("route-pointers",
+                        help="Build route mode's pointer sidecar: each generated chunk's doc_id "
+                             "mapped to the primary pages it cites. Reads the chunk JSONLs and "
+                             "the vault; never writes a store. Restart :8051 afterwards")
+    rp.add_argument("--out", default=None, metavar="PATH",
+                    help="Write here instead of retrieval.route.pointers_file (relative = from "
+                         "the cwd); the route block is then not needed")
+    rp.set_defaults(func=cmd_route_pointers)
+
+    mp = sub.add_parser("map",
+                        help="Build a grounded knowledge map (canvas + map.json) of one PDF chapter into "
+                             "the staging folder. Never writes the vault or the index")
+    mp.add_argument("pdf", nargs="?", default=None, help="The PDF (inside the vault); optional with --estimate")
+    mp.add_argument("--chapter", default=None, metavar="TITLE", help="Chapter title from the PDF outline")
+    mp.add_argument("--pages", type=_page_range, default=None, metavar="A-B",
+                    help="1-based PDF page range, instead of --chapter")
+    mp.add_argument("--template", default=None,      # run_map checks it against templates.yaml
+                    help="Skip the classifier and use this template (a name in src/knowledge_map/templates.yaml)")
+    mp.add_argument("--dry-run", action="store_true", help="Scout, classify, print the plan; write nothing")
+    mp.add_argument("--export-prompts", default=None, metavar="DIR",
+                    help="Write each extraction unit's rendered prompt to DIR and stop")
+    mp.add_argument("--import-extract", default=None, metavar="DIR",
+                    help="Read DIR/extract-<unit>.json instead of calling the extract model")
+    mp.add_argument("--title", default=None, metavar="SHORT", help="Short book title for the folder and canvas name")
+    mp.add_argument("--estimate", default=None, metavar="FOLDER",
+                    help="Print a page/scan/outline inventory of every PDF under FOLDER (and a token/time "
+                         "projection from finished runs); run nothing")
+    mp.set_defaults(func=cmd_map)
 
     add_bench_parser(sub)
 

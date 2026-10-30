@@ -73,6 +73,7 @@ this page, as the authoritative list for a running install.
 | `GET /compare/options` | **Start here for `/compare`.** Ready-to-post branch sets per dimension, the real branch caps, and the reason any backend is unavailable. |
 | `POST /graph/expand` | **Graph mode** — walk the hand-drawn edges of the graph lane. No LLM. **Experimental, off by default.** See [Graph mode](#graph-mode). |
 | `POST /answer` | Generate over a **caller-supplied** document set. No retrieval runs. See [Graph mode](#graph-mode). |
+| `POST /evidence_pack` | **Evidence pack**: one search per sub-question, plus an optional graph walk, merged into one evidence list with provenance, coverage and gaps. Writes no answer. See [Evidence pack](#evidence-pack). |
 
 Both `/search` and `/query` accept the same retrieval controls:
 
@@ -89,12 +90,14 @@ Both `/search` and `/query` accept the same retrieval controls:
 | `rerank` | Method for this call: `cross_encoder`, `http`, `lexical`, `none`, or `laya` — **experimental**: refused unless `retrieval.laya.enabled`, never swapped for another method. See [Laya reranker](#laya-reranker-experimental). |
 | `rerank_instruction` | **Ranking criterion** in plain language (max 2000 chars). See [Rerank instructions](#rerank-instructions). |
 | `lane_weights` | Per-lane RRF fusion weights, e.g. `{"sparse": 1.5}`. See [Lane weights](#lane-weights). |
-| `lanes` | Restrict the call to a subset of the lanes (names under [Lane weights](#lane-weights)), e.g. `["sparse"]`: a lane outside the list is not run at all. It only restricts — a conditional lane (code, scope, `omnisearch`, `hype`) still needs its own trigger. An empty list or an unknown name is an error ([below](#when-a-knob-is-wrong)); the echo's `lanes_requested` and `lanes_run` show what ran. |
+| `lanes` | Restrict the call to a subset of the lanes (names under [Lane weights](#lane-weights)), e.g. `["sparse"]`: a lane outside the list is not run at all. It only restricts — a conditional lane (code, scope, `omnisearch`, `hype`, and `routed` under `generated_mode: route`) still needs its own trigger. An empty list or an unknown name is an error ([below](#when-a-knob-is-wrong)); the echo's `lanes_requested` and `lanes_run` show what ran. |
 | `metadata_boost` | `true` / `false` forces the course/domain/tag metadata boost on or off for this call; unset follows `retrieval.metadata_boost`. |
 | `scope_lanes` | `true` / `false` forces the scope lanes (`dense_scope` / `sparse_scope`) on or off for this call. The scope is detected and echoed either way; unset follows `retrieval.scope_lanes`. |
 | `max_per_file` | At most this many chunks of one source file in the final list (0–50, `0` = no cap), best first. When the cap leaves fewer than `top_k`, the skipped chunks fill the tail. Unset follows `retrieval.max_per_file`. |
 | `decompose` | `true` / `false` forces **query decomposition**: one generation-model call (on `/search` too) splits a multi-part question into sub-queries, each retrieved and reranked against its own text, and the branches merge by reciprocal rank so every part keeps a seat. An atomic question runs unchanged. A failed or unparseable split is the call's error, never a quiet fallback to one search. Unset follows `retrieval.decompose.enabled`; the echo's `decompose` says what ran. |
 | `gate` / `gate_threshold` / `gate_scorer` | The post-rerank **relevance gate**: drop chunks scoring below a cutoff before generation, and abstain when nothing is left. Off by default; a `gate_threshold` alone turns it on for the call. See [Relevance gate](#relevance-gate). |
+| `generated_mode` | `"drop"` keeps generated chunks out of this call's evidence. `"route"` does too, and lets generated hits bring the primary pages they cite into the pool, each such source carrying `found_via` ([Route mode](#route-mode)). `off` is config-only (`retrieval.generated_mode`), so a per-call `"off"` is a `422`. Unset follows the configured mode. `/compare` branches and `/evidence_pack` take it too. |
+| `source_file` / `pages` | Restrict every lane to one file's primary chunks, by any stored spelling of its path (`GET /outline` lists the sources), and with `pages: [first, last]` to the chunks whose pages overlap that range. The pages `neighbor_context` adds stay inside them too, and Omnisearch does not run. Under `route`, the routed lane takes only the cited spans inside them, clipped to them; a span outside counts in no `route` field. The echo's `file_filter` repeats them, with `matched: false` when the store holds no primary chunk there: an unknown file, pages outside it, or a map. `pages` needs `source_file`. Needs `retrieval.sparse_backend: bm25s`. `/compare` branches and `/evidence_pack` take them too; `/evidence_pack` refuses them with `graph: true`. |
 | `include_text` | Characters of chunk text to return (0–6000). |
 | `max_sources` | Cap the number of sources returned. |
 
@@ -124,8 +127,12 @@ unknown lane or a negative weight in `lane_weights`; an unknown `rerank` mode,
 or one that is refused (`laya` while `retrieval.laya.enabled` is off); a gate
 that cannot work — no threshold anywhere, `rerank: none` under the
 `rerank_score` scorer, an unknown `gate_scorer`, or a scorer other than the
-configured one without its own `gate_threshold`; or `decompose` together with
-the gate, which would judge chunks scored against sub-queries.
+configured one without its own `gate_threshold`; `decompose` together with
+the gate, which would judge chunks scored against sub-queries;
+`generated_mode: "route"` on a server with no `retrieval.route` block or with
+the tantivy sparse backend; or `pages` without `source_file`, a `pages` range
+that is not `1 <= first <= last`, or `source_file` on the tantivy sparse
+backend.
 
 A wrong **type** is different: `top_k: "ten"`, `lanes: "sparse"` (a string, not
 a list), a non-numeric `gate_threshold` — or a number outside a field's
@@ -138,21 +145,80 @@ a gap in the corpus. And change the knob rather than resending the same body.
 
 The rest keep their real status codes. [`/graph/expand` and `/answer`](#graph-mode)
 answer `400` for a bad seed or document list, and `/compare` answers `400` for
-duplicate branch ids or too many query-mode branches. A generation failure on
+duplicate branch ids or too many query-mode branches. A `route` the server
+cannot serve is a `409` ([Route mode](#route-mode)). A generation failure on
 `/query` is also reported in the body (`confidence: "ERROR"`), but keeps the
 `sources` and `retrieval` that were already retrieved.
+
+### Route mode
+
+Under `generated_mode: route`, generated chunks are kept out of the evidence as
+under `drop`, and they become routers. The routed lane searches the generated
+rows (a dense pass and a sparse pass, plus the generated parents the `hype`
+lane found), looks up the primary pages each hit cites, and
+brings those pages into the pool, where they fuse and rerank like any other
+candidate. Its fusion weight is the `routed` entry of `retrieval.lane_weights`
+or a per-call `lane_weights` ([Lane weights](#lane-weights)); in search, a `lanes` list
+without `routed` runs route as `drop` (the routed lane does not run), but a graph walk
+under route still swaps the walked maps for their routed primaries. The block
+`retrieval.route` holds the sidecar
+path and the lane's caps: `router_k`, `per_target`, `max_targets` and
+`max_new`. Read them from `config.yaml`.
+
+- **`found_via`.** Each source the lane brought in carries
+  `[{id, label}]`: the generated chunks whose cites found it. Every other
+  source, and every source in another mode, has `[]`. Cite the source, never
+  the map.
+- **The sidecar.** `retrieval.route.pointers_file` maps each generated chunk id
+  to the spans it cites, `{source_file, page_start, page_end}` (null pages for a
+  whole-file cite), and lists the unrouted ids with a reason. Build it with
+  `python main.py route-pointers` or the console's `route_pointers` job. It
+  reads the chunk JSONLs and the vault and writes no store. `:8051` loads it
+  once at startup, in every mode, whenever the `retrieval.route` block is set
+  and the file exists, so restart `:8051` after a build. Each vault has its
+  own.
+- **The `409`.** While the store held generated rows at startup and no sidecar
+  is loaded, a per-call `"route"` is HTTP **409** with
+  `{"detail": {"error": "…"}}`, and the error names the build. This is a real
+  status, unlike [a bad knob](#when-a-knob-is-wrong). It applies on `/search`,
+  `/query` (with and without `retrieve_only`), `/evidence_pack` and `/compare`.
+  On `/compare`, one `route` branch fails the whole request, after the earlier
+  branches ran, so their results are lost too. With zero generated rows, route
+  runs without a sidecar. Route also needs `retrieval.sparse_backend: bm25s`,
+  and tantivy is refused first: on tantivy a per-call route is the knob error
+  above, never the `409`, whose sidecar build could not make it route.
+- **A configured route** refuses to start under the same condition:
+  `/health` is `failed` with `RouteUnavailableError`, and its `hint` names the
+  build. A configured route with no `retrieval.route` block, or with the
+  tantivy sparse backend, fails to start too.
+- **Coverage.** A ready `GET /health` and `GET /schema` (under
+  `provenance.generated_mode`) carry `route`:
+  `{generated_rows, with_pointers, sidecar}`. These are the rows stamped
+  generated, how many of them the sidecar routes, and the loaded sidecar's path
+  (null when none is). Agent files and other rows the sidecar cannot read stay
+  unrouted, so `with_pointers` below `generated_rows` is normal. The key's
+  presence is the capability probe: a server without it predates route mode.
+  It shows that the server knows route mode and whether a sidecar is loaded,
+  not that a call can route: with no `retrieval.route` block, or on tantivy, a
+  per-call route still fails.
+- **What routed.** Each call's echo carries `retrieval.route`; see
+  [the retrieval echo](#the-retrieval-echo). Generated rows indexed after the
+  sidecar was built count as `unrouted` until it is rebuilt and `:8051`
+  restarted.
 
 ### Inspect and discover
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /health` | `{ready, state, uptime_s, version, commit, error?}`. `version` is the product version; `commit` the git commit the process started from (null outside a git checkout). `state` is `ready`, `loading`, or `failed` — see [Readiness](#readiness-and-failure). |
-| `GET /schema` | Machine-readable capability map: request fields, branch limits, the live preset registry, and the endpoint map. |
+| `GET /health` | `{ready, state, uptime_s, version, commit, generated_mode?, route?, error?}`. `version` is the product version; `commit` the git commit the process started from (null outside a git checkout). `generated_mode`, present once `ready`, is `retrieval.generated_mode` as the pipeline resolved it. `route`, present once `ready`, is route coverage, `{generated_rows, with_pointers, sidecar}` ([Route mode](#route-mode)). `state` is `ready`, `loading`, or `failed` — see [Readiness](#readiness-and-failure). |
+| `GET /schema` | Machine-readable capability map: request fields, branch limits, the live preset registry, and the endpoint map. `provenance.generated_mode` describes each mode and carries the same `route` coverage. |
 | `GET /config` | Live retrieval defaults, the preset registry, the active reranker, and generation provenance. |
 | `POST /config` | Change retrieval defaults on the **warm** pipeline with no restart. `persist: true` also rewrites `config.yaml` and requires operator authorization. |
 | `GET /providers` | Configured generation backends: protocol, endpoint, default model, the *name* of the environment variable holding each key, and readiness flags. Never returns a secret value. |
 | `GET /chunks/{chunk_id}` | Fetch the current evidence record behind a stable id returned by `/search`, `/query` or `/compare`. |
 | `GET /stats` | Corpus size with per-domain and per-file-type breakdown, plus `latency`: p50/p95 per endpoint, total and per stage, over the recent in-memory calls, so a caller can price a call before making it. |
+| `GET /outline` | What the vault holds, for an agent that does not know it: `groups` of the primary sources by `domain` and `course`, each with `file_type`, `chunks` and `pages`, paged over sources (`limit`, `offset`; `total` counts the matches; `domain` filters exactly, `course` as a substring), and `maps`, the generated files, whole and apart. Built when `:8051` starts. See [Start from the outline](agents.md#start-from-the-outline-when-you-do-not-know-the-vault). |
+| `GET /outline/{source}` | One file's outline: a source's `chapters` (`chapter`, `page_start`, `page_end`, `chunks`), or a map's `concepts`, each with the primary spans it cites. `404` for a file the index does not hold and for an agent-instruction file; `503` while no bm25 index is built. |
 | `GET /history` | The last `/search` and `/query` calls (newest first, in-memory): question, the knobs the caller set, the full retrieval echo, confidence, timing. |
 | `GET /omnisearch` | Raw live-vault results, bypassing the index. |
 
@@ -169,7 +235,8 @@ Every source carries a **stable evidence id** so results can be dereferenced:
       "lookup_available": true,
       "n": 1,
       "label": "<source label>",
-      "cited": true
+      "cited": true,
+      "provenance": "source"
     }
   ],
   "retrieval": {"preset": "code", "rerank_top_k": 10, "hyde_used": false,
@@ -180,6 +247,11 @@ Every source carries a **stable evidence id** so results can be dereferenced:
 ```
 
 - `lookup_available: true` → `GET /chunks/{id}` resolves it.
+- `provenance` is `authored`, `source` or `generated`, by the rule in
+  [Evidence pack](#evidence-pack).
+- `found_via` is `[{id, label}]` for a source that the
+  [routed lane](#route-mode) brought in: the generated chunks whose cites
+  found it. It is `[]` for every other source.
 - Parent-expanded sections use `parent:<id>` and report the indexed child as
   `origin_id`, so overlap is computed from the text each branch actually received.
 - Live Omnisearch excerpts use a content-derived `live:<hash>` id and set
@@ -197,9 +269,10 @@ the call went:
 | `timings` | Milliseconds per stage of this call: `preset`, `scope`, `hyde`, `embed`, one `lane.<name>` per lane that ran, `fuse`, `boost`, `rerank`, `gate` (only on a call that gates), `parent`, `neighbor` and `total`. A stage that did not run is absent, not zero. On `/query` the generation stages (`generate`, `parse`, `verify`) are in `generation.timings`. |
 | `lanes_requested` | The `lanes` list the caller sent, sorted; `null` when none was sent. |
 | `lanes_run` | `{lane: candidates it returned}` for every lane that ran. A lane missing here did not run — it was not asked for, or its trigger did not fire. |
-| `cold` | `true` when this call loaded the Chroma collection, the BM25 payload, the cross-encoder or the Laya checkpoint. `/health` reports `ready` before any of them loads, so the first search after a start pays for them: its `timings` are a one-off spike, not steady state. |
+| `cold` | `true` when this call loaded the Chroma collection, the BM25 payload, the cross-encoder or the Laya checkpoint. When a BM25 index file exists, the service loads the collection and the payload at startup, before `/health` reports `ready`; the cross-encoder and the Laya checkpoint load on the first search that uses them, so that search's `timings` are a one-off spike, not steady state. |
 | `hyde_cache` | Why the HyDE text is what it is: `off` (HyDE not used on this call), `bypass` (a code-intent signal skipped it), `hit` (draft replayed from the cache, no LLM call), `miss` (written fresh and stored), `nocache` (written fresh, no cache attached), `error` (the LLM failed, so the raw query was used). |
 | `gate` | What the relevance gate did: `{"enabled": false}` when it did not run, otherwise `{enabled, scorer, threshold, kept, dropped, abstained}`. See [Relevance gate](#relevance-gate). |
+| `route` | Under `generated_mode: route` only, and absent otherwise: what the [routed lane](#route-mode) did, summed over every retrieval of the call (a decomposed search runs one for the question plus one per sub-query). `router_hits` counts the generated hits, `routed` those the sidecar has targets for, and `unrouted` those it has none for (or every hit, with no sidecar). `targets` counts the distinct cited spans taken (at most `retrieval.route.max_targets` per retrieval), `targets_missing` the cited spans not in the store: the file is not indexed, or no primary row lies in its pages (such a span takes no `max_targets` slot), and `new` the routed chunks no other lane had found (at most `retrieval.route.max_new` per retrieval). The caps hold per retrieval, so a decomposed call can exceed them, and a span two retrievals took counts in both. Each `/compare` branch's `retrieval` carries its own. On `/evidence_pack` it is `retrieval[i].route`, beside `retrieval[i].graph_route` for the walk. |
 
 `GET /history` keeps each recent call's echo, with its `timings` repeated at the
 top level of the entry.
@@ -324,6 +397,7 @@ Fusion is Reciprocal Rank Fusion over every lane that ran. The lanes:
 | `dense_scope` / `sparse_scope` | When `retrieval.scope_lanes` (or a call's `scope_lanes`) is on and the query names a domain or a content type, filtered to that scope. The lanes ship off; the scope is detected and echoed either way. |
 | `omnisearch` | When the live-vault lane is enabled and reachable. |
 | `hype` | When the hypothetical-question collection exists and the lane is on. |
+| `routed` | Under `generated_mode: route`: the primary pages that generated hits cite. See [Route mode](#route-mode). |
 
 A document's fused score is the sum over lanes of
 `weight(lane) / (rrf_k + rank_in_that_lane)`. Every weight defaults to `1.0`,
@@ -402,8 +476,7 @@ the starting values in `eval/configs.yaml` are starting points, not tuned ones.
 
 !!! warning "Experimental — off by default"
     Graph mode ships behind `graph.enabled: false`. It works and is covered by
-    tests, but its retrieval benefit has never been scored on a bench question
-    set, so it is not part of the default workflow. While the flag is off,
+    tests, but it is experimental, so it is not part of the default workflow. While the flag is off,
     `POST /graph/expand` answers `503` naming the key to set; `/query` and
     `/search` are unaffected, and the graph lane still competes in ordinary
     retrieval. Turn it on in the management console under **Settings >
@@ -435,10 +508,29 @@ down.
 | `seed_top_k` | Seeds taken from a query-seeded run (1–50). |
 | `rerank` | Orders query-seeded seeds. Ignored when `seeds` is given — those already carry the order the caller saw. |
 | `include_text` | Characters of node text to return (0–6000). |
+| `bridges` | `true` also attaches, to each canvas node, the chunks of the note or PDF page it cites ([below](#widening-and-typing-the-walk)). Null = `graph.bridges`. |
+| `cross_canvas` | `true` also hops between canvases. Null = `graph.cross_canvas`. |
+| `wikilinks` | `true` also follows the `[[wikilinks]]` of each note in the walk. Null = `graph.wikilinks`. |
+| `direction` | `both`, `down` (along the arrowhead) or `up` (against it). Null = `graph.direction`. |
+| `edge_types` | 1–20 edge labels; only edges with these labels are followed. Labels are compared ignoring case, with spaces and underscores read as `-`, and an unlabelled edge never passes. `same-as` hops and bridges always pass. Null = `graph.edge_types` (every edge). |
 
 The response carries `nodes` (each with its hop depth and graph metadata),
 `tree` (parent → child with each edge's label and direction), `cross_edges`
-(edges back onto nodes already reached), and `stats`.
+(edges back onto nodes already reached), and `stats`. A `direction` is the
+edge as drawn, seen from the parent: `->` means an arrowhead points away from
+it, `<-` one points at it, `--` there are no arrowheads, and `<>` there are
+two. A canvas chunk indexed before the loader read arrowheads stores only `->`
+or `<-`, taken from the end the edge starts at, until `canvas_refresh.py`
+rewrites its metadata. A chunk indexed before edge labels were stored reports
+`--`.
+
+With a [route sidecar](#route-mode) loaded, in any `generated_mode`, each node
+whose `provenance` is `generated` also carries `routed_ids`. These are the
+first `retrieval.route.per_target` primary chunks of each span it cites, in
+page order, for at most `retrieval.route.max_targets` spans. A cite with no
+pages gives the file's first chunks, in document order. A map the sidecar does not route gets `[]`. Send them to `/answer` in the map's place. Ticking a generated node in the
+console's graph view does that. Such a node starts unticked, and one with no
+`routed_ids` cannot be ticked.
 
 Two details matter when reading it:
 
@@ -494,10 +586,217 @@ retrieval runs.
 Evidence ids that are not indexed records — `live:` excerpts and `parent:`
 sections — cannot ground an answer and are rejected by name.
 
+Under any `generated_mode` but `off`, ids whose `provenance` is `generated` are
+a `400` and nothing is generated. `detail` is `{"error": "generated chunks are
+maps, not evidence: answer from the primary pages they cite", "ids": [...]}`,
+and `ids` names only the generated ones. An unknown id is reported first.
+
+With a [route sidecar](#route-mode) loaded, in any mode, `detail` also carries
+`routes_to`: `{id: [{source_file, page_start, page_end}, …]}` for each
+generated id the sidecar routes, leaving out any it does not. It lists only
+the spans the store serves: a span whose file is not indexed, or with no
+primary row in its pages (what `targets_missing` counts), is left out, and so
+is an id left with none. These are the
+full spans each one cites, as pages, not chunk ids. The ids to send in a map's
+place are a `/graph/expand` node's `routed_ids` (above), which hold at most
+`retrieval.route.per_target` chunks of each span. With no walk at hand, `POST /graph/expand` with
+`seeds: [<that id>]` and `depth: 0` returns the node with its `routed_ids`
+while graph mode is on.
+
 This shape is what makes the human-in-the-loop fork work without server
 session state: *answer from the graph alone* and *merge with the previous
 result* are the same call with a different id list, so "what counts as the
 previous stack" stays with the caller.
+
+#### Widening and typing the walk
+
+`POST /graph/expand` and the [evidence pack](#evidence-pack) take five walk
+switches: `bridges`, `cross_canvas`, `wikilinks`, `direction` and `edge_types`.
+Each falls back to its `graph.*` key, and those keys ship switched off
+(`false`, `both`, `null`). With every switch at that default, the walk and its output are exactly the
+canvas-edge walk described above. The caps named below
+(`graph.target_max_chunks`, `graph.bridge_max_total`,
+`graph.same_as_min_chars`, `graph.same_as_max_canvases`) are config keys only,
+not request fields. Setting any switch off its default also extends the output:
+
+- every node carries `kind` (`canvas`, `note` or `bridge`), `file_type`,
+  `heading`, `page_start` and `page_end`. `nodes` lists the walk's nodes first,
+  then the bridges, and `stats.nodes` counts only the walk's nodes;
+- every `tree` and `cross_edges` entry carries `kind`: `canvas` for a drawn
+  edge, otherwise `bridge`, `same-as`, `shares-bridge`, `opens-canvas` or
+  `links-to`;
+- `paths` says how each node was reached, one entry per node:
+  `{to, nodes: [seed, …, to], edges: [{label, kind, direction}, …]}`, along the
+  first (shortest) route the walk found;
+- `stats` adds `bridges` (bridge chunks attached), `filtered_edges` (edges that
+  `edge_types` or `direction` rejected; such an edge is neither a hop nor a
+  cross edge), `virtual_edges` (hops followed, per kind),
+  `virtual_edges_dropped`, the miss counters named below, `options` (the
+  switches in effect) and `caps.bridge_max_total`.
+
+**Bridges** (`bridges`) attach to a canvas node the chunks it cites:
+
+- The targets are the node's file nodes (except those on a `.canvas` file,
+  which are cross-canvas hops) and its `Source:` lines. A `Source:`
+  line is a text-node line `Source: <vault path>.pdf` or `.md`, optionally
+  followed by `p. N` or `pp. a-b, c`. At ingest, each line keeps its first two
+  page groups and a node keeps six in all, and a page range bridges its first
+  page and the page after it.
+- A PDF bridges only to a page: a file node with a `#page=N` subpath, or a
+  `Source:` line with pages. Any other PDF target bridges nothing, because a
+  PDF's first pages are front matter, never evidence, and it is counted in
+  `stats.bridge_pdf_without_page`.
+- A note bridges its chunks, or with a `#Heading` subpath only that section's
+  chunks. A heading the note does not have bridges nothing and is counted in
+  `bridge_heading_missing`; the walk never widens to the whole note. A
+  `#^block` subpath takes the whole note.
+- A target with no indexed chunk (an image, a missing or unindexed file, a path
+  that differs only in case) is counted in `bridge_targets_without_chunks`. A
+  path that differs only in Unicode form (NFC against NFD, which macOS can
+  produce) still matches, and is counted in `bridges_matched_after_normalised`.
+- Bridges end the walk at that point. They are never walked further, never
+  counted in `max_total`, and never filtered by `edge_types` or `direction`.
+  `graph.target_max_chunks` caps the chunks per target and
+  `graph.bridge_max_total` the bridges per walk. A bridge's tree entry carries
+  the edge's own label, or `source` for a `Source:` line. An edge onto one of
+  the node's file nodes is now its bridge, so it no longer counts in
+  `dangling_edges`. A cited chunk the walk already holds (a seed, a walk node)
+  gets a `cross_edges` entry instead, and a chunk that is both is listed once,
+  as a walk node.
+- A canvas chunk indexed before `canvas_edge_files` existed bridges nothing.
+  The walk counts it in `stats.bridges_unavailable` and never guesses from
+  older metadata, and the response's `note` names the fix: run
+  `canvas_refresh.py`, then `rebuild_bm25.py`, then restart this API.
+
+**Cross-canvas hops** (`cross_canvas`) join a canvas node to nodes of other
+canvases. They come after the node's drawn edges and share its `max_per_hop`
+budget:
+
+- `same-as`: a node whose title (its first line of text, ignoring case and
+  punctuation) is the same. A title shorter than `graph.same_as_min_chars`
+  joins nothing, and neither does a generic title found in more than
+  `graph.same_as_max_canvases` canvases.
+- `opens-canvas`: a file node on a `.canvas` file leads to that canvas's most
+  connected nodes first.
+- `shares-bridge`: a node of another canvas with a file node on the same file.
+  `Source:` lines do not count here: a book cited on every node would join
+  every canvas that cites it.
+- `same-as` passes every `direction` and `edge_types` filter. `opens-canvas`
+  and `shares-bridge` have no direction, so they are followed only under
+  `both`, and under `edge_types` only when the list names them. Both read
+  `canvas_edge_files`, so an older chunk takes only `same-as` hops (counted in
+  `bridges_unavailable`).
+- A hop over the budget is counted in `virtual_edges_dropped`, never as the
+  `max_per_hop` cap. The canvases are indexed once per API process, so a canvas
+  appended later joins at the restart that the append needs anyway.
+
+**Wikilinks** (`wikilinks`) follow the outgoing `[[links]]` of each note in the
+walk. Query seeding (`q`) starts from canvas chunks, so on this route a note
+joins the walk only as a seed passed by id. An [evidence pack](#evidence-pack)
+also seeds the notes its search returned.
+
+- A link's name must equal a note's file name exactly, case included. Obsidian
+  ignores case here and this walk does not: `[[other]]` does not reach
+  `Other.md`, and is counted in `wikilinks_unresolved`. A name two notes share
+  is counted in `wikilinks_ambiguous` and never guessed. Links to attachments
+  (`.png`, `.pdf` and the like) are ignored.
+- A link with a folder (`[[A/Note]]`, which Obsidian writes when two notes share
+  a name) reaches only the note under that folder. With none indexed there it is
+  unresolved, never another folder's note.
+- `[[Note#Heading]]` takes only that section, and a heading the note lacks is
+  unresolved. A note is one node, taken as up to `graph.target_max_chunks`
+  chunks per link: links to two sections of a note reach both, and a link into
+  a note the walk already holds adds the section it names.
+- A link is followed along its arrow: under `down` or `both`, and under
+  `edge_types` only when the list names `links-to`; otherwise each link counts
+  in `filtered_edges`. Backlinks are not followed.
+- Chroma stores a note's links joined by `, `, which a name holding `, ` itself
+  breaks, so a joined list is read back from the sparse index. A note missing
+  from it is dense/sparse drift: the walk refuses, and the error names
+  `rebuild_bm25.py`.
+- The parser stores a note's first `MAX_WIKILINKS` links
+  (`src/ingestion/obsidian_parser.py`); `wikilinks_truncated` counts the notes
+  that reach that cap.
+
+### Evidence pack
+
+**`POST /evidence_pack`** is one call for a multi-part question. The calling
+agent splits the question into sub-questions, and the pack runs the `/search`
+pipeline once for each, merges the results by evidence id, and reports which
+sub-questions came back empty. It writes no answer. As on `/search`, the
+generation model is called only for `hyde` or `decompose`. `GET /schema` lists
+it under the experimental Graph RAG feature, but it works with graph mode off:
+only `graph: true` needs graph mode. The [agent guide](agents.md#multi-hop-questions-evidence-packs-and-graph-walks)
+shows a full request and response.
+
+With `graph: true`, each sub-question's search is followed by a walk. It is
+seeded by that search's graph-lane (canvas) hits, its note hits when
+`wikilinks` is on,
+plus a graph-lane query (`seed_top_k`), and the
+[walk switches](#widening-and-typing-the-walk) apply. The search hits and the
+walked chunks are then reranked together down to the search's own `top_k`, so a
+walk never wins by having more slots. A walk that adds nothing leaves the search
+result as it was. `parent_context` and `neighbor_context` run after that
+rerank, so it scores the child chunks on both sides. `max_per_file` and the
+relevance gate are not applied again after it.
+
+| Field | Effect |
+|---|---|
+| `q` | The question. It is searched alone when `sub_questions` is null. |
+| `sub_questions` | The parts, each searched on its own. At most `evidence_pack.max_sub_questions` entries; an empty entry is a `400`. |
+| `top_k` | Evidence per sub-question (1–50). Null = `evidence_pack.top_k`. |
+| `include_text` | Characters of text per evidence item (0–6000; `0` sends none). Null = `evidence_pack.include_text`. |
+| `min_score` | A floor in the reranker's own units: items below it are dropped and counted. Null = `evidence_pack.min_score`, and when that is null too, everything retrieved counts as coverage. It needs scored items: a floor under `rerank: none` (which scores nothing), or with `neighbor_context` pages (added unscored) in the result, is a `400`. |
+| `graph` | `true` walks too, and needs graph mode: when it is off, a `503` names `graph.enabled`. Default `false`. |
+| `depth` / `max_per_hop` / `max_total` / `seed_top_k` / the five walk switches | The walk, as on `/graph/expand`, read only with `graph: true`. Null = the `graph.*` key. |
+| every other `/search` field | As on `/search` (`preset`, `rerank`, `lanes`, …). These are refused with a `400`: `omnisearch: true`, because a live excerpt is not indexed evidence and `GET /chunks/{id}` could not check it; `max_sources`, because `top_k` is already per sub-question; and `source_file` or `pages` with `graph: true`, because a graph walk leaves the file. |
+
+| Response key | Meaning |
+|---|---|
+| `evidence` | One item per distinct evidence id, merged across sub-questions: their `sub_questions` are joined and the best `score` is kept. Each item has `id`, `origin_id`, `text`, `source` (the label), `source_file`, `file_type`, `pages` (`[start, end]`, or null), `heading`, `course` (null when unknown), `provenance`, `score`, `via_path`, `found_via` and `sub_questions`. |
+| `paths` | The walk paths some evidence uses, in `/graph/expand`'s `paths` shape. |
+| `coverage` | `{sub-question: [evidence ids]}`. |
+| `gaps` | The sub-questions with no evidence. |
+| `generated_only` | The sub-questions whose every evidence item is `generated`. |
+| `provenance_mix` | `{authored, source, generated}`: counts over `evidence`. |
+| `dropped_below_min_score` | `{sub-question: n}`, `0` for every sub-question when no floor is set. |
+| `graph` | Whether a walk ran. |
+| `retrieval` | Per sub-question: `q`, `rerank_mode`, `timings` (the `/search` stages, plus `graph_seed`, `graph_expand`, and `graph_rerank` when the walk added chunks), `graph_stats` (the walk's `stats`, null without a walk), `route` (the search's [route summary](#the-retrieval-echo), null outside `route`) and `graph_route` (the same keys for the walk's own routing, where `new` counts the routed chunks neither the search nor the walk had found; null unless a `graph: true` walk under `route` reached generated nodes while a sidecar is loaded). The two are never summed. |
+| `question` / `sub_questions` / `ms` | The question and sub-questions as searched (stripped), and the call's time in milliseconds. |
+
+How to read an item:
+
+- **`id`** is what `GET /chunks/{id}` serves: `parent:<id>` when
+  `parent_context` swapped in the whole section, otherwise the chunk id, which
+  is also `origin_id`. Every pack holds indexed evidence only, so every id
+  resolves.
+- **`provenance`** is `authored`, `source` or `generated`, decided in this
+  order. A stored `provenance: generated` is `generated`. Next, a
+  `source_file` the path rule names is `generated` whatever the chunk stores:
+  one under a `provenance.generated_paths` prefix, an agent-instruction file
+  (its name is in `provenance.agent_instruction_files`, or a directory on its
+  path is in `provenance.agent_instruction_dirs`), or a `.canvas` path holding
+  one of `canvas.generated_markers`. Then any other stored `provenance` value,
+  then the file type's value from `provenance.by_file_type` (which maps `pdf`
+  to `source` as shipped), and `authored` otherwise. The note lane stores the
+  value from the frontmatter: an explicit `provenance:`, else `generated` for
+  `generated: true`, else `authored`. The PDF lane stores `source`. An unknown
+  stored value is an error, never a guess.
+- **`score`** is the rerank score, or the fusion score under a rerank mode
+  that scores nothing.
+- **`via_path`** is the node ids of the walk path that reached a chunk the walk
+  added, and `[]` for a chunk the search itself returned. It is `[]` for a
+  routed page too.
+- **`found_via`** is a routed page's trail: `[{id, label}]`, the maps whose
+  cites brought it in, joined by id across sub-questions. It is `[]` for every
+  other item. Cite the page, never the map.
+
+A bad request is a `400` naming the problem. That covers a bad knob value too:
+where `/search` answers `200` with an `error` ([When a knob is wrong](#when-a-knob-is-wrong)),
+this route answers `400`. A wrong type is the usual `422`. A reranker that fails
+gives `200` with `error` set to `Reranking failed: …`, and any other failure
+gives `200` with `Evidence pack failed (…)`. Both come with empty `evidence` and
+`retrieval`.
 
 ### Laya reranker (experimental)
 
@@ -547,6 +846,9 @@ A `failed` service still answers: every retrieval endpoint returns **503** with
 the same reason attached, rather than refusing the connection. The usual causes
 are a model id that cannot be downloaded, an embedding model with a typo, or an
 index path that moved — normally the setting that was changed most recently.
+A configured `generated_mode: route` with generated rows and no route sidecar
+fails as `RouteUnavailableError`, and its `hint` names the build
+([Route mode](#route-mode)).
 `GET /api/service/log` on `:8052` returns the startup log.
 
 !!! warning "Reranker failures are retrieval failures"
@@ -619,7 +921,7 @@ annotations and prompts.
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /api/documents/delete` | Remove documents from the index: their vectors and their rows in the chunk files, and with `rebuild: true` a queued sparse rebuild. Vault files are never touched. Restart `:8051` afterwards. |
+| `POST /api/documents/delete` | Remove documents from the index: their vectors and their rows in the chunk files, and with `rebuild: true` a queued sparse rebuild. `keep_jsonls` names chunk files whose rows stay (the file a refused `index --append` will append again); a name that is no chunk file is a `400`. Vault files are never touched. Restart `:8051` afterwards. |
 | `POST /api/inbox/delete` | **Permanently deletes** staged files (`names`, plain filenames) from the inbox or its `_converted` folder on disk: no `.trash` copy, and the index is untouched. `folder` (`inbox` or `converted`) says which folder to delete from. Without it, a name that both folders hold is refused with a `400` before anything is deleted. A name it cannot find comes back under `missing`. The console's two × buttons each send their own `folder`. |
 | `POST /api/ocrstudio/remove` | Take one document out of the OCR queue by **moving** it into the vault's `.trash`; nothing is deleted. See [OCR Studio](#ocr-studio). |
 

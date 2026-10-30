@@ -80,6 +80,34 @@ def ndcg_at(m: Ranking, gold: list[GoldSource], k: int) -> float:
     return dcg / ideal if ideal else 0.0
 
 
+def hop_recall(m: Ranking, gold: list[GoldSource], k: int) -> dict[str, float]:
+    """recall@k per hop, over the required entries that name one: a graph walk
+    should lift the later hops and leave hop 1 where the search had it. Keys are
+    strings (JSON's), in hop order."""
+    req = set(required(gold))
+    got = set().union(*m[:k]) if m[:k] else set()
+    hops = sorted({gold[i].hop for i in req if gold[i].hop is not None})
+    out = {}
+    for h in hops:
+        want = {i for i in req if gold[i].hop == h}
+        out[str(h)] = len(want & got) / len(want)
+    return out
+
+
+def gold_only_via(m: Ranking, flagged: list[bool], gold: list[GoldSource], k: int, *,
+                  searched: Ranking) -> int:
+    """Required gold sources found in the top k ONLY at flagged ranks (the chunks a
+    graph walk added) and absent from the top k of `searched`, the search's own list
+    before the union rerank: what the walk found that the search alone did not. The
+    rerank can push the search's chunk of a gold file out for a walked chunk of the
+    same file; that gold is not the walk's."""
+    req = set(required(gold))
+    via, direct = set(), set().union(*searched[:k])
+    for s, f in zip(m[:k], flagged[:k]):
+        (via if f else direct).update(s)
+    return len((via - direct) & req)
+
+
 def retrieval_metrics(j: Judged, gold: list[GoldSource]) -> dict[str, float]:
     m, d = j.matches, j.doc_matches
     return {

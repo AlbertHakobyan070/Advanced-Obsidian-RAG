@@ -12,12 +12,18 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Iterator
 
+# What generated_mode route's routed lane did (route-then-cite §5.4); routed + unrouted
+# == router_hits.
+ROUTE_KEYS = ("router_hits", "routed", "unrouted", "targets", "targets_missing", "new")
+
 
 @dataclass
 class StageTrace:
     ms: dict[str, float] = field(default_factory=dict)
     # lane name -> number of candidates that lane returned
     lanes: dict[str, int] = field(default_factory=dict)
+    # ROUTE_KEYS -> count, summed across retrieve() calls; all 0 when nothing routed
+    route: dict[str, int] = field(default_factory=lambda: dict.fromkeys(ROUTE_KEYS, 0))
 
     @contextmanager
     def span(self, name: str) -> Iterator[None]:

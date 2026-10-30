@@ -62,6 +62,10 @@ REWRITES: list[tuple[str, str, int]] = [
     ('  bm25_index: "data/bm25_index.pkl"',
      '  bm25_index: "/rag_data/bm25_index.pkl"',
      1),
+    # Knowledge-map staging: generated maps, outside the vault, on the volume.
+    ('  staging_dir: "<runtime-dir>/canvas_maps/staging"',
+     '  staging_dir: "/rag_data/canvas_maps/staging"',
+     1),
 
     # -- taxonomy -----------------------------------------------------------
     # The built-in folder maps encode one academic vault's folder names and
@@ -203,6 +207,8 @@ EXPECTED = {
     "webui.rag_api": "http://127.0.0.1:${RAG_PORT:-8051}",   # same container: host stays loopback
     "code.skip_roots": [],
     "graph.enabled": False,
+    # Every bundle ships drop, never off or route (route-then-cite §6, S2 bundles).
+    "retrieval.generated_mode": "drop",
     "embedding.providers.eg2.base_url": "http://embed:8104/v1",
     "embedding.providers.eg2_l512.base_url": "http://embed-l512:8105/v1",
 }

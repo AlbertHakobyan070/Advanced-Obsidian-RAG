@@ -18,12 +18,33 @@ Usage:
 """
 from __future__ import annotations
 
+import sys
+
+# chromadb 1.5.9 keeps each loaded HNSW index in an in-memory pool that, on Windows, it
+# sizes from msvcrt.dll's stdio limit: 512 // 5 = 102 slots, split across cache shards,
+# so a store of only a few collections can have one evicted. An evicted index reloads
+# from disk as of its last persist (every hnsw:sync_threshold adds, never on close) and
+# misses every add since: a small collection fails "Error creating hnsw segment reader:
+# Nothing found on disk", a large one loses its newest rows ("Error finding id"). Which
+# indexes collide is fixed by the store's segment ids, so one store fails every time and
+# another never. 2048 is the most msvcrt.dll accepts (409 slots: no eviction measured at
+# 20 collections). The UCRT, whose streams the HNSW files really use (4 per loaded
+# index), gets the same limit, so the slots Chroma sizes from it have streams behind them.
+WINDOWS_STDIO_LIMIT = 2048
+
 
 def persistent_client(path):
     """chromadb.PersistentClient(path) with anonymised telemetry off. chromadb is
     imported here, on first use, as every call site always did, so importing this
-    module costs nothing."""
+    module costs nothing. On Windows it first raises the stdio limit Chroma sizes its
+    HNSW pool from (WINDOWS_STDIO_LIMIT): Chroma reads it as it builds a store's system."""
     import chromadb
     from chromadb.config import Settings
+    if sys.platform == "win32":
+        import ctypes
+        for name, crt in (("msvcrt", ctypes.windll.msvcrt), ("ucrtbase", ctypes.CDLL("ucrtbase"))):
+            if crt._getmaxstdio() < WINDOWS_STDIO_LIMIT and crt._setmaxstdio(WINDOWS_STDIO_LIMIT) == -1:
+                raise OSError(f"{name}._setmaxstdio({WINDOWS_STDIO_LIMIT}) failed: Chroma would size its "
+                              f"HNSW pool from {crt._getmaxstdio()} and can evict an index it cannot reload")
     return chromadb.PersistentClient(
         path=str(path), settings=Settings(anonymized_telemetry=False))

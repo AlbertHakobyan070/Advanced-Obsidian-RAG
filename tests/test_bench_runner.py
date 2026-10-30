@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import sys
 from datetime import date
 from pathlib import Path
@@ -433,3 +434,281 @@ def test_no_warm_up_unless_asked(tmp_path, monkeypatch):
               out_root=tmp_path, rag=rag, progress=lambda *_: None,
               ledger=tmp_path / "ledger.jsonl")
     assert all("lanes" in kw for kw in rag.calls)
+
+
+# ---- the graph ablation (slice D, E7) ----
+
+def _graph_rag():
+    """search() returns x.md; graph_search() returns x.md and a.md from the search
+    and, with a walk, b.md that the walk added (it also walked to chunk 9, which
+    the union rerank dropped)."""
+    calls = {"search": [], "graph_search": []}
+
+    def search(q, **kw):
+        calls["search"].append(kw)
+        return [FakeDoc("1", "x.md")], {"timings": {"total": 5.0}, "lanes_run": {"dense": 1},
+                                        "cold": False, "hyde_cache": "off"}
+
+    def graph_search(q, graph=None, **kw):
+        calls["graph_search"].append((q, graph, kw))
+        walk = graph is not None
+        docs = [FakeDoc("1", "x.md"), FakeDoc("2", "a.md")] + ([FakeDoc("3", "b.md")] if walk else [])
+        return docs, {"timings": {"total": 9.0}, "lanes_run": {"dense": 2}, "cold": False,
+                      "hyde_cache": "off",
+                      "graph": {"walk": walk, "seeds": 1, "added_ids": ["3", "9"] if walk else [],
+                                "seed_ids": [], "stats": None, "paths": [],
+                                "search_metas": [{"source_file": "x.md"}, {"source_file": "a.md"}],
+                                "provenance": ["authored", "source"] + (["generated"] if walk else [])}}
+    return SimpleNamespace(hyde=FakeHyde(), retriever=FakeRetriever(), search=search,
+                           graph_search=graph_search, calls=calls)
+
+
+def test_graph_rows_route_through_graph_search(tmp_path, stamped):
+    from eval.bench.configs import graph_ablation
+    rag = _graph_rag()
+    q = _q(1, "dev", strategy="synthesis", gold=[{"file": "a.md", "hop": 1}, {"file": "b.md", "hop": 2}])
+    run = _go(tmp_path, [q], configs=[("x", {"lanes": ["dense"]}), *graph_ablation()], rag=rag,
+              warmup=True)
+    # one discarded walk with every widening on builds the canvas index before any timed row
+    assert rag.calls["graph_search"][0] == (
+        "warm-up", {"bridges": True, "cross_canvas": True, "wikilinks": True}, {"hyde": False, "top_k": 1})
+    timed = rag.calls["graph_search"][1:]
+    assert [g for _, g, _ in timed] == [dict(graph_ablation())[n]["graph"]
+                                        for n in ("G-off", "G-legacy", "G-e1e4")]
+    assert all("graph" not in kw and kw["top_k"] == 10 for _, _, kw in timed)
+    assert [kw for kw in rag.calls["search"] if "lanes" in kw] == [{"lanes": ["dense"]}]   # x alone
+    rows = {r["config"]: r for r in _rows(run)}
+    assert "graph" not in rows["x"] and rows["x"]["strategy"] == "synthesis"
+    e = rows["G-e1e4"]
+    assert e["graph"] == {"walk": True, "added": 2, "added_in_final": 1, "gold_via_graph": 1, "seeded": 0,
+                          "provenance": {"authored": 1, "source": 1, "generated": 1}}
+    assert e["hop_recall"] == {"1": 1.0, "2": 1.0} and e["strategy"] == "synthesis"
+    off = rows["G-off"]
+    assert off["graph"] == {"walk": False, "added": 0, "added_in_final": 0, "gold_via_graph": 0, "seeded": 0,
+                            "provenance": {"authored": 1, "source": 1}}
+    assert off["hop_recall"] == {"1": 1.0, "2": 0.0}
+    s = _json(run, "summary.json")
+    assert s["G-e1e4"]["graph"] == {"added": 2.0, "added_in_final": 1.0, "gold_via_graph": 1.0,
+                                    "generated_share": 1 / 3, "seeded": 0.0}
+    assert s["G-off"]["graph"]["generated_share"] == 0.0
+    assert s["G-e1e4"]["by_hop"] == {"1": {"mean": 1.0, "n": 1}, "2": {"mean": 1.0, "n": 1}}
+    assert s["G-off"]["by_hop"]["2"] == {"mean": 0.0, "n": 1}
+    assert "graph" not in s["x"] and "by_hop" in s["x"]       # hop gold is scored without a walk too
+    assert set(s["G-e1e4"]["by_strategy"]) == {"synthesis"}
+    assert s["G-e1e4"]["paired"]["vs"] == "G-legacy" and s["G-legacy"]["paired"]["vs"] == "G-off"
+    assert "## Graph contribution" in (run / "report.md").read_text(encoding="utf-8")
+
+
+def test_the_walk_is_credited_only_with_gold_the_search_and_the_seeds_did_not_find():
+    """F.md: the search had f1, which the union rerank pushed out for the walked f2.
+    maps/g.canvas: a query seed (s9) the walk's seeding added, reached by no edge."""
+    from eval.bench.runner import _run_one
+
+    def graph_search(q, graph=None, **kw):
+        docs = [FakeDoc("x", "x.md"), FakeDoc("f2", "F.md"), FakeDoc("s9", "maps/g.canvas")]
+        return docs, {"timings": {}, "lanes_run": {}, "cold": False, "hyde_cache": "off",
+                      "graph": {"walk": True, "seeds": 1, "seed_ids": ["s9"], "added_ids": ["f2"],
+                                "stats": None, "paths": [], "provenance": ["authored"] * 3,
+                                "search_metas": [{"source_file": "x.md"}, {"source_file": "F.md"}]}}
+
+    q = _q(1, "dev", gold=[{"file": "F.md"}, {"file": "maps/g.canvas"}])
+    row = _run_one(SimpleNamespace(graph_search=graph_search), q, "G-legacy", {"graph": {}})
+    assert row["graph"]["gold_via_graph"] == 0
+    assert row["graph"]["seeded"] == 1 and row["graph"]["added"] == 1
+
+
+def _graph_row(qid, *, gold_via, added=2, metrics=True, error=False):
+    row = {"qid": qid, "suite": "lexical", "tier": "T1", "author": "draft", "strategy": None,
+           "cold": False, "timings": {},
+           "graph": {"walk": True, "added": added, "added_in_final": 1, "gold_via_graph": gold_via,
+                     "seeded": 0, "provenance": {"authored": 2}}}
+    if metrics:
+        row["metrics"] = {"ndcg@10": 1.0}
+    if error:
+        row["error"] = "answer: RuntimeError: proxy down"
+    return row
+
+
+def test_graph_means_skip_error_rows_and_gold_via_graph_is_per_answerable_question():
+    from eval.bench.runner import summarise
+    rows = [_graph_row("a", gold_via=1), _graph_row("b", gold_via=0),
+            _graph_row("u", gold_via=0, metrics=False),                 # unanswerable
+            _graph_row("e", gold_via=0, added=9, metrics=False, error=True)]
+    g = summarise({"G-x": rows})["G-x"]["graph"]
+    assert g["gold_via_graph"] == 0.5                                   # over the 2 scored questions
+    assert g["added"] == 2.0                                            # the error row is out
+    assert "graph" not in summarise({"G-x": rows[3:]})["G-x"]           # nothing but errors: no means
+    assert summarise({"G-x": rows[2:3]})["G-x"]["graph"]["gold_via_graph"] is None
+
+
+def test_a_configured_edge_type_filter_refuses_the_graph_ablation(tmp_path, stamped):
+    """G-legacy and G-e1e4 are unfiltered walks, and a per-call walk cannot ask for every
+    edge once graph.edge_types is set: the run is refused before anything is written."""
+    from eval.bench.configs import graph_ablation
+    rag = _graph_rag()
+    rag.graph = SimpleNamespace(edge_types={"uses"})
+    with pytest.raises(RunSetupError, match="graph.edge_types"):
+        _go(tmp_path, [_q(1, "dev")], configs=graph_ablation(), rag=rag)
+    assert not (tmp_path / "runs").exists()
+    pinned = [("typed", {"graph": {"edge_types": ["uses"]}})]           # a walk that names its own filter
+    _go(tmp_path, [_q(1, "dev")], configs=pinned, rag=rag, out_root=tmp_path / "pinned")
+    rag.graph.edge_types = None
+    _go(tmp_path, [_q(1, "dev")], configs=graph_ablation(), rag=rag, out_root=tmp_path / "unfiltered")
+
+
+# ---- the route arm (route-then-cite S2, Task 15) ----
+
+ROUTE_BLOCK = {"router_hits": 3, "routed": 2, "unrouted": 1, "targets": 2, "targets_missing": 0, "new": 4}
+
+
+def test_rows_record_the_route_block(tmp_path, stamped):
+    """GM-route is the only arm that runs the routed lane; only its rows carry the echo's
+    `route`, and only its summary gets the route block and the pairing against GM-off."""
+    from eval.bench.configs import generated_ablation
+    seen = []
+
+    def graph_search(q, graph=None, **kw):
+        mode = kw["generated_mode"]
+        seen.append((mode, "routed" in kw["lanes"]))
+        routed = mode == "route" and "routed" in kw["lanes"]       # only the routed lane finds the gold
+        info = {"timings": {"total": 5.0}, "lanes_run": {"dense": 1}, "cold": False, "hyde_cache": "off"}
+        if mode == "route":                                         # the unanswerable one routes nothing
+            info["route"] = dict.fromkeys(ROUTE_BLOCK, 0) if "una" in q else dict(ROUTE_BLOCK)
+        return [FakeDoc("2", "a.md") if routed else FakeDoc("9", "z.md")], info
+
+    rag = SimpleNamespace(hyde=FakeHyde(), retriever=FakeRetriever(), graph_search=graph_search)
+    una = _q(4, "dev", "una?", suite="unanswerable", answerable=False, gold=[], nuggets=[])
+    run = _go(tmp_path, [_q(i, "dev") for i in (1, 2, 3)] + [una], configs=generated_ablation(), rag=rag)
+    assert seen == [("off", False)] * 4 + [("drop", False)] * 4 + [("route", True)] * 4
+    rows = _rows(run)
+    assert [r["route"] for r in rows if r["config"] == "GM-route"] == [ROUTE_BLOCK] * 3 + [
+        dict.fromkeys(ROUTE_BLOCK, 0)]                              # the unanswerable row carries one too
+    assert not any("route" in r for r in rows if r["config"] != "GM-route")
+    s = _json(run, "summary.json")
+    assert s["GM-route"]["route"] == pytest.approx({k: 3 * v / 4 for k, v in ROUTE_BLOCK.items()})
+    assert s["GM-route"]["paired"]["vs"] == "GM-drop" and s["GM-route"]["paired"]["ndcg@10"]["mean"] == 1.0
+    (also,) = s["GM-route"]["paired_also"]
+    assert also["vs"] == "GM-off" and also["n"] == 3 and also["ndcg@10"]["mean"] == 1.0
+    assert s["GM-drop"]["paired"]["vs"] == "GM-off"
+    for name in ("GM-off", "GM-drop"):                      # the S1 arms' summaries are what they were
+        assert not {"route", "by_prefix", "paired_also"} & set(s[name])
+    text = (run / "report.md").read_text(encoding="utf-8")
+    assert "| GM-route vs GM-drop |" in text and "| GM-route vs GM-off |" in text and "## Routed lane" in text
+
+
+def test_warm_up_runs_one_route_search_when_an_arm_routes(tmp_path, stamped):
+    """The first routed retrieve() builds the per-file row index: warm it before GM-route's
+    first timed row. A store that cannot route fails the run there, like any warm call."""
+    from eval.bench.configs import generated_ablation
+    arms = generated_ablation()
+    rag = _graph_rag()
+    _go(tmp_path, [_q(1, "dev")], configs=arms, rag=rag, warmup=True)
+    warm = [kw for kw in rag.calls["search"] if kw.get("generated_mode") == "route"]
+    assert warm == [{"hyde": False, "top_k": 1, "generated_mode": "route",
+                     "lanes": dict(arms)["GM-route"]["lanes"]}]
+    rag = _graph_rag()
+    _go(tmp_path, [_q(1, "dev")], configs=arms[:2], rag=rag, warmup=True, out_root=tmp_path / "no-route")
+    assert not any("generated_mode" in kw for kw in rag.calls["search"])
+    rag = _graph_rag()
+    search = rag.search
+
+    def no_sidecar(q, **kw):
+        if kw.get("generated_mode") == "route":
+            raise RuntimeError("no route sidecar")
+        return search(q, **kw)
+
+    rag.search = no_sidecar
+    with pytest.raises(RuntimeError, match="no route sidecar"):
+        _go(tmp_path, [_q(1, "dev")], configs=arms, rag=rag, warmup=True, out_root=tmp_path / "broken")
+    (run,) = (tmp_path / "broken").iterdir()
+    assert _json(run, "run.json")["status"] == "failed" and not rag.calls["graph_search"]   # nothing timed
+
+
+def test_a_route_warm_up_with_no_sidecar_is_a_setup_error_naming_the_build(tmp_path, stamped):
+    """The CLI prints a RunSetupError and exits, never a traceback; the run is still
+    marked failed. The bench builds its own pipeline, so no :8051 restart is involved."""
+    from eval.bench.configs import generated_ablation
+    from src.utils.provenance import RouteUnavailableError
+    rag = _graph_rag()
+    search = rag.search
+
+    def unavailable(q, **kw):
+        if kw.get("generated_mode") == "route":
+            raise RouteUnavailableError("generated_mode route needs the route pointer sidecar")
+        return search(q, **kw)
+
+    rag.search = unavailable
+    fix = "build it with python main.py route-pointers, then re-run the bench (no :8051 restart needed)"
+    with pytest.raises(RunSetupError, match=re.escape(fix)) as e:
+        _go(tmp_path, [_q(1, "dev")], configs=generated_ablation(), rag=rag, warmup=True)
+    assert isinstance(e.value.__cause__, RouteUnavailableError)
+    (run,) = (tmp_path / "runs").iterdir()
+    meta = _json(run, "run.json")
+    assert meta["status"] == "failed" and meta["error"].startswith("RunSetupError: ") and fix in meta["error"]
+    assert not rag.calls["graph_search"]                                                   # nothing timed
+
+
+def _srow(qid, suite="lexical", ndcg=1.0, hit=1.0, *, route=None, metrics=True, error=False):
+    row = {"qid": qid, "suite": suite, "tier": "T1", "author": "draft", "strategy": None,
+           "cold": False, "timings": {}}
+    if metrics:
+        row["metrics"] = {"ndcg@10": ndcg, "hit@5": hit}
+    if route is not None:
+        row["route"] = route
+    if error:
+        row["error"] = "RuntimeError: kaboom"
+    return row
+
+
+def test_summarise_pairs_route_against_off_too():
+    from eval.bench.runner import summarise
+    qids = [f"lex-{i:04d}" for i in range(1, 6)]
+    off = [_srow(q, ndcg=0.0, hit=0.0) for q in qids]
+    drop = [_srow(q, ndcg=0.5, hit=0.0) for q in qids]
+    route = [_srow(q) for q in qids]
+    s = summarise({"GM-off": off, "GM-drop": drop, "GM-route": route})
+    assert s["GM-route"]["paired"]["vs"] == "GM-drop" and s["GM-route"]["paired"]["ndcg@10"]["mean"] == 0.5
+    (also,) = s["GM-route"]["paired_also"]
+    assert also["vs"] == "GM-off" and also["n"] == 5 and also["ndcg@10"]["mean"] == 1.0
+    assert also["hit@5_mcnemar_p"] == pytest.approx(2 * 0.5 ** 5)
+    assert not any("paired_also" in s[n] for n in ("GM-off", "GM-drop"))
+    assert "paired_also" not in summarise({"GM-drop": drop, "GM-route": route})["GM-route"]   # GM-off not run
+    assert not any("paired_also" in c for c in summarise({"GM-off": off, "GM-drop": drop}).values())  # nor GM-route
+    failed = [_srow(q, metrics=False, error=True) for q in qids]
+    assert "paired_also" not in summarise({"GM-off": failed, "GM-route": route})["GM-route"]  # nothing both scored
+
+
+def test_summarise_reports_the_per_arm_route_block():
+    from eval.bench.runner import summarise
+    zero = dict.fromkeys(ROUTE_BLOCK, 0)
+    rows = [_srow("lex-0001", route={**zero, "router_hits": 4, "routed": 3, "unrouted": 1, "targets": 2, "new": 5}),
+            _srow("lex-0002", route={**zero, "router_hits": 2, "routed": 1, "unrouted": 1, "targets": 1,
+                                     "targets_missing": 1, "new": 1}),
+            _srow("none-0003", metrics=False, route=zero),               # unanswerable: searched, so counted
+            _srow("lex-0004", metrics=False, error=True, route=dict.fromkeys(ROUTE_BLOCK, 99))]   # error: out
+    got = summarise({"GM-route": rows})["GM-route"]["route"]
+    assert got == pytest.approx({"router_hits": 2.0, "routed": 4 / 3, "unrouted": 2 / 3, "targets": 1.0,
+                                 "targets_missing": 1 / 3, "new": 2.0})
+    assert "route" not in summarise({"GM-route": rows[3:]})["GM-route"]    # nothing but errors: no means
+    assert "route" not in summarise({"GM-drop": [_srow("lex-0001")]})["GM-drop"]
+
+
+def test_by_prefix_nests_suites_only_for_the_route_strata():
+    from eval.bench.runner import summarise
+    rows_rtc_rtu = [_srow("rtc-0001", "books", 1.0), _srow("rtc-0002", "multihop", 0.0),
+                    _srow("rtu-0003", "books", 0.5), _srow("rtu-0004", "multihop", 0.25),
+                    _srow("lex-0005", metrics=False, error=True)]           # not scored: does not count
+    s = summarise({"GM-drop": rows_rtc_rtu})["GM-drop"]
+    bp = s["by_prefix"]
+    assert set(bp) == {"rtc", "rtu"}
+    assert set(bp["rtc"]) == {"ALL", "books", "multihop"} and set(bp["rtu"]) == {"ALL", "books", "multihop"}
+    assert bp["rtc"]["ALL"]["ndcg@10"]["mean"] == 0.5 and bp["rtc"]["ALL"]["ndcg@10"]["n"] == 2
+    assert bp["rtc"]["books"]["ndcg@10"]["mean"] == 1.0 and bp["rtc"]["multihop"]["ndcg@10"]["mean"] == 0.0
+    assert bp["rtu"]["books"]["ndcg@10"]["mean"] == 0.5 and bp["rtu"]["multihop"]["ndcg@10"]["n"] == 1
+    assert s["by_suite"]["books"]["ndcg@10"]["n"] == 2                       # by_suite still spans both
+    rows_one_prefix = rows_rtc_rtu[:2]
+    assert "by_prefix" not in summarise({"GM-drop": rows_one_prefix})["GM-drop"]
+    rows_eval_sets_prefixes = [_srow("lex-0001"), _srow("book-0002", "books"), _srow("hop-0003", "multihop")]
+    assert "by_prefix" not in summarise({"GM-drop": rows_eval_sets_prefixes})["GM-drop"]
+    mixed = rows_rtc_rtu[:4] + [_srow("lex-0006")]                           # one scored outsider
+    assert "by_prefix" not in summarise({"GM-drop": mixed})["GM-drop"]

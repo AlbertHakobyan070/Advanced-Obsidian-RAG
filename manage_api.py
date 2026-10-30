@@ -56,9 +56,13 @@ from pydantic import BaseModel, Field
 from eval.bench.questions import (
     STATUSES, SUITES, SchemaError, load_sets, question_from_dict, question_to_dict,
     save_suite, sets_lock)
+from eval.bench.relevance import norm_file
+from src import index_ops
+from src.index_ops import DROP, HYPE_SIDECAR, rewrite_jsonl
 from src.retrieval.sparse_tantivy import SPARSE_BACKENDS
 from src.utils.branding import CONSOLE_API_TITLE, CONSOLE_SERVICE
 from src.utils.chroma_client import persistent_client
+from src.utils import lane_guard
 from src.utils import release
 from src.utils.config_loader import Config, load_config
 from src.utils.http_guard import guard_settings, install_guard
@@ -291,13 +295,7 @@ def _safe_rel(p: str, *, default_dir: str = "data") -> str:
         raise ValueError("empty path")
     if ".." in p.split("/") or re.match(r"^([A-Za-z]:|/)", p):
         raise ValueError(f"path must be project-relative: {p!r}")
-    # Windows opens a file under other spellings than the name the lane guards
-    # compare: it drops a segment's trailing dots ("chunks.jsonl." is chunks.jsonl,
-    # "data./" is data/) and reads "x::$DATA" as x itself. An empty segment
-    # ("data//x") makes the tail rooted, and DATA_DIR / "/x" is the drive root.
-    if ":" in p or any(not s or s.endswith(".") for s in p.split("/")):
-        raise ValueError(f"path must name its file plainly (no ':', no empty "
-                         f"segment, no segment ending in '.'): {p!r}")
+    lane_guard.refuse_alias(p)       # the NTFS alias spellings: see there
     if "/" not in p:
         p = f"{default_dir}/{p}"
     return p
@@ -343,74 +341,17 @@ def _files_csv(files) -> str:
     return ",".join(names)
 
 
-# Every chunk-writing lane's canonical chunk file: (the config key that names it,
-# the loader's built-in default). One table, so every output guard agrees on which
-# file names are protected. "markdown" is the whole-vault parse, chunks.jsonl.
-_LANE_CHUNK_FILES = {
-    "pdf": ("pdf.output_file", "pdf_chunks.jsonl"),
-    "notebooks": ("notebooks.output_file", "ipynb_chunks.jsonl"),
-    "code": ("code.output_file", "code_chunks.jsonl"),
-    "canvas": ("canvas.output_file", "canvas_chunks.jsonl"),
-    "markdown": ("paths.chunks_file", "chunks.jsonl"),
-}
-
-
-def _refuse_other_lanes_file(out: str | None, lane: str) -> None:
-    """Refuse an --output that is ANOTHER lane's canonical chunk file.
-
-    Every loader opens its output with "w", so a run pointed at a different
-    lane's file (or at chunks.jsonl) replaces that lane's rows with its own: they
-    drop out of the sparse index, which is re-derived from the JSONLs, while they
-    stay in the dense one. This holds for a whole-lane run as much as a scoped
-    one. `lane`'s OWN file is the caller's business (a whole-lane run may write
-    it; a scoped run is refused by the caller's own guard). Names are compared
-    case-insensitively because NTFS is, and against the file each lane would
-    write itself (config's output file, else the built-in default).
-    """
-    if out is None:
-        return
-    name = Path(out).name.lower()
-    owners = sorted(other for other, (key, default) in _LANE_CHUNK_FILES.items()
-                    if other != lane
-                    and Path(CFG.get(key) or default).name.lower() == name)
-    if owners:
-        raise ValueError(
-            f"{Path(out).name} is the chunk file of the {' and '.join(owners)} lane, "
-            f"and the loader truncates its output: this {lane} run would wipe that "
-            f"lane's rows out of the sparse index while they stay in the dense one. "
-            f"Give this run its own output file (name it *_chunks.jsonl so the "
-            f"sparse rebuild picks it up).")
-
-
-def _lane_output(cfg_key: str, default_name: str, prm: dict,
-                 scope: tuple[str, ...]) -> list[str]:
+def _lane_output(lane: str, prm: dict, scope: tuple[str, ...]) -> list[str]:
     """The ["--output", path] pair for a lane whose loader opens its output
     with "w", or [] to leave the loader's own default in force.
 
     A run narrowed by any `scope` param must not write the lane's canonical
-    file. The loader replaces what it writes, so a run scoped to one folder,
-    file or page range truncates the whole-lane file down to that scope. The
-    dense index keeps every chunk (append upserts, it never deletes) while
-    build_sparse_union re-derives the sparse half from the JSONLs and loses the
-    rest — a silent dense/sparse drift, from a job that reported success. The
-    same guard ingest_canvas and ingest_md carry. The canonical name is the one
-    the loader would pick itself (config's `output_file`, else its built-in
-    default), compared case-insensitively because NTFS is. Whatever the scope, a
-    run may not take ANOTHER lane's canonical file either
-    (_refuse_other_lanes_file).
+    file, and no run may take ANOTHER lane's (lane_guard has the why: a silent
+    dense/sparse drift from a job that reported success).
     """
-    canonical = Path(CFG.get(cfg_key) or default_name).name
     out = _vault_data_path(str(prm["output"])) if prm.get("output") else None
-    if (any(prm.get(k) for k in scope)
-            and (out is None or Path(out).name.lower() == canonical.lower())):
-        raise ValueError(
-            f"a scoped {cfg_key.partition('.')[0]} run must not write "
-            f"{canonical} — the loader truncates its output, so everything "
-            f"outside this scope would drop out of the sparse index while "
-            f"staying in the dense one, and out of this lane's only chunk "
-            f"file. Give this run its own output file (name it *_chunks.jsonl "
-            f"so the sparse rebuild picks it up).")
-    _refuse_other_lanes_file(out, cfg_key.partition(".")[0])
+    lane_guard.refuse_scoped_canonical(CFG, lane, out, any(prm.get(k) for k in scope))
+    lane_guard.refuse_other_lanes_file(CFG, out, lane)
     return ["--output", out] if out else []
 
 
@@ -426,7 +367,7 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
             argv += ["--include-path", str(prm["include_path"])]
         if prm.get("exclude_path"):
             argv += ["--exclude-path", str(prm["exclude_path"])]
-        argv += _lane_output("pdf.output_file", "pdf_chunks.jsonl", prm,
+        argv += _lane_output("pdf", prm,
                              ("include_path", "exclude_path", "include_files",
                               "only_books", "skip_books", "max_pages", "pages"))
         if prm.get("max_pages"):
@@ -461,7 +402,7 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
         return argv
     if kind == "ingest_notebooks":
         argv = [py, "main.py", "ingest-notebooks"]
-        argv += _lane_output("notebooks.output_file", "ipynb_chunks.jsonl", prm,
+        argv += _lane_output("notebooks", prm,
                              ("include_path", "include_files", "exts"))
         if prm.get("no_outputs"):
             argv.append("--no-outputs")
@@ -483,7 +424,7 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
         return argv
     if kind == "ingest_code":
         argv = [py, "main.py", "ingest-code"]
-        argv += _lane_output("code.output_file", "code_chunks.jsonl", prm,
+        argv += _lane_output("code", prm,
                              ("include_path", "exclude_path", "include_files", "exts"))
         if prm.get("include_path"):
             argv += ["--include-path", str(prm["include_path"])]
@@ -504,21 +445,10 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
     if kind == "ingest_canvas":
         argv = [py, "main.py", "ingest-canvas"]
         out = _vault_data_path(str(prm.get("output") or "data/canvas_chunks.jsonl"))
-        # A SCOPED run must not write the canonical file. The loader opens its
-        # output with "w", so a run scoped to one folder truncates the
-        # whole-vault file down to that folder. The dense index keeps every
-        # chunk (append upserts, it never deletes) while build_sparse_union
-        # re-derives the sparse half from the JSONLs and loses the rest — a
-        # silent dense/sparse drift, from a job that reported success. Same
-        # guard ingest_md carries for chunks.jsonl, and case-insensitive like
-        # it: on NTFS, CANVAS_CHUNKS.JSONL opens canvas_chunks.jsonl.
-        if prm.get("include_path") and Path(out).name.lower() == "canvas_chunks.jsonl":
-            raise ValueError(
-                "a scoped canvas run must not write canvas_chunks.jsonl — the "
-                "loader truncates its output, so every canvas outside this "
-                "scope would drop out of the sparse index while staying in "
-                "the dense one. Give this run its own output file.")
-        _refuse_other_lanes_file(out, "canvas")
+        # A SCOPED run must not write the canonical file (lane_guard says why),
+        # in any case: on NTFS, CANVAS_CHUNKS.JSONL opens canvas_chunks.jsonl.
+        lane_guard.refuse_scoped_canonical(CFG, "canvas", out, bool(prm.get("include_path")))
+        lane_guard.refuse_other_lanes_file(CFG, out, "canvas")
         if prm.get("output") or prm.get("include_path"):
             argv += ["--output", out]
         if prm.get("include_path"):
@@ -548,10 +478,9 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
         if not prm.get("include_path"):
             raise ValueError("ingest_md requires include_path")
         out = _vault_data_path(str(prm.get("output") or ""))
-        # Case-insensitive: on NTFS, CHUNKS.JSONL opens chunks.jsonl.
-        if Path(out).name.lower() == "chunks.jsonl":
-            raise ValueError("ingest_md must not write chunks.jsonl")
-        _refuse_other_lanes_file(out, "markdown")
+        # Always scoped; case-insensitive: on NTFS, CHUNKS.JSONL opens chunks.jsonl.
+        lane_guard.refuse_scoped_canonical(CFG, "markdown", out, True)
+        lane_guard.refuse_other_lanes_file(CFG, out, "markdown")
         argv = [py, "main.py", "ingest-md",
                 "--include-path", str(prm["include_path"]),
                 "--output", out]
@@ -578,7 +507,7 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
         name = Path(out).name
         if not (name.startswith("ocrstudio_") and name.endswith("_chunks.jsonl")):
             raise ValueError("ocrstudio_ingest writes only data/ocrstudio_*_chunks.jsonl")
-        _refuse_other_lanes_file(out, "ocrstudio")
+        lane_guard.refuse_other_lanes_file(CFG, out, "ocrstudio")
         pages = prm.get("pages") or "done"
         if pages not in ("done", "all"):
             raise ValueError("pages must be done|all")
@@ -622,6 +551,8 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
         return [py, "main.py", "index"]
     if kind == "rebuild_bm25":
         return [py, "rebuild_bm25.py"]
+    if kind == "route_pointers":
+        return [py, "main.py", "route-pointers"]
     if kind == "build_tantivy":
         return [py, "build_tantivy.py"]
     if kind == "build_hype":
@@ -654,6 +585,23 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
     if kind == "recalibrate":
         argv = [py, "recalibrate_courses.py"]
         if prm.get("dry_run", True):
+            argv.append("--dry-run")
+        return argv
+    if kind == "map":
+        pdf, chapter, pages = prm.get("pdf"), prm.get("chapter"), prm.get("pages")
+        if not isinstance(pdf, str) or not pdf.strip():
+            raise ValueError("pdf is required: the path of the PDF to map")
+        if bool(chapter) == bool(pages):
+            raise ValueError("pass exactly one of chapter or pages")
+        if pages and not re.fullmatch(r"\d+-\d+", str(pages)):
+            raise ValueError(f"pages must look like 140-240, got {pages!r}")
+        argv = [py, "main.py", "map", pdf]
+        argv += ["--chapter", str(chapter)] if chapter else ["--pages", str(pages)]
+        if prm.get("template"):
+            argv += ["--template", str(prm["template"])]
+        if prm.get("title"):
+            argv += ["--title", str(prm["title"])]
+        if prm.get("dry_run"):
             argv.append("--dry-run")
         return argv
     raise ValueError(f"unknown job kind {kind!r}")
@@ -694,7 +642,7 @@ _JOB_RECORD_VERSION = 1
 # believed were load-bearing at the time.
 _FINGERPRINT_KEYS = (
     "parser.chunking", "parser.max_chunk_size", "parser.min_chunk_size",
-    "parser.overlap_size", "parser.skip_dirs",
+    "parser.overlap_size", "parser.skip_dirs", "parser.skip_roots",
     "pdf.chunking", "pdf.max_chunk_size", "pdf.min_chunk_size",
     "pdf.overlap_size", "pdf.ocr_engine",
     "code.max_chunk_size", "code.min_chunk_size", "code.overlap_size",
@@ -703,6 +651,7 @@ _FINGERPRINT_KEYS = (
     "canvas.chunking", "canvas.max_chunk_size", "canvas.min_chunk_size",
     "canvas.chunk_overlap", "canvas.context_depth",
     "canvas.label_tags",
+    "canvas.footer_subpath", "canvas.generated_markers", "canvas.source_lines",
     "embedding.local_model", "embedding.provider",
     "paths.collection_name",
     "graph.embedding_provider",
@@ -951,7 +900,7 @@ def _worker() -> None:
             # fresh from disk so the Settings toggle applies immediately.
             if (job.status == "done"
                     and job.kind in ("index_append", "index_rebuild",
-                                     "rebuild_bm25", "graph_embed")):
+                                     "rebuild_bm25", "graph_embed", "route_pointers")):
                 try:
                     auto = load_config().get("webui.auto_restart_rag", False)
                 except Exception:
@@ -987,52 +936,76 @@ def _collection():
 
 
 def _chroma_delete_by_source(source_files: set[str]) -> int:
-    """Exact-match delete on metadata.source_file, paged both ways."""
-    c = _collection()
-    total = c.count()
-    ids: list[str] = []
-    offset = 0
-    while offset < total:
-        got = c.get(limit=PAGE, offset=offset, include=["metadatas"])
-        for i, m in zip(got["ids"], got["metadatas"]):
-            if str((m or {}).get("source_file", "")) in source_files:
-                ids.append(i)
-        offset += PAGE
-    for k in range(0, len(ids), PAGE):
-        c.delete(ids=ids[k:k + PAGE])
-    return len(ids)
+    """Exact-match delete on metadata.source_file from EVERY collection in the store:
+    the active one, the eg2 re-embeds, the HyPE questions and the graph twin (contract
+    P10: a chunk deleted from the active collection alone stays searchable through
+    the others). Refuses, before anything is deleted, while a collection is mid
+    re-embed (status building): a delete now would race its upserts. The active
+    collection goes LAST, so a failure leaves the served one untouched and a retry heals.
+    Returns the ACTIVE collection's count."""
+    chroma_dir = CFG.path("paths.chroma_dir")
+    client = persistent_client(chroma_dir)
+    index_ops.refuse_if_building(chroma_dir, client)
+    active = client.get_collection(COLLECTION)
+    others = [c.name for c in client.list_collections() if c.name != COLLECTION]
+    sources = sorted(source_files)
+    counts: dict[str, int] = {}
+    for name in others + [COLLECTION]:
+        col = active if name == COLLECTION else client.get_collection(name)
+        counts[name] = 0
+        for k in range(0, len(sources), 100):
+            ids = col.get(where={"source_file": {"$in": sources[k:k + 100]}}, include=[])["ids"]
+            for j in range(0, len(ids), PAGE):
+                col.delete(ids=ids[j:j + PAGE])
+            counts[name] += len(ids)
+    log.info("deleted by source_file, per collection: %s", counts)
+    return counts[COLLECTION]
 
 
 def _jsonl_remove_sources(source_files: set[str], jsonl_names: set[str]) -> dict[str, int]:
-    """Stream-rewrite each affected JSONL, dropping matching rows atomically."""
+    """Drop the matching rows from each affected chunk JSONL, then from the HyPE
+    sidecar and the parents sidecar (a deleted note's questions and parent sections
+    go with it). Every rewritten file keeps a `.delete-<stamp>.bak` beside it
+    (index_ops.rewrite_jsonl); unparseable lines are kept, not destroyed."""
+    def chunk_row(r):
+        return DROP if str((r.get("metadata") or {}).get("source_file", "")) in source_files else None
+
+    def top_row(r):
+        return DROP if str(r.get("source_file", "")) in source_files else None
+
+    targets = [(p, chunk_row) for p in chunk_files() if p.name in jsonl_names]
+    targets += [(p, top_row) for p in (DATA_DIR / HYPE_SIDECAR, index_ops.parents_path(CFG))
+                if p.exists()]
     removed: dict[str, int] = {}
-    for path in chunk_files():
-        if path.name not in jsonl_names:
-            continue
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        n = 0
-        with open(tmp, "wb") as out:
-            for raw in iter_jsonl_lines(path):
-                if not raw.strip():
-                    continue
-                keep = True
-                try:
-                    rec = json.loads(raw.decode("utf-8", errors="replace"))
-                    sf = str((rec.get("metadata") or {}).get("source_file", ""))
-                    if sf in source_files:
-                        keep = False
-                except json.JSONDecodeError:
-                    pass                      # unparseable line: keep, don't destroy
-                if keep:
-                    out.write(raw + b"\n")
-                else:
-                    n += 1
+    for path, fix in targets:
+        n = rewrite_jsonl(path, fix, tag="delete")
         if n:
-            shutil.move(str(tmp), str(path))
             removed[path.name] = n
-        else:
-            tmp.unlink(missing_ok=True)
     return removed
+
+
+def _chunk_file_locked(e: OSError, chroma_deleted: int) -> JSONResponse:
+    """The answer when Chroma has already lost the rows but a chunk file could not be
+    rewritten (typically held open by a running index or rebuild job: Windows refuses
+    os.replace onto an open file). The delete is not atomic across stores, so say what is
+    where; "nothing changed" would be false."""
+    return JSONResponse({
+        "ok": False, "chroma_deleted": chroma_deleted,
+        "error": (f"The rows are ALREADY deleted from Chroma, but a chunk file could not be "
+                  f"rewritten ({type(e).__name__}: {e}). It still holds them, so the next BM25 "
+                  f"rebuild would bring them back into the sparse index only. Once the job "
+                  f"holding the file has finished, repeat the same request: it is safe to "
+                  f"repeat, and it finishes the delete.")}, status_code=409)
+
+
+def _chroma_delete_failed(e: Exception) -> JSONResponse:
+    """The answer when _chroma_delete_by_source raised part way: it deletes from the other
+    collections before the active one, so "nothing changed" would be false."""
+    return JSONResponse({"ok": False, "error": (
+        f"ChromaDB delete failed part way ({type(e).__name__}: {e}). The active collection is "
+        f"deleted last and still holds the rows, but the other collections (re-embeds, HyPE, "
+        f"graph twin) may already have lost them; the chunk files are untouched. Repeat the "
+        f"same request: it is safe to repeat, and it finishes the delete.")}, status_code=500)
 
 # ============================================================================
 # API models
@@ -1046,6 +1019,9 @@ class JobIn(BaseModel):
 class DeleteIn(BaseModel):
     source_files: list[str] = Field(min_length=1)
     rebuild: bool = True            # queue rebuild_bm25 after (keep indexes in sync)
+    # chunk files (by name) whose rows stay: the file a refused `index --append` is about to
+    # append again (its REPLACE recipe), which the manifest lists like any other
+    keep_jsonls: list[str] = Field(default_factory=list)
 
 
 class InboxIngestIn(BaseModel):
@@ -1282,24 +1258,48 @@ def doc_preview(source_file: str, n: int = 3) -> dict:
 @app.post("/api/documents/delete")
 def documents_delete(body: DeleteIn) -> dict:
     """
-    Remove documents from the INDEX (never from the vault): paged ChromaDB
-    delete + JSONL row removal (so a rebuild can't resurrect them) + optional
-    queued BM25 rebuild. Restart the query endpoint afterwards.
+    Remove documents from the INDEX (never from the vault): paged delete from
+    EVERY collection in the store, plus row removal from the JSONLs, the HyPE
+    sidecar and the parents sidecar (so a rebuild can't resurrect them), each
+    rewritten with a `.bak`, + optional queued BM25 rebuild. Refused (409) while
+    a collection is mid re-embed. Restart the query endpoint afterwards.
+    `keep_jsonls` names chunk files whose rows stay (an unknown name is a 400).
     """
     targets = {s for s in body.source_files if s}
+    keep = {n.lower() for n in body.keep_jsonls}
+    unknown = sorted(keep - {p.name.lower() for p in chunk_files()})
+    if unknown:
+        return JSONResponse({"ok": False, "error": (
+            f"keep_jsonls names {', '.join(unknown)}, which is not a chunk file in {DATA_DIR}: "
+            f"pass the exact name of the file to keep, or leave it out (a file outside the data "
+            f"folder is never touched by a delete). Nothing was deleted.")}, status_code=400)
     manifest = build_manifest()
     jsonl_names: set[str] = set()
     for sf in targets:
         d = manifest.get(sf)
         if d:
-            jsonl_names.update(d["jsonls"])
+            jsonl_names.update(j for j in d["jsonls"] if j.lower() not in keep)
+
+    # Eval questions whose gold cites a deleted source: a warning, never a refusal
+    # (D10: update the gold). Read BEFORE the delete — a broken sets file raises
+    # SchemaError, and that must not surface with the rows already gone. Rejected
+    # questions are skipped: there is no gold of theirs left to update.
+    gone = {norm_file(s) for s in targets}
+    eval_gold = sorted({q.id for q in _eval_questions()
+                        if q.provenance.get("status") != "rejected"
+                        for g in q.gold for s in g.sources() if norm_file(s.file) in gone})
 
     try:
         chroma_deleted = _chroma_delete_by_source(targets)
+    except index_ops.StoreBusy as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=409)
     except Exception as e:
         return {"ok": False, "error": f"ChromaDB delete failed: {type(e).__name__}: {e}"}
 
-    removed = _jsonl_remove_sources(targets, jsonl_names)
+    try:
+        removed = _jsonl_remove_sources(targets, jsonl_names)
+    except OSError as e:
+        return _chunk_file_locked(e, chroma_deleted)
     build_manifest(force=False)            # touched files re-scan on next read
 
     rebuild_job = enqueue("rebuild_bm25", {}).id if body.rebuild else None
@@ -1308,6 +1308,7 @@ def documents_delete(body: DeleteIn) -> dict:
         "chroma_deleted": chroma_deleted,
         "jsonl_removed": removed,
         "rebuild_job": rebuild_job,
+        "eval_gold": eval_gold,
         "note": "Vault files were NOT touched. Restart serve_api (:8051) once "
                 "the rebuild job finishes so the warm pipeline reloads.",
     }
@@ -1338,10 +1339,15 @@ def documents_retag(body: RetagIn) -> dict:
     Set domain and/or course and/or add/remove tags on whole documents.
     METADATA ONLY — chunk text never changes, so doc_ids (and embeddings)
     are untouched:
-      1. stream-rewrite the affected JSONLs (source of truth),
-      2. paged ChromaDB metadata update for the same doc_ids,
+      1. stream-rewrite the affected JSONLs (source of truth), each keeping a
+         `.retag-<stamp>.bak` beside it (index_ops.rewrite_jsonl),
+      2. paged ChromaDB metadata update for the same doc_ids in EVERY collection
+         that holds chunks (the eg2 re-embeds and the graph twin copy the active
+         one's metadata; HyPE questions have their own), the active one LAST so a
+         failure leaves the served one as it was and a retry heals,
       3. optional queued rebuild_bm25 (the sparse payload carries its own
          metadata copy — without it, tag boosts won't see sparse-lane hits).
+    Refused (409), before anything is written, while a collection is mid re-embed.
     """
     targets = {s for s in body.source_files if s}
     set_domain = body.domain.strip().lower() if body.domain else None
@@ -1365,34 +1371,29 @@ def documents_retag(body: RetagIn) -> dict:
         return JSONResponse({"ok": False, "error": "no matching documents",
                              "missing": missing}, status_code=404)
 
+    from src.embeddings.sidecar import role_for
+    chroma_dir = CFG.path("paths.chroma_dir")
+    client = persistent_client(chroma_dir)
+    try:
+        index_ops.refuse_if_building(chroma_dir, client)
+    except index_ops.StoreBusy as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=409)
+    client.get_collection(COLLECTION)          # the served collection must exist: raises
+    names = [c.name for c in client.list_collections()
+             if c.name != COLLECTION and role_for(CFG, c.name) != "hype"] + [COLLECTION]
+
     changed_meta: dict[str, dict] = {}       # doc_id -> cleaned new metadata
-    rows_changed = 0
-    for path in chunk_files():
-        if path.name not in jsonl_names:
-            continue
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        n = 0
-        with open(tmp, "wb") as out:
-            for raw in iter_jsonl_lines(path):
-                if not raw.strip():
-                    continue
-                line = raw
-                try:
-                    rec = json.loads(raw.decode("utf-8", errors="replace"))
-                    m = rec.get("metadata") or {}
-                    if str(m.get("source_file", "")) in targets:
-                        rec["metadata"] = _retag_meta(m, set_domain, set_course, add, rem)
-                        changed_meta[str(rec.get("doc_id", ""))] = rec["metadata"]
-                        line = json.dumps(rec, ensure_ascii=False).encode("utf-8")
-                        n += 1
-                except json.JSONDecodeError:
-                    pass                      # unparseable: pass through untouched
-                out.write(line + b"\n")
-        if n:
-            shutil.move(str(tmp), str(path))
-            rows_changed += n
-        else:
-            tmp.unlink(missing_ok=True)
+
+    def fix(rec):
+        m = rec.get("metadata") or {}
+        if str(m.get("source_file", "")) not in targets:
+            return None
+        rec["metadata"] = _retag_meta(m, set_domain, set_course, add, rem)
+        changed_meta[str(rec.get("doc_id", ""))] = rec["metadata"]
+        return rec
+
+    rows_changed = sum(rewrite_jsonl(p, fix, tag="retag")
+                       for p in chunk_files() if p.name in jsonl_names)
 
     # Chroma metadata update (paged; only ids that actually exist there —
     # known dedup means a few JSONL rows never got vectors).
@@ -1409,26 +1410,31 @@ def documents_retag(body: RetagIn) -> dict:
                 out[k] = str(v)
         return out
 
-    chroma_updated = 0
+    updated: dict[str, int] = {}             # collection -> rows updated, active last
     try:
-        col = _collection()
         ids = [i for i in changed_meta if i]
-        for k in range(0, len(ids), PAGE):
-            batch = ids[k:k + PAGE]
-            found = col.get(ids=batch, include=[])["ids"]
-            if found:
-                col.update(ids=found,
-                           metadatas=[clean(changed_meta[i]) for i in found])
-                chroma_updated += len(found)
+        for name in names:
+            col = client.get_collection(name)
+            updated[name] = 0
+            for k in range(0, len(ids), PAGE):
+                batch = ids[k:k + PAGE]
+                found = col.get(ids=batch, include=[])["ids"]
+                if found:
+                    col.update(ids=found,
+                               metadatas=[clean(changed_meta[i]) for i in found])
+                    updated[name] += len(found)
     except Exception as e:
         return {"ok": False, "rows_changed": rows_changed,
+                "chroma_updated_by_collection": updated,
                 "error": f"JSONLs updated but ChromaDB update failed "
                          f"({type(e).__name__}: {e}) — retag again to heal.",
                 "missing": missing}
+    log.info("retag updated, per collection: %s", updated)
 
     rebuild_job = enqueue("rebuild_bm25", {}).id if body.rebuild else None
     return {"ok": True, "rows_changed": rows_changed,
-            "chroma_updated": chroma_updated,
+            "chroma_updated": updated[COLLECTION],
+            "chroma_updated_by_collection": updated,
             "missing": missing, "rebuild_job": rebuild_job,
             "note": "Restart serve_api (:8051) after the rebuild finishes so "
                     "warm retrieval sees the new metadata."}
@@ -1730,6 +1736,31 @@ def inbox_list() -> dict:
     return {"inbox": str(inbox), "files": rows}
 
 
+def _same_path_refusal(manifest: dict, scope_rel: str, names: list[str]):
+    """A 409 when any of these inbox PDFs, at scope_rel/name (the OS form the PDF lane stores),
+    already has rows under exactly that source_file; else None.
+
+    `force` is "ingest anyway" for a file that only looks indexed (its stem is, elsewhere).
+    The SAME path is a re-ingest of that source: an edited file mints new doc_ids, `index
+    --append` refuses to keep the old rows beside them, and by then the ingest job has
+    already archived the PDFs to _ingested/ (it does so inside the job). One such file would
+    strand its whole batch, so nothing is queued or moved: delete the old rows first. A
+    DIFFERENT document that only shares the name must not have the indexed one deleted."""
+    again = [n for n in names if str(Path(scope_rel) / n) in manifest]
+    if not again:
+        return None
+    return JSONResponse(
+        {"ok": False, "already_indexed": again,
+         "error": f"{len(again)} file(s) are already indexed at exactly this path "
+                  f"({', '.join(again)}); force cannot add them again. If a file is an EDITED "
+                  f"version of the indexed one, delete its rows first (POST /api/documents/"
+                  f"delete) so the new ingest is a REPLACE, then repeat. If it is a DIFFERENT "
+                  f"document that only shares the name, do not delete: that drops the indexed "
+                  f"one for good (its original sits in Inbox/_ingested/, which no lane "
+                  f"rediscovers); rename it in the inbox or give the group a dest_dir, then "
+                  f"repeat. Nothing was queued or moved."}, status_code=409)
+
+
 @app.post("/api/ingest_inbox")
 def ingest_inbox(body: InboxIngestIn) -> dict:
     """
@@ -1798,6 +1829,10 @@ def ingest_inbox(body: InboxIngestIn) -> dict:
                              "error": "chunking must be heading|fixed|document|none"},
                             status_code=400)
     names = [f.name for f in pdfs]
+    if not body.dest_dir:              # a destination move renames on collision; the inbox path does not
+        refused = _same_path_refusal(manifest, include_rel, names)
+        if refused:
+            return refused
     moved_to = None
     if body.dest_dir:
         # Move FIRST so source_file/doc_ids carry the final path; no archive
@@ -2101,6 +2136,13 @@ def ingest_custom(body: CustomIngestIn) -> dict:
              "conflicts": conflicts,
              "hint": "force:true ingests anyway (duplicates if same files)."},
             status_code=409)
+    # Only a pdf group that stays in the inbox is archived. A group with `pages` is a page-range
+    # top-up: the append's check compares only the pages it brings (index_ops.append_conflicts).
+    for gi, g in enumerate(body.groups):
+        if g.kind == "pdf" and gi not in dests and not g.pages:
+            refused = _same_path_refusal(manifest, include_rel, list(g.files))
+            if refused:
+                return refused
 
     ts = f"{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:4]}"
     jobs = []
@@ -2322,16 +2364,18 @@ def _canvas_scan(vault: Path, refresh: bool) -> tuple[dict, bool]:
 
     Cached because it walks the whole vault and the Ingest and Graph tabs ask on
     every visit. `refresh` (the console's ⟳ rescan) bypasses it. One walk serves
-    both the folder counts and the Graph tab's file list."""
+    both the folder counts and the Graph tab's file list. It prunes what the canvas lane
+    prunes (canvas.skip_dirs + parser.skip_dirs), so neither offers a canvas the lane
+    would never index."""
     cached = _CANVAS_SCAN.get(str(vault))
     if cached and not refresh and (time.time() - cached["at"]) < _CANVAS_SCAN_TTL:
         return cached, True
 
-    from src.ingestion.canvas_loader import iter_canvas_files
+    from src.ingestion.canvas_loader import CanvasLoader, iter_canvas_files
     t0 = time.time()
     roots: dict[str, int] = {}
     files = []
-    for f in iter_canvas_files(vault):
+    for f in iter_canvas_files(vault, CanvasLoader.from_config(CFG).skip_dirs):
         rel = f.relative_to(vault).parts
         key = rel[0] if len(rel) > 1 else "(vault root)"
         roots[key] = roots.get(key, 0) + 1
@@ -2603,7 +2647,8 @@ def canvas_reindex(body: CanvasPathIn) -> dict:
         if [f.resolve() for f in matched] != [p]:
             raise ValueError(
                 f"the canvas lane's include filter would match {len(matched)} file(s) for "
-                f"{rel} (it is a substring test, or the canvas sits under canvas.skip_roots): "
+                f"{rel} (it is a substring test, or the canvas sits under canvas.skip_roots, or "
+                f"under a folder the lane prunes: canvas.skip_dirs / parser.skip_dirs): "
                 + ", ".join(f.relative_to(loader.vault_path).as_posix() for f in matched[:5]))
         n = len(loader.load_file(matched[0]))     # malformed JSON raises here, not in the job
     except (ValueError, FileNotFoundError) as e:
@@ -2619,12 +2664,16 @@ def canvas_reindex(body: CanvasPathIn) -> dict:
     if indexed:
         try:
             chroma_deleted = _chroma_delete_by_source(set(indexed))
+        except index_ops.StoreBusy as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=409)
         except Exception as e:
-            return JSONResponse({"ok": False, "error": f"ChromaDB delete failed, nothing "
-                                 f"changed: {type(e).__name__}: {e}"}, status_code=500)
-        removed = {"chroma_deleted": chroma_deleted,
-                   "jsonl_removed": _jsonl_remove_sources(
-                       set(indexed), {j for d in indexed.values() for j in d["jsonls"]})}
+            return _chroma_delete_failed(e)
+        try:
+            jsonl_removed = _jsonl_remove_sources(
+                set(indexed), {j for d in indexed.values() for j in d["jsonls"]})
+        except OSError as e:
+            return _chunk_file_locked(e, chroma_deleted)
+        removed = {"chroma_deleted": chroma_deleted, "jsonl_removed": jsonl_removed}
         build_manifest(force=False)
     try:
         j1 = enqueue("ingest_canvas", {"include_path": rel, "output": out})
@@ -4645,11 +4694,15 @@ def ocrstudio_ingest(body: StudioIngestIn) -> dict:
         jsonl_names = {j for d in indexed.values() for j in d["jsonls"]}
         try:
             chroma_deleted = _chroma_delete_by_source(set(indexed))
+        except index_ops.StoreBusy as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=409)
         except Exception as e:
-            return JSONResponse({"ok": False, "error": f"ChromaDB delete failed, nothing "
-                                 f"changed: {type(e).__name__}: {e}"}, status_code=500)
-        replaced = {"chroma_deleted": chroma_deleted,
-                    "jsonl_removed": _jsonl_remove_sources(set(indexed), jsonl_names)}
+            return _chroma_delete_failed(e)
+        try:
+            jsonl_removed = _jsonl_remove_sources(set(indexed), jsonl_names)
+        except OSError as e:
+            return _chunk_file_locked(e, chroma_deleted)
+        replaced = {"chroma_deleted": chroma_deleted, "jsonl_removed": jsonl_removed}
         build_manifest(force=False)
     try:
         j1 = enqueue("ocrstudio_ingest", {"doc": rel, "output": out, "pages": body.pages})
@@ -4967,7 +5020,11 @@ VAULT_KEYS = ["parser.vault_path", "paths.chunks_file", "paths.chroma_dir",
               # The small-to-big parent sidecar is built FROM one corpus's
               # markdown; pointing vault B at vault A's parents swaps in text
               # from the wrong vault whenever parent_context is on.
-              "retrieval.parents_file"]
+              "retrieval.parents_file",
+              # The route sidecar is keyed by one corpus's doc_ids: vault B reading
+              # vault A's map would boot past the missing-sidecar refusal and route
+              # nothing, and B's route_pointers job would overwrite A's file.
+              "retrieval.route.pointers_file"]
 
 # Registry lives at a vault-INDEPENDENT path (DATA_DIR follows the per-vault
 # chunks_file, so it moves on switch — the registry must not move with it).
@@ -4985,11 +5042,11 @@ def _load_vaults() -> list[dict]:
 
 
 def _save_vaults(vaults: list[dict]) -> None:
-    # A fresh clone has no data/ until something ingests.
-    _VAULT_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
-    _VAULT_REGISTRY.write_text(
-        json.dumps({"vaults": vaults}, indent=2, ensure_ascii=False),
-        encoding="utf-8")
+    from src.ocr_studio.pages import atomic_write
+    # Temp file, then replace: a save cut short leaves the old registry whole.
+    # It also makes data/, which a fresh clone lacks until something ingests.
+    atomic_write(_VAULT_REGISTRY, json.dumps(
+        {"vaults": vaults}, indent=2, ensure_ascii=False).encode("utf-8"))
 
 
 def _fresh_settings_snapshot() -> dict[str, str]:
@@ -5096,6 +5153,7 @@ def vaults_switch(body: VaultSwitchIn) -> dict:
                 "webui.vault_tree_root": "",
                 "webui.manifest_cache": f"data/vaults/{slug}/.manifest_cache.json",
                 "retrieval.parents_file": f"data/vaults/{slug}/parents_md.jsonl",
+                "retrieval.route.pointers_file": f"data/vaults/{slug}/route_pointers.json",
             }
             scaffolded = True
             if tgt is None:
@@ -5119,6 +5177,7 @@ def vaults_switch(body: VaultSwitchIn) -> dict:
                 "webui.vault_tree_root": "",
                 "webui.manifest_cache": f"{own}/.manifest_cache.json",
                 "retrieval.parents_file": f"{own}/parents_md.jsonl",
+                "retrieval.route.pointers_file": f"{own}/route_pointers.json",
             }
             missing = [k for k in VAULT_KEYS if k not in tgt["settings"]]
             for key in missing:
@@ -5536,6 +5595,8 @@ PIPELINE_STATE_KEYS: tuple[str, ...] = (
     "retrieval.omnisearch.enabled", "retrieval.omnisearch.base_url",
     "retrieval.omnisearch.top_k",
     "retrieval.lane_weights", "retrieval.rrf_k", "retrieval.metadata_boost",
+    "retrieval.generated_mode", "retrieval.route.pointers_file", "retrieval.route.router_k",
+    "retrieval.route.per_target", "retrieval.route.max_targets", "retrieval.route.max_new",
     "retrieval.rerank_mode", "retrieval.rerank_top_k", "retrieval.cross_encoder_model",
     "retrieval.cross_encoder_device", "retrieval.rerank_instruction",
     "retrieval.rerank_http.base_url",
@@ -5547,7 +5608,8 @@ PIPELINE_STATE_KEYS: tuple[str, ...] = (
     "generation.provider", "generation.model", "generation.max_tokens",
     "generation.temperature", "generation.verify_citations",
     "graph.enabled", "graph.file_type", "graph.max_depth", "graph.max_per_hop",
-    "graph.max_total", "graph.seed_top_k",
+    "graph.max_total", "graph.seed_top_k", "graph.bridges", "graph.cross_canvas",
+    "graph.wikilinks", "graph.direction", "graph.edge_types",
     # ingestion side
     "parser.vault_path", "parser.skip_dirs", "webui.inbox_dir",
     "webui.auto_restart_rag",
@@ -6216,6 +6278,12 @@ def api_schema() -> dict:
                                       "or an embedding-model change only"},
             "rebuild_bm25": {"permission": "mutating", "params": {},
                              "note": "sync sparse after ingest/delete/retag"},
+            "route_pointers": {"permission": "mutating", "params": {},
+                               "note": "rebuilds retrieval.route.pointers_file, the map from each "
+                                       "generated chunk to the primary pages it cites, which "
+                                       "generated_mode: route reads. Reads the chunk JSONLs and the "
+                                       "vault; never writes a store. Run after an ingest that adds "
+                                       "or changes generated content, then restart :8051"},
             "build_tantivy": {"permission": "mutating", "params": {},
                               "note": "EXPERIMENTAL: build the tantivy index beside "
                                       "the BM25 pickle (needs the optional tantivy "
@@ -6238,6 +6306,14 @@ def api_schema() -> dict:
                                     "chunks of the main collection embedded by graph.embedding_provider (refused while that "
                                     "is null or names the main embedder). Never writes the main collection or a chunk file. "
                                     "POST /api/canvas/reindex queues it after its append when the key is set. Restart :8051 afterwards"},
+            "map": {"permission": "mutating",
+                    "params": {"pdf": "str (required; absolute, or relative to parser.vault_path)",
+                               "chapter": "str? (outline title)",
+                               "pages": "a-b? (exactly one of chapter / pages)",
+                               "template": "str?", "title": "str? (short book title for the folder and canvas name)",
+                               "dry_run": "bool"},
+                    "note": "Builds a knowledge map into the staging folder (knowledge_map.staging_dir); "
+                            "never writes the vault or the index. Placing the canvas and ingesting it stay manual"},
         },
         "restart_after_index_change": "python -m uvicorn serve_api:app --host "
                                       "127.0.0.1 --port 8051",

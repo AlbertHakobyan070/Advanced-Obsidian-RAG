@@ -324,6 +324,112 @@ def test_reindex_refuses_a_filter_that_matches_more_than_one_canvas(vault):
     assert r.status_code == 400 and "2 file(s)" in json.loads(r.body)["error"]
 
 
+@pytest.fixture
+def building_store(vault, monkeypatch, tmp_path):
+    """A REAL Chroma store whose second collection is mid re-embed (status building),
+    holding the canvas's rows, with the console pointed at it. Nothing mocks the delete."""
+    pytest.importorskip("chromadb")
+    from chromadb.api.shared_system_client import SharedSystemClient
+    from src.embeddings.registry import EmbeddingSpec
+    from src.embeddings.sidecar import make_sidecar, write_sidecar
+    from src.utils.chroma_client import persistent_client
+    m, v, bk = vault
+    before = set(SharedSystemClient._identifier_to_system)    # a store holds C-runtime streams
+    chroma, active, eg2 = tmp_path / "chroma", "obsidian_vault", "obsidian_vault_eg2_l1024"
+    client = persistent_client(chroma)
+    cols = [client.get_or_create_collection(n, metadata={"hnsw:space": "cosine"}) for n in (active, eg2)]
+    for col in cols:
+        col.add(ids=["c1"], embeddings=[[1.0, 0.0, 0.0]], documents=["t"],
+                metadatas=[{"source_file": "Maps/m.canvas"}])
+    write_sidecar(chroma, eg2, make_sidecar(
+        EmbeddingSpec("local", "local", "fake/m"), collection=eg2, role="chunks",
+        status="building", dimension=3, count=1, written_by="rebuild-into"))
+    monkeypatch.setattr(m, "CFG", Config({"canvas": {"backup_dir": str(bk)},
+                                          "parser": {"vault_path": str(v)},
+                                          "paths": {"chroma_dir": str(chroma),
+                                                    "collection_name": active}}, tmp_path))
+    monkeypatch.setattr(m, "COLLECTION", active)
+    monkeypatch.setattr(m, "_indexed_as", lambda rel: {
+        "Maps/m.canvas": {"chunks": 1, "jsonls": ["canvas_chunks.jsonl"]}})
+    queued = []
+    monkeypatch.setattr(m, "enqueue", lambda *a, **k: queued.append(a))
+    yield m, cols, queued
+    for key in set(SharedSystemClient._identifier_to_system) - before:
+        SharedSystemClient._identifier_to_refcount.pop(key, None)
+        SharedSystemClient._identifier_to_system.pop(key).stop()
+
+
+def test_reindex_refuses_while_a_collection_is_building(building_store):
+    m, cols, queued = building_store
+
+    r = m.canvas_reindex(m.CanvasPathIn(path="Maps/m.canvas"))
+
+    assert r.status_code == 409
+    err = json.loads(r.body)["error"]
+    assert "building" in err and "obsidian_vault_eg2_l1024" in err
+    assert queued == []                                  # nothing was deleted, nothing queued
+    assert [col.count() for col in cols] == [1, 1]
+
+
+def test_reindex_says_so_when_a_chunk_file_cannot_be_rewritten(vault, monkeypatch):
+    """Chroma has already lost the rows by then: a 500 or a "nothing changed" would lie."""
+    m, v, _ = vault
+    monkeypatch.setattr(m, "_indexed_as", lambda rel: {
+        "Maps/m.canvas": {"chunks": 2, "jsonls": ["canvas_chunks.jsonl"]}})
+    monkeypatch.setattr(m, "_chroma_delete_by_source", lambda s: 2)
+
+    def locked(sources, names):
+        raise PermissionError(13, "Access is denied")
+    monkeypatch.setattr(m, "_jsonl_remove_sources", locked)
+    queued = []
+    monkeypatch.setattr(m, "enqueue", lambda *a, **k: queued.append(a))
+
+    r = m.canvas_reindex(m.CanvasPathIn(path="Maps/m.canvas"))
+
+    body = json.loads(r.body)
+    assert r.status_code == 409 and body["ok"] is False and body["chroma_deleted"] == 2
+    assert "ALREADY deleted" in body["error"] and "repeat" in body["error"]
+    assert "nothing changed" not in body["error"]
+    assert queued == []                                  # the REPLACE did not complete
+
+
+def test_reindex_says_a_failed_chroma_delete_may_have_reached_other_collections(vault, monkeypatch):
+    """REGRESSION (review T10): the delete takes the other collections before the active one,
+    so a failure there leaves rows already gone: "nothing changed" was false."""
+    m, v, _ = vault
+    monkeypatch.setattr(m, "_indexed_as", lambda rel: {
+        "Maps/m.canvas": {"chunks": 2, "jsonls": ["canvas_chunks.jsonl"]}})
+
+    def failed(sources):
+        raise RuntimeError("database is locked")
+    monkeypatch.setattr(m, "_chroma_delete_by_source", failed)
+    queued = []
+    monkeypatch.setattr(m, "enqueue", lambda *a, **k: queued.append(a))
+
+    r = m.canvas_reindex(m.CanvasPathIn(path="Maps/m.canvas"))
+
+    body = json.loads(r.body)
+    assert r.status_code == 500 and body["ok"] is False and "database is locked" in body["error"]
+    assert "nothing changed" not in body["error"] and "Repeat the same request" in body["error"]
+    assert queued == []
+
+
+def test_the_graph_tab_offers_no_canvas_the_lane_prunes(vault, monkeypatch, tmp_path):
+    """REGRESSION (review B2-5): the Graph tab listed a canvas under parser.skip_dirs (here
+    _vault_quarantine), and its re-index then blamed a substring test or canvas.skip_roots."""
+    m, v, bk = vault
+    (v / "_vault_quarantine" / "old").mkdir(parents=True)
+    (v / "_vault_quarantine" / "old" / "q.canvas").write_text(_classic(CANVAS), encoding="utf-8")
+    monkeypatch.setattr(m, "CFG", Config({"canvas": {"backup_dir": str(bk)},
+                                          "parser": {"vault_path": str(v),
+                                                     "skip_dirs": ["_vault_quarantine"]}}, tmp_path))
+
+    assert m.canvas_files(refresh=1)["files"] == ["Maps/m.canvas"]
+
+    r = m.canvas_reindex(m.CanvasPathIn(path="_vault_quarantine/old/q.canvas"))
+    assert r.status_code == 400 and "parser.skip_dirs" in json.loads(r.body)["error"]
+
+
 # ---- suggest a label --------------------------------------------------------------
 
 from src.llm.llm_client import LLMResponse
@@ -480,7 +586,7 @@ def test_suggest_label_sends_images_only_to_a_vision_backend(vault, monkeypatch)
     data["edges"].append({"id": "ep", "fromNode": "a1", "toNode": "p1"})
     sent = []
 
-    def wire(self, system, user, temp, maxtok, images=None):   # the SDK call, nothing else
+    def wire(self, system, user, temp, maxtok, images=None, json_mode=False):   # the SDK call, nothing else
         sent.append(images)
         return LLMResponse(text='{"label": "shows"}', model=self.model, provider="openai")
     monkeypatch.setattr("src.llm.llm_client.LLMClient._complete_openai_compatible", wire)

@@ -9,7 +9,10 @@ code you write — while spending the fewest possible tokens to do it.
 This guide is about *how an agent wires retrieval into a coding workflow*. For
 the endpoint reference, see the `personal-rag` skill (`SKILL.md`); for corpus
 management, the `rag-ops` skill (`SKILL_RAGOPS.md`). Read those for syntax; read
-*this* for the loop.
+*this* for the loop. For a multi-hop question (a comparison, a prerequisite chain,
+a synthesis across sources) one `/search` is the wrong tool: use
+`POST /evidence_pack` as the `noetrix-navigator` skill (`SKILL_NAVIGATOR.md`)
+describes.
 
 ---
 
@@ -55,8 +58,8 @@ curl.exe -X POST http://127.0.0.1:8051/search -H "Content-Type: application/json
 
 ## 2. The token-efficiency principles (internalize these five)
 
-1. **One warm endpoint, one curl.** The server loads the ~350 MB index once and
-   stays warm. Never `python main.py query` (reloads 350 MB per call, 10–30 s)
+1. **One warm endpoint, one curl.** The server loads the index once and
+   stays warm. Never `python main.py query` (reloads the whole index per call, 10–30 s)
    and never drive the Streamlit/console *browser* (each click/snapshot is a
    vision round-trip). One curl = one grounded result.
 2. **Retrieve narrow.** Set `include_text` to what you'll actually read
@@ -101,6 +104,11 @@ what actually came back.** If the search returns nothing on-topic, you don't
 invent a citation to the author's notes — you say "your vault doesn't seem to have
 this; here's a standard implementation" and move on. Trust is the whole point.
 
+Generated content (maps and summaries an LLM wrote) is not evidence: by default the
+RAG keeps it out of every result, and under `generated_mode: route` a source it
+brought in carries `found_via`. Every source has a `provenance`; cite the source,
+never the map that found it.
+
 ### Preset selection by sub-problem shape
 
 - **"How did *I* do X" / "my implementation of X"** → `preset:"code"` (wide nets,
@@ -141,7 +149,11 @@ weak result — branch**, exactly like the self-RAG loop in `SKILL.md`:
   written in different vocabulary than your first guess.
 - **Ladder a single leg.** For one stubborn leg, escalate cheapest-first: add
   scope words → switch preset → raise `top_k` → flip `hyde` → `hype:true` →
-  `parent_context:true`. Stop as soon as the top chunks are on-topic.
+  `parent_context:true`. Stop as soon as the top chunks are on-topic. Once you
+  know which book or note holds the answer, add a last rung: `source_file` (and
+  `pages:[first,last]`) restricts every lane to that file. `GET /outline` lists the
+  sources, with chapters and page ranges per source, so use it before searching a
+  vault you do not know.
 
 Budget rule of thumb: 2–4 `/search` calls to fully ground a non-trivial feature
 is normal and cheap; if you're past ~5 without the material surfacing, it's a
@@ -199,8 +211,8 @@ Total generation spend: zero for the code itself (all `/search`), one small
 
 - **Screen-scraping the Streamlit page or the console UI.** Every snapshot is a
   vision round-trip. There is always a JSON endpoint — use it.
-- **`python main.py query` in a loop.** Reloads 350 MB each call. Use the warm
-  `:8051` endpoint.
+- **`python main.py query` in a loop.** Reloads the whole index each call. Use the
+  warm `:8051` endpoint.
 - **`/query` when you only need chunks.** Pays a generation pass to summarize
   material you'll re-read anyway. Use `/search`.
 - **Over-fetching `include_text`.** 6000-char sources on a 6-source triage pass

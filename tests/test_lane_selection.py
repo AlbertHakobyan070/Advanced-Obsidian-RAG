@@ -17,8 +17,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest
 
+from src.embeddings.embedder import BM25Index, _tokenize
 from src.pipeline import RAGPipeline
 from src.retrieval.retriever import LANES, HybridRetriever
+from src.retrieval.route import RoutePointers
+from src.utils.provenance import ProvenanceRule
 from src.utils.timing import StageTrace
 
 
@@ -84,6 +87,64 @@ def test_lanes_never_force_a_conditional_lane(monkeypatch):
     assert out == [] and calls == {"dense": 0, "sparse": 0, "embed": 0}
 
 
+class _RecordingStore:
+    """Chroma's query in row order, recording each where. Every row matches: under off
+    and drop no router where may be sent at all."""
+
+    def __init__(self, rows):
+        self.rows, self.wheres = rows, []
+
+    def query(self, query_embeddings, n_results, include, where=None, ids=None):
+        self.wheres.append(where)
+        hit = [r for r in self.rows if ids is None or r[0] in ids][:n_results]
+        return {"ids": [[i for i, _, _ in hit]], "documents": [[t for _, t, _ in hit]],
+                "metadatas": [[m for _, _, m in hit]]}
+
+    def get(self, ids, include):          # a span's stored vectors (route only)
+        return {"ids": list(ids), "embeddings": [[1.0, 0.0] for _ in ids]}
+
+
+def _routable():
+    """A real retriever that could route: a route block and a sidecar in which the
+    generated map g1 cites b.pdf, the page only routing brings in."""
+    rows = [("g1", "prompt caching map", {"source_file": "Maps/m.canvas", "file_type": "canvas",
+                                          "provenance": "generated"}),
+            ("n1", "prompt caching notes", {"source_file": "notes/n.md", "file_type": "note",
+                                            "provenance": "authored"}),
+            ("b-p60", "the prefix is reused", {"source_file": "Books/b.pdf", "file_type": "pdf",
+                                               "provenance": "source", "page_start": 60, "page_end": 60})]
+    r = HybridRetriever(
+        embedder=SimpleNamespace(embed_query=lambda t: [1.0, 0.0]), chroma_dir=Path("unused"),
+        bm25_index=Path("unused"), collection_name="unused", dense_top_k=1, sparse_top_k=1,
+        metadata_boost=False, provenance_rule=ProvenanceRule(generated_paths=("maps",)),
+        route={"router_k": 5, "per_target": 3, "max_targets": 8, "max_new": 10},
+        route_pointers=RoutePointers({"pointers": {"g1": [
+            {"source_file": "Books/b.pdf", "page_start": 59, "page_end": 63}]}}))
+    r._bm25_payload = {"bm25": BM25Index([_tokenize(t) for _, t, _ in rows]),
+                       "ids": [i for i, _, _ in rows], "documents": [t for _, t, _ in rows],
+                       "metadatas": [m for _, _, m in rows]}
+    r._collection = _RecordingStore(rows)
+    return r
+
+
+def _seen(docs):
+    return [(d.id, d.score, d.debug) for d in docs]
+
+
+@pytest.mark.parametrize("mode", ["off", "drop"])
+def test_naming_routed_under_off_or_drop_runs_nothing(mode):
+    """routed's trigger is generated_mode route: naming it under off or drop routes nothing."""
+    r = _routable()
+    assert "b-p60" in [d.id for d in r.retrieve("q", generated_mode="route", lanes=["routed"])]
+    r._collection.wheres.clear()
+    assert r.retrieve("q", generated_mode=mode, lanes=["routed"]) == []
+    assert {"provenance": "generated"} not in r._collection.wheres        # no router search
+    if mode == "drop":
+        assert (_seen(r.retrieve("q", generated_mode="drop", lanes=["dense", "routed"]))
+                == _seen(r.retrieve("q", generated_mode="drop", lanes=["dense"])))
+    assert {"provenance": "generated"} not in r._collection.wheres
+
+
 @pytest.mark.parametrize("bad", [[], ["bogus"], ["dense", "nope"]])
 def test_bad_lane_sets_raise(monkeypatch, bad):
     r = _retriever()
@@ -118,17 +179,23 @@ def test_metadata_boost_override_both_ways(monkeypatch):
 
 def _all_lanes_eligible(r, monkeypatch):
     """Stub every lane and return the kwargs that make each conditional one
-    eligible to run, so a test can tell 'not selected' from 'not triggered'."""
+    eligible to run, so a test can tell 'not selected' from 'not triggered'.
+    routed needs generated_mode route, so the lane stubs take the drop_generated=
+    and scores= that route passes them."""
     rows = lambda tag: [(f"{tag}1", "t", {"file_type": "py"})]
-    monkeypatch.setattr(r, "_dense_search", lambda qvec, k, where=None: rows("d"))
-    monkeypatch.setattr(r, "_sparse_search", lambda q, k, predicate=None: rows("s"))
-    monkeypatch.setattr(r, "_dense_scope_search", lambda qvec, k, scope: rows("ds"))
+    monkeypatch.setattr(r, "_dense_search", lambda qvec, k, **kw: rows("d"))
+    monkeypatch.setattr(r, "_sparse_search", lambda q, k, **kw: rows("s"))
+    monkeypatch.setattr(r, "_dense_scope_search", lambda qvec, k, scope, **kw: rows("ds"))
     monkeypatch.setattr(r, "_hype_search", lambda qvec, k: rows("h"))
+    monkeypatch.setattr(r, "_bm25_scores", lambda q: [])
+    monkeypatch.setattr(r, "_routed_lane", lambda qvec, scores, hype_generated, taken: (rows("r"), {}, {}))
     monkeypatch.setattr(r, "embedder", type("E", (), {
         "embed_query": staticmethod(lambda t: [0.0])})())
     r.omnisearch = SimpleNamespace(enabled=False, lane=lambda q: rows("o"))
+    r.provenance_rule = ProvenanceRule()
+    r.route = {"router_k": 1, "per_target": 1, "max_targets": 1, "max_new": 1}
     return dict(boost_code=True, scope=SimpleNamespace(matches=lambda m: True),
-                omnisearch=True, hype=True)
+                omnisearch=True, hype=True, generated_mode="route")
 
 
 def test_without_lanes_every_eligible_lane_runs(monkeypatch):
@@ -149,7 +216,7 @@ def test_each_lane_can_be_selected_alone(monkeypatch, lane):
     r.retrieve("q", lanes=[lane], trace=tr, **eligible)
     assert set(tr.lanes) == {lane}
     # the query embedding is only paid for when a lane that uses it is left
-    assert ("embed" in tr.ms) == (lane in {"dense", "dense_code", "dense_scope", "hype"})
+    assert ("embed" in tr.ms) == (lane in {"dense", "dense_code", "dense_scope", "hype", "routed"})
 
 
 # ---- the pipeline: forwarded and echoed ----

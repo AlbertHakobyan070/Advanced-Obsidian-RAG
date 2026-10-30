@@ -63,6 +63,7 @@ from src.ingestion.obsidian_parser import (
 )
 from src.utils.config_loader import Config
 from src.utils.logger import get_logger
+from src.utils.provenance import ProvenanceRule, provenance_rule, stamp_generated
 
 log = get_logger(__name__)
 
@@ -282,6 +283,8 @@ _PDF_SKIP_DIRS = {".obsidian", ".trash", ".git", "_ingested"}
 class PDFLoader:
     # Folder names (case-insensitive) that contain books/readings
     BOOK_FOLDER_NAMES = {"books", "book", "readings", "reading", "textbooks", "textbook"}
+    extra_skip_dirs: frozenset = frozenset()   # parser.skip_dirs, set by from_config
+    skip_roots: frozenset = frozenset()        # parser.skip_roots (lowercased), set by from_config
 
     def __init__(
         self,
@@ -309,6 +312,7 @@ class PDFLoader:
         extract_images: bool = False,
         figures_dir: Path | None = None,
         image_min_frac: float = 0.08,
+        provenance_rule: ProvenanceRule | None = None,
     ):
         self.vault_path = Path(vault_path)
         self.output_file = Path(output_file)
@@ -357,6 +361,9 @@ class PDFLoader:
         # run — metadata only, so doc_ids are unaffected.
         self.force_domain: str | None = None
         self.force_tags: list[str] = []
+        # Its path rule stamps provenance: generated. None = no stamp (direct test
+        # constructions only); from_config passes provenance_rule(cfg).
+        self.provenance_rule = provenance_rule
 
         # Dedup skip-list (from scout_dedup.py) + folder/script gates.
         self.skip_set = load_skip_set(skip_list_file)
@@ -471,9 +478,12 @@ class PDFLoader:
             figures_dir=cfg.path("pdf.figures_dir") if cfg.get("pdf.figures_dir")
                         else cfg.project_root / "data" / "figures",
             image_min_frac=cfg.get("pdf.image_min_frac", 0.08),
+            provenance_rule=provenance_rule(cfg),
         )
         loader.chunking = str(cfg.get("pdf.chunking",
                                       cfg.get("parser.chunking", "heading"))).lower()
+        loader.extra_skip_dirs = frozenset(cfg.get("parser.skip_dirs") or [])
+        loader.skip_roots = frozenset(str(r).lower() for r in (cfg.get("parser.skip_roots") or []))
         return loader
 
     @staticmethod
@@ -528,7 +538,8 @@ class PDFLoader:
         # _ingested = archive folders for already-processed inbox files
         # (see archive_processed) — never rediscover those. Pruned during the
         # walk rather than filtered afterwards.
-        for f in iter_vault_files(self.vault_path, {".pdf"}, _PDF_SKIP_DIRS):
+        for f in iter_vault_files(self.vault_path, {".pdf"},
+                                  _PDF_SKIP_DIRS | self.extra_skip_dirs):
             rel = f.relative_to(self.vault_path)
             total_seen += 1
             rel_posix = rel.as_posix().lower()
@@ -537,6 +548,10 @@ class PDFLoader:
                 continue
             if self.include_files and f.name.lower() not in self.include_files:
                 self.stats["pdfs_skipped_include"] += 1
+                continue
+            # parser.skip_roots, unless --include-path scopes the run (the md/nb/code rule)
+            if not self.include_path and rel.parts[0].lower() in self.skip_roots:
+                self.stats["pdfs_skipped_folder"] += 1
                 continue
             if self.exclude_path and self.exclude_path in rel_posix:
                 self.stats["pdfs_skipped_excluded"] += 1
@@ -946,6 +961,7 @@ class PDFLoader:
                 "vault_path": str(self.vault_path),
                 "tags": [],
                 "wikilinks": [],
+                "provenance": "source",
                 **course_meta,
                 "heading": chapter or book_title,
                 "heading_level": 1,
@@ -968,6 +984,7 @@ class PDFLoader:
                 base_meta["has_figure"] = True
                 base_meta["figure_count"] = len(figs)
                 base_meta["figure_images"] = ";".join(figs)
+            stamp_generated(base_meta, self.provenance_rule)
 
             context = build_context_header(heading_stack, base_meta)
             sub_chunks = split_section(cleaned, self.max_chunk, self.overlap,
@@ -1162,6 +1179,7 @@ class PDFLoader:
 def main():
     import argparse
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from src.utils import lane_guard
     from src.utils.config_loader import load_config
 
     ap = argparse.ArgumentParser(description="Ingest vault PDFs into RAG chunks.")
@@ -1177,6 +1195,10 @@ def main():
     args = ap.parse_args()
 
     cfg = load_config(args.config)
+    lane_guard.exit_if_refused(
+        cfg, "pdf", None, scoped=bool(args.only_books or args.max_pages),
+        note="this entry point has no --output: run python main.py ingest-pdfs "
+             "with the same flags and --output data/<name>_chunks.jsonl")
     loader = PDFLoader.from_config(cfg)
     if args.vault:
         loader.vault_path = Path(args.vault)

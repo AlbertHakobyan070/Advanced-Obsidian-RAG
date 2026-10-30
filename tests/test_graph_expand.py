@@ -49,6 +49,7 @@ class FakeCollection:
 
 class FakeRetriever:
     rrf_k = 60
+    route_pointers = None       # as on HybridRetriever: no sidecar loaded
 
     def __init__(self, collection):
         self.collection = collection

@@ -450,6 +450,99 @@ def test_start_ps1_installs_the_skills(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# The personal build's provenance preflight
+# ---------------------------------------------------------------------------
+
+_PREFLIGHT_CALL = "& $Python -c $provenanceCheck $ProjectDir $LiveConfig"
+
+
+def _preflight_assignment() -> str:
+    """package.ps1's `$provenanceCheck = @' ... '@` statement, verbatim (its CRLF kept)."""
+    text = (PKG / "package.ps1").read_bytes().decode("utf-8")
+    m = re.search(r"^\$provenanceCheck = @'\r?\n.*?\r?\n'@", text, re.S | re.M)
+    assert m, "package.ps1 has no $provenanceCheck here-string"
+    return m.group(0)
+
+
+def test_the_personal_build_checks_provenance_before_it_copies_the_store():
+    """The bundle ships generated_mode drop, and its store is a copy of this PC's: an
+    unstamped store would ship a bundle that boots failed."""
+    text = (PKG / "package.ps1").read_text(encoding="utf-8")
+    call = text.index(_PREFLIGHT_CALL)
+    assert text.index("PERSONAL MAC BUILD") < call            # the public build ships no corpus
+    for step in ("Copy-Sidecar -To \"$here\\paddleocr\"", "make_personal_config.py\") $LiveConfig",
+                 "Copy-Item \"$DataDir\\*.jsonl\"", "Copy-Item $ChromaDir", "Copy-Item $Bm25File"):
+        assert call < text.index(step), f"the preflight must run before {step}"
+    assert re.match(r"\s*if \(\$LASTEXITCODE -ne 0\) \{\s*throw \(.*?stamp-provenance --dry-run, then --yes",
+                    text[call + len(_PREFLIGHT_CALL):], re.S)
+    assert '"' not in _preflight_assignment()                # PS 5.1 mangles one in a native argument
+
+
+def test_the_preflight_passes_a_stamped_store_and_refuses_an_unstamped_one(tmp_path):
+    pytest.importorskip("chromadb")                          # the preflight opens a Chroma store; CI's manifests job has none
+    from src.embeddings.embedder import write_sparse_meta
+    data = tmp_path / "data"
+    data.mkdir()
+    bm25 = tmp_path / "bm25_index.pkl"
+    write_sparse_meta(bm25, 1)
+    config = tmp_path / "config.yaml"
+    config.write_text(yaml.safe_dump({
+        "paths": {"chunks_file": str(data / "chunks.jsonl"), "chroma_dir": str(tmp_path / "chroma"),
+                  "bm25_index": str(bm25), "collection_name": "obsidian_vault"},
+        "provenance": {"generated_paths": ["Maps/"]}}), encoding="utf-8")
+    script = tmp_path / "preflight.ps1"                     # package.ps1's statement and call, as they stand
+    script.write_bytes("\r\n".join([f"$Python = '{sys.executable}'", f"$ProjectDir = '{ROOT}'",
+                                    f"$LiveConfig = '{config}'", _preflight_assignment(), _PREFLIGHT_CALL,
+                                    "exit $LASTEXITCODE", ""]).encode("ascii"))
+    # through Windows PowerShell where it exists, as package.ps1 runs it; else the Python alone
+    code = re.search(r"@'\r?\n(.*)\r?\n'@", _preflight_assignment(), re.S).group(1)
+    argv = (["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)]
+            if sys.platform == "win32" and shutil.which("powershell")
+            else [sys.executable, "-c", code, str(ROOT), str(config)])
+
+    def run(provenance):
+        (data / "chunks.jsonl").write_text(json.dumps({"doc_id": "g1", "text": "t", "metadata": {
+            "source_file": "Maps\\a.md", "file_type": "note", "provenance": provenance}}) + "\n", encoding="utf-8")
+        return subprocess.run(argv, capture_output=True, text=True, timeout=300,
+                              env={**os.environ, "PYTHONPATH": ""})
+
+    refused = run("authored")
+    assert refused.returncode == 1, refused.stdout + refused.stderr
+    assert "Maps\\a.md: 1 row(s)" in refused.stdout and "1 id(s)" in refused.stdout
+    passed = run("generated")
+    assert passed.returncode == 0, passed.stdout + passed.stderr
+    assert "0 id(s)" in passed.stdout
+
+
+@pytest.mark.skipif(sys.platform != "win32" or shutil.which("powershell") is None,
+                    reason="the packager is Windows PowerShell")
+@pytest.mark.parametrize("switch, sets", [("", True), ("-NoQuestionSets", False), ("-Public", False)])
+def test_the_route_sets_readme_ships_with_the_sets_and_only_with_them(tmp_path, switch, sets):
+    """eval/route_sets/README.md is a guide, not a result: the with-data archive ships it
+    beside the YAMLs, as it ships WRITING_QUESTIONS.md. The cold and public builds drop the
+    whole eval/route_sets directory, README included. Copy-AppTree over a stand-in tree."""
+    src, out = tmp_path / "src", tmp_path / "out"
+    for d in _ps_list("AppDirs"):
+        (src / d).mkdir(parents=True)
+    for rel in _ps_list("AppFiles") + _ps_list("PublicExtraFiles") + [
+            "eval/route_sets/README.md", "eval/route_sets/route-covered.yaml",
+            "eval/WRITING_QUESTIONS.md", "eval/old_results.md", "eval/old_results.json"]:
+        (src / rel).parent.mkdir(parents=True, exist_ok=True)
+        (src / rel).write_text("x", encoding="utf-8")
+    done = subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+         f". '{PKG / 'common.ps1'}'; Copy-AppTree -Source '{src}' -To '{out}' {switch}"],
+        capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0, done.stdout[-2000:] + done.stderr[-2000:]
+    assert (out / "eval" / "route_sets" / "README.md").is_file() == sets
+    assert (out / "eval" / "route_sets" / "route-covered.yaml").is_file() == sets
+    assert (out / "eval" / "route_sets").exists() == sets
+    # the other guide ships everywhere, and a historical result nowhere
+    assert (out / "eval" / "WRITING_QUESTIONS.md").is_file()
+    assert not (out / "eval" / "old_results.md").exists() and not (out / "eval" / "old_results.json").exists()
+
+
+# ---------------------------------------------------------------------------
 # The cold archive, built for real
 # ---------------------------------------------------------------------------
 
@@ -500,7 +593,7 @@ def test_the_cold_archive_builds_and_holds_what_it_should(tmp_path):
                                              if p.is_file() and p.suffix not in {".png", ".jpg", ".gz"}))
     # no question set either: the sets quote the vault, and only the with-data archive carries one
     assert (bundle / "app" / "eval" / "bench" / "cli.py").is_file()
-    for sets in ["sets", "smoke"]:
+    for sets in ["sets", "graph_sets", "route_sets", "smoke"]:
         assert not (bundle / "app" / "eval" / sets).exists(), f"app/eval/{sets} must not ship in the cold archive"
 
     # the skills: rag-ops is the project's file byte for byte; both are recorded in BUILD_INFO

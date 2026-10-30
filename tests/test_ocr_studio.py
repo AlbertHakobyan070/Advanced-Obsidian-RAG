@@ -490,6 +490,118 @@ def test_replace_removes_the_old_chunks_from_both_indexes_first(studio, monkeypa
     assert Path(r["output"]).name.startswith("ocrstudio_")
 
 
+def _indexed_doc(m, store, monkeypatch, **cfg_sections):
+    """Books/doc.pdf has a done page and is 'indexed'; the console's CFG has these sections."""
+    store.save("Books/doc.pdf", 1, {"status": "done", "regions": [
+        _region(text="Corrected text that is long enough to become a chunk here.")]})
+    monkeypatch.setattr(m, "_indexed_as", lambda rel: {
+        "Books\\doc.pdf": {"chunks": 4, "jsonls": ["pdf_chunks.jsonl"]}})
+    monkeypatch.setattr(m, "CFG", Config({"pdf": {"min_chunk_size": 20},
+                                          "paths": {"chunks_file": "data/chunks.jsonl"},
+                                          **cfg_sections}, Path(".")))
+    queued = []
+    monkeypatch.setattr(m, "enqueue", lambda *a, **k: queued.append(a))
+    return queued
+
+
+def test_replace_refuses_while_a_collection_is_building(studio, monkeypatch, tmp_path):
+    """A REAL store with a collection mid re-embed: nothing mocks the delete."""
+    pytest.importorskip("chromadb")
+    from chromadb.api.shared_system_client import SharedSystemClient
+    from src.embeddings.registry import EmbeddingSpec
+    from src.embeddings.sidecar import make_sidecar, write_sidecar
+    from src.utils.chroma_client import persistent_client
+    m, _, store = studio
+    chroma, active, eg2 = tmp_path / "chroma", "obsidian_vault", "obsidian_vault_eg2_l1024"
+    before = set(SharedSystemClient._identifier_to_system)    # a store holds C-runtime streams
+    try:
+        client = persistent_client(chroma)
+        cols = [client.get_or_create_collection(n, metadata={"hnsw:space": "cosine"})
+                for n in (active, eg2)]
+        for col in cols:
+            col.add(ids=["d1"], embeddings=[[1.0, 0.0, 0.0]], documents=["t"],
+                    metadatas=[{"source_file": "Books\\doc.pdf"}])
+        write_sidecar(chroma, eg2, make_sidecar(
+            EmbeddingSpec("local", "local", "fake/m"), collection=eg2, role="chunks",
+            status="building", dimension=3, count=1, written_by="rebuild-into"))
+        queued = _indexed_doc(m, store, monkeypatch,
+                              **{"paths": {"chunks_file": "data/chunks.jsonl",
+                                           "chroma_dir": str(chroma), "collection_name": active}})
+        monkeypatch.setattr(m, "COLLECTION", active)
+
+        r = m.ocrstudio_ingest(m.StudioIngestIn(path="Books/doc.pdf", mode="replace"))
+
+        assert r.status_code == 409
+        err = json.loads(r.body)["error"]
+        assert "building" in err and eg2 in err
+        assert queued == []                               # nothing was deleted, nothing queued
+        assert [col.count() for col in cols] == [1, 1]
+    finally:
+        for key in set(SharedSystemClient._identifier_to_system) - before:
+            SharedSystemClient._identifier_to_refcount.pop(key, None)
+            SharedSystemClient._identifier_to_system.pop(key).stop()
+
+
+def test_replace_says_so_when_a_chunk_file_cannot_be_rewritten(studio, monkeypatch):
+    """Chroma has already lost the rows by then: a 500 or a "nothing changed" would lie."""
+    m, _, store = studio
+    queued = _indexed_doc(m, store, monkeypatch)
+    monkeypatch.setattr(m, "_chroma_delete_by_source", lambda s: 4)
+
+    def locked(sources, names):
+        raise PermissionError(13, "Access is denied")
+    monkeypatch.setattr(m, "_jsonl_remove_sources", locked)
+
+    r = m.ocrstudio_ingest(m.StudioIngestIn(path="Books/doc.pdf", mode="replace"))
+
+    body = json.loads(r.body)
+    assert r.status_code == 409 and body["ok"] is False and body["chroma_deleted"] == 4
+    assert "ALREADY deleted" in body["error"] and "repeat" in body["error"]
+    assert queued == []
+
+
+def test_replace_says_a_failed_chroma_delete_may_have_reached_other_collections(studio, monkeypatch):
+    """REGRESSION (review T10): the delete takes the other collections before the active one,
+    so a failure there leaves rows already gone: "nothing changed" was false."""
+    m, _, store = studio
+    queued = _indexed_doc(m, store, monkeypatch)
+
+    def failed(sources):
+        raise RuntimeError("database is locked")
+    monkeypatch.setattr(m, "_chroma_delete_by_source", failed)
+
+    r = m.ocrstudio_ingest(m.StudioIngestIn(path="Books/doc.pdf", mode="replace"))
+
+    body = json.loads(r.body)
+    assert r.status_code == 500 and body["ok"] is False and "database is locked" in body["error"]
+    assert "nothing changed" not in body["error"] and "Repeat the same request" in body["error"]
+    assert queued == []
+
+
+def test_write_chunks_refuses_a_file_that_holds_another_documents_rows(tmp_path):
+    """Each document has its own file; write_chunks replaces the whole of it, so pointing
+    one document at another's file would silently drop that document's rows."""
+    from src.ingestion.obsidian_parser import Document
+    from src.ocr_studio.ingest import write_chunks
+    other = '{"doc_id": "a1", "text": "t", "metadata": {"source_file": "Books\\\\A.pdf"}}\n'
+    out = tmp_path / "ocrstudio_a_11111111_chunks.jsonl"
+    out.write_text(other, encoding="utf-8")
+    mine = [Document(text="new text", metadata={"source_file": "Books\\B.pdf"}, doc_id="b1")]
+
+    with pytest.raises(ValueError, match=r"A\.pdf"):
+        write_chunks(mine, out)
+    assert out.read_text(encoding="utf-8") == other          # untouched
+
+    out.write_text(other.replace("A.pdf", "B.pdf"), encoding="utf-8")
+    write_chunks(mine, out)                                  # the same document: replaced as always
+    assert json.loads(out.read_text(encoding="utf-8"))["doc_id"] == "b1"
+    out.write_text("", encoding="utf-8")
+    write_chunks(mine, out)                                  # an emptied file (a delete left it so)
+    out.unlink()
+    write_chunks(mine, out)                                  # no file yet
+    assert json.loads(out.read_text(encoding="utf-8"))["doc_id"] == "b1"
+
+
 def test_the_job_only_ever_writes_its_own_chunk_file(management_module):
     m = management_module
     argv = m._build_argv("ocrstudio_ingest", {"doc": "Books/a.pdf",

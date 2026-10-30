@@ -39,6 +39,8 @@
 # ---- vault-derived evaluation material (repo layout) -----------------------
 # Question sets, bench run records and seed packs quote the vault.
 eval/sets
+eval/graph_sets
+eval/route_sets
 eval/runs
 eval/seeds
 eval/*.json

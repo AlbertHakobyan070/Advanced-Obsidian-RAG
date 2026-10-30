@@ -40,6 +40,9 @@ theme:
     - content.code.copy
     - content.code.annotate
 
+exclude_docs: |
+  superpowers/
+
 nav:
   - Home: index.md
   - Getting started: getting-started.md
@@ -48,6 +51,7 @@ nav:
   - API reference: api.md
   - Agent integration: agents.md
   - MCP server: mcp.md
+  - Knowledge maps: knowledge-maps.md
   - Evaluation: evaluation.md
   - Laya fine-tune: laya-finetune.md
   - Operations: operations.md

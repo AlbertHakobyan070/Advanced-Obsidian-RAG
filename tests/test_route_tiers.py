@@ -45,3 +45,10 @@ def test_the_query_api_tiers_every_route_and_only_post_config_mutates(monkeypatc
     assert set(permissions.values()) <= TIERS
     assert {key for key, tier in permissions.items() if tier != "read"} == {"POST /config"}
     assert permissions["POST /config"] == "mutating"
+
+
+def test_both_outline_routes_are_tiered_read():
+    """route-then-cite §5.7: catalog.build_routes skips an untiered route, so the outline
+    would never reach an MCP agent without these."""
+    assert serve_api.ROUTE_PERMISSIONS["GET /outline"] == "read"
+    assert serve_api.ROUTE_PERMISSIONS["GET /outline/{source:path}"] == "read"

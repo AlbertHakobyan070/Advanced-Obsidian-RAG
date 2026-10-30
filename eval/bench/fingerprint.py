@@ -5,7 +5,8 @@ A run record that only says "nDCG 0.71" can be neither compared nor explained:
 was the working tree dirty, did the config change, was the index rebuilt in
 between? These helpers capture exactly the inputs that move a retrieval number
 — git state, the effective config, the index (collection count, BM25 sidecar,
-embedding and reranker models, chunk-file names/sizes/mtimes) — as small
+embedding and reranker models, chunk-file names/sizes/mtimes, the loaded route
+pointer sidecar) — as small
 values two runs can be diffed on. Nothing is guessed: when git or the index
 cannot be read these RAISE, because a run stamped with an invented sha is worse
 than no run at all.
@@ -67,7 +68,7 @@ def index_fingerprint(cfg, rag) -> dict:
     embedding = {"provider": spec.provider, "model": spec.model}
     if spec.max_seq_length is not None:
         embedding["max_seq_length"] = spec.max_seq_length
-    return {
+    out = {
         "dense_count": rag.retriever._get_collection().count(),
         "collection": cfg.get("paths.collection_name", "obsidian_vault"),
         "bm25": bm25,
@@ -75,3 +76,11 @@ def index_fingerprint(cfg, rag) -> dict:
         "reranker": cfg.get("retrieval.cross_encoder_model"),
         "chunk_files": chunk_files_digest(cfg.path("paths.chunks_file").parent),
     }
+    # A route arm measures the pointer sidecar too: name the loaded one (route_coverage's
+    # sidecar is its path; None, or no coverage at all, means none was loaded).
+    coverage = rag.route_coverage
+    if coverage is not None and coverage["sidecar"] is not None:
+        raw = Path(coverage["sidecar"]).read_bytes()
+        out["route"] = {**coverage, "built_at": json.loads(raw)["built_at"],
+                        "sha256": hashlib.sha256(raw).hexdigest()}
+    return out

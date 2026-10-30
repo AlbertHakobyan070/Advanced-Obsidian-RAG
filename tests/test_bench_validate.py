@@ -310,3 +310,36 @@ def test_a_missing_alternative_is_reported_as_an_alternative():
                                         "text": "bisection halves the interval each step"}]}
     found = [(f.code, f.message) for f in validate([q], gold_chunks)]
     assert ("gold-file-missing", "alternative file 'gone.md' is not in the corpus") in found
+
+
+def test_required_gold_that_only_generated_chunks_satisfy_is_an_error(tmp_path):
+    """A walk must not score by finding its own summaries: a generated source may only be
+    required: false context. Generated = the provenance key the canvas and md lanes write."""
+    gen = "Maps/RAG (generated).canvas"
+    _write(tmp_path / "g_chunks.jsonl", [
+        {"doc_id": "g1", "text": PDF_TEXT, "metadata": {"source_file": "Maps\\RAG (generated).canvas",
+                                                         "file_type": "canvas", "provenance": "generated"}},
+        {"doc_id": "p1", "text": PDF_TEXT, "metadata": {"source_file": BOOK, "page_start": 5, "page_end": 5}}])
+
+    def codes(gold):
+        q = _q(gold=gold)
+        files = {s.file for g in q.gold for s in g.sources()}
+        return [f.code for f in validate([q], load_gold_chunks(tmp_path, files))]
+
+    assert "gold-generated" in codes([{"file": gen}, {"file": "B/book.pdf", "pages": 5}])
+    assert "gold-generated" in codes([{"file": gen, "required": False}])     # none required = all are
+    assert "gold-generated" not in codes([{"file": gen, "required": False},
+                                          {"file": "B/book.pdf", "pages": 5}])
+    assert "gold-generated" not in codes([{"file": gen, "alternatives": [{"file": "B/book.pdf", "pages": 5}]}])
+
+
+def test_gold_generated_resolves_with_the_configured_by_file_type(tmp_path):
+    """provenance.by_file_type may call a file type generated; graph_search then labels its
+    chunks generated, so the check must too. With no map only a chunk's own key counts."""
+    _write(tmp_path / "d_chunks.jsonl", [{"doc_id": "d1", "text": PDF_TEXT, "metadata": {
+        "source_file": "Daily\\2026-10-01.md", "file_type": "daily_note"}}])
+    q = _q(gold=[{"file": "Daily/2026-10-01.md"}])
+    gold = load_gold_chunks(tmp_path, {"Daily/2026-10-01.md"})
+    assert "gold-generated" not in [f.code for f in validate([q], gold)]
+    by_file_type = {"pdf": "source", "daily_note": "generated"}
+    assert "gold-generated" in [f.code for f in validate([q], gold, by_file_type)]

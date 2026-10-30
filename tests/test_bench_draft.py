@@ -21,6 +21,8 @@ from eval.bench.draft import DraftError, SearchUnreachable, draft_suite, parse_r
 from eval.bench.questions import SUITES, load_sets, question_from_dict, save_suite
 from eval.bench.sample import write_pack
 from src.llm.llm_client import LLMResponse
+from src.utils.config_loader import Config
+from src.utils.provenance import provenance_rule
 
 PDF = "B\\book.pdf"
 NOTE = "N\\notes.md"
@@ -311,6 +313,19 @@ def test_a_seed_whose_file_is_not_in_the_corpus_is_never_written(tmp_path):
     d = draft_suite("paraphrase", llm, FakeSearch(), seeds_path=pack, sets_dir=tmp_path / "sets",
                     data_dir=corpus(tmp_path), n=5, max_score=-2.0, sleep=lambda s: None, log=lambda s: None)
     assert d.skipped == {"invalid:gold-file-missing": 1} and not (tmp_path / "sets").exists()
+
+
+def test_a_seed_under_a_generated_path_is_refused_only_with_the_rule(tmp_path):
+    # NOTE lies under N/, and the seed's chunk stores no provenance: only the path rule says generated
+    rule = provenance_rule(Config({"provenance": {"generated_paths": ["N/"]}}, tmp_path))
+    (tmp_path / "ruled").mkdir()
+    (tmp_path / "plain").mkdir()
+    run = drafted(tmp_path / "ruled", "paraphrase", [seed("n1")],
+                  FakeLLM(*[reply()] * (draft.RETRIES + 1)), rule=rule)
+    assert run.d.skipped["invalid:gold-generated"] == 1
+    assert not (run.sets / "paraphrase.yaml").exists()                  # no question is written
+    twin = drafted(tmp_path / "plain", "paraphrase", [seed("n1")], FakeLLM(reply()))
+    assert len(twin.out()) == 1 and not twin.d.skipped                  # without the rule it is accepted
 
 
 def test_a_malformed_reply_is_a_retry(tmp_path):

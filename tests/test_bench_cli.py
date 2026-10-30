@@ -59,6 +59,14 @@ def fake_bench(tmp_path, monkeypatch):
     return state
 
 
+@pytest.fixture
+def empty_config(tmp_path, monkeypatch):
+    """`bench validate` builds the provenance rule from config; give it an empty one,
+    not whatever config.yaml the checkout holds (a public clone holds none)."""
+    from src.utils.config_loader import Config
+    monkeypatch.setattr(cli, "load_config", lambda path=None: Config({}, tmp_path))
+
+
 def test_bench_is_wired_into_the_main_parser():
     a = _parse("bench", "run", "--sets", "s")
     assert a.func is cli.bench_cmd and a.bench_command == "run"
@@ -334,7 +342,7 @@ def test_sample_refuses_a_factor_that_is_not_positive_before_reading_anything(
     assert not out.exists()
 
 
-def test_validate_exits_one_when_a_question_cannot_be_scored(tmp_path, capsys):
+def test_validate_exits_one_when_a_question_cannot_be_scored(tmp_path, capsys, empty_config):
     sets = _sets(tmp_path, _q(1))                              # gold is a.md ...
     data = _corpus(tmp_path, _chunk("o1", "other.md"))         # ... which the corpus does not hold
     with pytest.raises(SystemExit) as e:
@@ -344,11 +352,22 @@ def test_validate_exits_one_when_a_question_cannot_be_scored(tmp_path, capsys):
     assert "gold-file-missing" in said and "[error] lex-0001" in said and "1 error(s)" in said
 
 
-def test_validate_exits_zero_when_the_set_agrees_with_the_corpus(tmp_path, capsys):
+def test_validate_exits_zero_when_the_set_agrees_with_the_corpus(tmp_path, capsys, empty_config):
     sets = _sets(tmp_path, _q(1))
     data = _corpus(tmp_path, _chunk("g1", "a.md"))
     _run("bench", "validate", "--sets", str(sets), "--data-dir", str(data))    # returns, no SystemExit
     assert "0 error(s)" in capsys.readouterr().out
+
+
+def test_validate_resolves_provenance_with_the_configs_by_file_type(tmp_path, capsys, monkeypatch):
+    from src.utils.config_loader import Config
+    cfg = Config({"provenance": {"by_file_type": {"Note": "generated"}}}, tmp_path)
+    monkeypatch.setattr(cli, "load_config", lambda path=None: cfg)
+    sets = _sets(tmp_path, _q(1))
+    data = _corpus(tmp_path, _chunk("g1", "a.md"))             # file_type note, no provenance key
+    with pytest.raises(SystemExit) as e:
+        _run("bench", "validate", "--sets", str(sets), "--data-dir", str(data))
+    assert e.value.code == 1 and "gold-generated" in capsys.readouterr().out
 
 
 def test_validate_writes_the_review_cache_where_the_console_reads_it(
@@ -364,7 +383,7 @@ def test_validate_writes_the_review_cache_where_the_console_reads_it(
     assert management_module._eval_cache() == written
 
 
-def test_validate_without_write_cache_leaves_no_cache(tmp_path):
+def test_validate_without_write_cache_leaves_no_cache(tmp_path, empty_config):
     sets = _sets(tmp_path, _q(1))
     _run("bench", "validate", "--sets", str(sets), "--data-dir", str(_corpus(tmp_path, _chunk("g1", "a.md"))))
     assert not (sets / ".review_cache.json").exists()

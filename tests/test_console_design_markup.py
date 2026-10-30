@@ -133,3 +133,90 @@ def test_export_and_the_first_row_edit_start_from_the_same_seed():
     assert "if(!Object.keys(themeVarsParse(ta.value)).length)ta.value=thmSeed(ta.value);" in rows
     seed = HTML[HTML.index("function thmSeed(text){"):][:320]
     assert '$("#thm-mode").value=cur.mode' in seed and "themeVarsSeed(text," in seed
+
+
+def _fn(name):
+    i = HTML.index(f"function {name}(")
+    return HTML[i:HTML.index("\nfunction ", i + 1)]
+
+
+def test_generated_graph_nodes_render_unticked_and_disabled_with_a_note():
+    body = _fn("renderGraphTree")
+    assert 'n.provenance==="generated"' in body
+    assert "disabled" in body and "a map, not evidence" in body
+
+
+def test_disabled_nodes_are_never_selected_even_after_select_all():
+    assert ":checked:not(:disabled)" in _fn("graphSelectedIds")
+    i = HTML.index('$("#qg-all").onclick')
+    assert "disabled" in HTML[i:HTML.index("\n", i)]
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_only_the_generated_node_renders_disabled_and_unticked():
+    # /graph/expand still returns generated nodes (a map); /answer 400s on their ids
+    esc = re.search(r"^const esc=.*$", HTML, re.M).group(0)
+    scenario = esc + "\n" + _fn("renderGraphTree") + textwrap.dedent("""
+        const data = {seed_ids: ["a"], nodes: [
+            {id: "a", depth: 0, provenance: "authored", text: "seed"},
+            {id: "g", depth: 1, provenance: "generated", text: "map"},
+            {id: "g2", depth: 1, provenance: "generated", text: "routed map", routed_ids: ["p1", "p2"]},
+            {id: "g3", depth: 1, provenance: "generated", text: "unrouted map", routed_ids: []},
+            {id: "s", depth: 1, text: "no provenance field"}],
+          tree: [{parent: "a", child: "g", direction: "->"}, {parent: "a", child: "s", direction: "->"},
+                 {parent: "a", child: "g2", direction: "->"}, {parent: "a", child: "g3", direction: "->"}]};
+        console.log(JSON.stringify(renderGraphTree(data)));
+    """)
+    r = subprocess.run([NODE, "-e", scenario], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    tags = re.findall(r"<input\b[^>]*>", json.loads(r.stdout))
+    box = {re.search(r'data-id="([^"]*)"', t).group(1): t for t in tags}
+    assert sorted(box) == ["a", "g", "g2", "g3", "s"]
+    s1_title = 'title="Generated: a map, not evidence. Its Source pages are what get cited"'
+    for k in ("g", "g3"):                                 # no sidecar, or no targets: as in S1
+        assert re.search(r"\sdisabled\b", box[k]) and not re.search(r"\schecked\b", box[k])
+        assert s1_title in box[k] and "data-routed" not in box[k]
+    # a map with routed pages can be ticked, as those pages; it starts unticked (opt-in)
+    assert 'data-routed="p1,p2"' in box["g2"]
+    assert "disabled" not in box["g2"] and not re.search(r"\schecked\b", box["g2"])
+    assert ('title="Generated: a map, not evidence. Ticking adds the first chunks of each span this '
+            'map cites"') in box["g2"]
+    for k in ("a", "s"):                                  # every other node is exactly as before
+        assert re.search(r"\schecked\b", box[k]) and "disabled" not in box[k]
+        assert 'title="Include this node in the answer"' in box[k] and "data-routed" not in box[k]
+
+
+def test_only_the_answer_call_sends_a_ticked_map_as_its_routed_pages():
+    # The count and "Copy raw nodes" stay per node (graphSelectedIds); /answer gets the pages.
+    i = HTML.index("async function runGraphAnswer(")
+    answer = HTML[i:HTML.index("\n}\n", i)]
+    assert "dataset.routed" in answer and 'split(",")' in answer
+    assert "dataset.routed" not in _fn("graphSelectedIds")
+    assert "routed_ids.length" in _fn("renderGraphTree")
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_answer_gets_a_ticked_maps_pages_deduped_and_never_its_id():
+    i = HTML.index("async function runGraphAnswer(")
+    scenario = _fn("graphSelectedIds") + textwrap.dedent("""
+        const state = {queryBusy: false, lastQ: null};
+        const els = {"#q-text": {value: "why?"}, "#q-maxtok": {value: ""}};
+        const $ = s => els[s] || {};
+        const box = (id, checked, disabled, routed) =>
+            ({checked, disabled, dataset: routed ? {id, routed} : {id}});
+        const boxes = [box("n1", true, false), box("g2", true, false, "p1,p2"), box("p1", true, false),
+                       box("g4", false, false, "p9"),      // a routed map left unticked (opt-in)
+                       box("n7", false, false),            // a node the user unticked
+                       box("g", true, true)];              // disabled, ticked anyway: the filter keeps it out
+        // querySelectorAll's answer for the two state filters the console uses
+        const $$ = s => boxes.filter(b => (!s.includes(":checked") || b.checked)
+                                          && (!s.includes(":not(:disabled)") || !b.disabled));
+        let body = null;
+        const ragCall = async (path, opts) => { body = JSON.parse(opts.body); return {}; };
+        const toast = m => { throw new Error(m); };
+        const esc = String, groundableIds = () => ({ok: []});
+        const setGraphBusy = () => {}, renderGraphFork = () => {}, renderAnswerBody = () => {};
+    """) + HTML[i:HTML.index("\n}\n", i) + 2] + '\nrunGraphAnswer(false).then(() => console.log(JSON.stringify(body.docs)));'
+    r = subprocess.run([NODE, "-e", scenario], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout) == ["n1", "p1", "p2"]

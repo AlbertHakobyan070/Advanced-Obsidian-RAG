@@ -44,6 +44,7 @@ from src.embeddings.registry import EmbeddingSpec, resolve_embedding_spec
 from src.embeddings.sidecar import (
     check_collection, delete_sidecar, ids_digest, iter_ids, make_sidecar, sidecar_path,
     stored_dimension, unstamped_warning, write_sidecar)
+from src.index_ops import ReplaceRequired, append_conflicts
 from src.utils.chroma_client import persistent_client
 from src.utils.config_loader import Config
 from src.utils.logger import get_logger
@@ -465,6 +466,10 @@ class Embedder:
 
         A collection fingerprinted by another embedder (or left unfinished by
         a re-embed) refuses the append: its vectors and these would be mixed.
+        So does a file whose source already has indexed rows that this file
+        lacks (an edited or relabelled file mints new doc_ids): index_ops
+        .ReplaceRequired, raised before anything is embedded or written. A file
+        renamed or moved in the vault is a different source and passes: relocate it.
         """
         extra_file = Path(extra_file)
         if not extra_file.exists():
@@ -508,6 +513,26 @@ class Embedder:
                      duplicates, extra_file.name)
 
         state = self._prepare_dense_write()
+        if state != "new":                      # "new" means nothing is stored, so nothing can conflict
+            conflicts = append_conflicts(
+                persistent_client(self.chroma_dir).get_collection(self.collection_name), new_chunks)
+            if conflicts:
+                shown = conflicts[:10] + ([f"... and {len(conflicts) - 10} more"] if len(conflicts) > 10 else [])
+                raise ReplaceRequired(
+                    "index --append refused: appending would keep rows that a REPLACE removes "
+                    "beside the new ones (duplicates or stale text).\n" + "\n".join(shown) + "\n"
+                    f"If {extra_file.name} is an EDITED version of those sources, make it a REPLACE: "
+                    f"delete each source above everywhere EXCEPT this file, POST /api/documents/"
+                    f"delete with those \"source_files\", "
+                    f"\"keep_jsonls\": [{json.dumps(extra_file.name, ensure_ascii=False)}] and "
+                    f"\"rebuild\": false (without keep_jsonls the delete empties this file too), "
+                    f"then run this append again: its chunks are still in {extra_file.name}. If it "
+                    f"is a DIFFERENT document that only shares the stored path, do not delete: that "
+                    f"drops the indexed one for good (an inbox original sits in Inbox/_ingested/, "
+                    f"which no lane rediscovers); rename the new file or give it another folder, "
+                    f"then ingest it again. Nothing was embedded or indexed. A file renamed or "
+                    f"moved in the vault is not caught here (its old rows sit under another "
+                    f"source): move it with main.py relocate.")
         self._append_dense(new_chunks)
         if state == "new":
             self._record_built_collection("append")

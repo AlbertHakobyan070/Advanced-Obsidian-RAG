@@ -105,6 +105,26 @@ def test_the_sparse_lane_returns_pickle_rows_and_filters_a_lane(tmp_path, built)
     assert len(r._sparse_search("arima differencing removes", 1)) == 1
 
 
+def test_a_generated_drop_filters_only_the_pool_its_documented_ceiling(tmp_path, built):
+    """A drop widens the pool as a predicate does, then filters it: rows past
+    tantivy_filter_pool are never reached (spec §5.3), so a drop that empties
+    the pool returns [] rather than later rows."""
+    from src.utils.provenance import ProvenanceRule
+    pkl, p = built
+    q = "arima differencing"                               # rows 0, 2 and 3 match
+    order = [r for r, s in sparse_tantivy.TantivySparse(pkl, p["ids"]).search(_tokenize(q), 4) if s > 0]
+    assert len(order) == 3
+    p = dict(p, metadatas=[{"provenance": "generated"} if i in order[:2] else dict(m)
+                           for i, m in enumerate(p["metadatas"])])
+    r = _retriever(tmp_path, pkl, tantivy_filter_pool=2, provenance_rule=ProvenanceRule())
+    r._bm25_payload = p
+    assert len(r._sparse_search(q, 2)) == 2                # off: the generated rows rank
+    assert r._sparse_search(q, 2, drop_generated=True) == []
+    wide = _retriever(tmp_path, pkl, provenance_rule=ProvenanceRule())
+    wide._bm25_payload = p
+    assert [h[0] for h in wide._sparse_search(q, 2, drop_generated=True)] == [p["ids"][order[2]]]
+
+
 def test_the_retriever_build_fails_without_an_index(tmp_path):
     from src.utils.config_loader import Config
     cfg = Config({"paths": {"chroma_dir": str(tmp_path), "bm25_index": str(tmp_path / "b.pkl")},

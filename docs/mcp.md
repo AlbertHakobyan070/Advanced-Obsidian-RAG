@@ -39,7 +39,10 @@ own request model, so arguments are validated before any HTTP call.
 | Tool | Calls | Tier |
 |---|---|---|
 | `noetrix_health` | `/health` on `:8051` and `/api/schema` on the console (it has no `/health`), plus which tools loaded and why any did not | read |
+| `noetrix_outline` | `GET /outline`: what the vault holds, for an agent that does not know it. The primary sources by domain and course, with chunk and page counts, paged; the generated maps listed apart, as they are not evidence. One file's chapters come from `GET /outline/{source}` through `noetrix_read`. See [Outline](agents.md#start-from-the-outline-when-you-do-not-know-the-vault) | read |
 | `noetrix_search` | `POST /search`, the primary agent call, with every per-call engine knob | read, open-world |
+| `noetrix_evidence_pack` | `POST /evidence_pack`: 2-4 sub-questions in; evidence with provenance, coverage and gaps out; `graph: true` adds a graph walk. It uses the `timeouts_s.query` timeout. See [Evidence pack](api.md#evidence-pack) | read, open-world |
+| `noetrix_graph_expand` | `POST /graph/expand`: walk the canvas graphs from a query or chunk ids, with no LLM; the walk switches widen and type it. Experimental: a `503` names the switch. See [Graph mode](api.md#graph-mode) | read |
 | `noetrix_query` | `POST /query`: a cited answer; per-call provider and model | read, open-world |
 | `noetrix_compare` | `POST /compare`: one question down a tree of engine branches | read, open-world |
 | `noetrix_compare_options` | `GET /compare/options`: ready-to-post branches, the real caps, unavailable backends | read |
@@ -53,7 +56,16 @@ own request model, so arguments are validated before any HTTP call.
 | `noetrix_set_engine` | `POST /api/engines/set`: a checked, persistent engine switch | mutating |
 
 "Open-world" means the call may reach the generation provider: HyDE and
-decomposition on `/search`, the answer on `/query` and on query-mode `/compare`.
+decomposition on `/search` and on each `/evidence_pack` search, the answer on
+`/query` and on query-mode `/compare`.
+
+The three evidence tools (`noetrix_search`, `noetrix_evidence_pack` and
+`noetrix_query`) tell the agent how to read `provenance` against the mode
+`noetrix_health` reports. They also say that `found_via` names the map that
+found a source, and that the agent cites the source, not the map. See
+[Route mode](api.md#route-mode). `noetrix_health` passes `/health` through, so
+its `route` key, present on any server new enough to route, shows whether a
+sidecar is loaded.
 
 Everything else goes through three **dispatchers**, one per tier:
 `noetrix_read`, `noetrix_change` and `noetrix_remove`. Each takes `op`, a route
@@ -107,7 +119,9 @@ server never loops on its own.
 
 A failure is always a tool result with `isError: true` and a message, never an
 empty result: a rejected knob, a `confidence: "ERROR"` answer (its sources are
-kept), a `422` with FastAPI's field list, a service that is loading or failed,
+kept), a `422` with FastAPI's field list, a `409` for a per-call
+`generated_mode: "route"` the server cannot serve yet (its message names the
+route sidecar build), a service that is loading or failed,
 a guard refusal naming its setting, a timeout naming the service and port. A
 LOW-confidence answer from the relevance gate is not an error: it is the answer.
 Nothing is retried on another engine or route.

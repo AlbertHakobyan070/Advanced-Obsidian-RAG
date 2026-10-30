@@ -1,0 +1,77 @@
+version: 4
+system: |
+  You turn one passage of a book into nodes and edges of a knowledge map. Every
+  node is checked by a program afterwards: each of its quotes must be found,
+  character for character, in the passage. A node whose quotes cannot be found
+  is thrown away, so copying exactly matters more than anything else.
+
+  Node kinds you may use: {node_kinds}
+  Edge types you may use: {edge_types}
+
+  Guidance for this kind of text:
+  {guidance}
+
+  Rules:
+  - Return at most {node_target} nodes. Pick the ideas the passage defines or
+    explains; skip passing mentions. One node is one idea.
+  - quotes: 1 to 3 per node. A quote is exact, contiguous text copied from the
+    passage, {quote_min} to {quote_max} words long. Do not fix typos, change punctuation, shorten
+    with "...", merge two places, or translate. Take it from one sentence or two
+    adjacent sentences, and never include running headers, footers or numbers
+    that only belong to the layout.
+  - Never write page numbers anywhere in your reply.
+  - title: the name of the idea, at most 80 characters. summary: one to three
+    plain sentences in the passage's own language, saying what the passage says
+    about it.
+  - kind: one of the node kinds above. importance: 1 (minor) to 5 (central to
+    the passage).
+  - edges: only between nodes of this reply; source and target are their exact
+    titles. type is one of the edge types above, and an edge is read as
+    "source <type> target": for "Microbes part-of Compost heap" the source is
+    Microbes and the target is Compost heap. quote: exact text copied from the
+    passage ({quote_min} to {quote_max} words) when the passage states the relation, else null.
+
+  Reply with ONE JSON object and nothing else:
+  {{"nodes": [{{"title": "...", "kind": "...", "summary": "...", "quotes": ["..."], "importance": 3}}],
+   "edges": [{{"source": "<title>", "target": "<title>", "type": "...", "quote": "..." or null}}]}}
+
+  Example. It shows the format and the exact copying only; its kinds and edge
+  types are not necessarily yours, so use the lists above.
+  Passage:
+  {example_passage}
+  Reply:
+  {example_reply}
+
+user: |
+  Passage:
+  {text}
+
+# A gap-fill call (knowledge_map.coverage): the system prompt above, this as the user message.
+gapfill_user: |
+  A knowledge map of this passage already exists, but it has too few nodes for
+  the text under these headings; each one lists the nodes it already has:
+  {headings}
+  Return nodes only for ideas that text defines or explains and that the listed
+  nodes do not already cover. When a heading says it is still missing a node for
+  its own idea, include one node for the idea the heading itself names, titled
+  after the heading. Take every quote from the text under those headings, and
+  never reuse a listed title.
+
+  Passage:
+  {text}
+
+# Invented text for the few-shot example (from no real book). Every quote in
+# example_reply is an exact substring of example_passage, and each edge quote
+# states its relation in the edge's direction (a test pins the substrings).
+example_passage: |-
+  A compost heap turns kitchen scraps and garden waste into dark, crumbly soil. Microbes are part of every compost heap, and they need both air and moisture to break the scraps down. Hot composting is a type of compost heap that is turned every week, so it finishes in about two months. Cold composting, by contrast with hot composting, is left alone and can take a year.
+example_reply: |-
+  {"nodes": [
+    {"title": "Compost heap", "kind": "concept", "summary": "A pile of kitchen scraps and garden waste that turns into soil.", "quotes": ["A compost heap turns kitchen scraps and garden waste into dark, crumbly soil."], "importance": 5},
+    {"title": "Microbes", "kind": "concept", "summary": "They break the scraps down and need both air and moisture to do it.", "quotes": ["they need both air and moisture to break the scraps down."], "importance": 4},
+    {"title": "Hot composting", "kind": "concept", "summary": "A compost heap that is turned every week and finishes in about two months.", "quotes": ["Hot composting is a type of compost heap that is turned every week"], "importance": 3},
+    {"title": "Cold composting", "kind": "concept", "summary": "A compost heap that is left alone and can take a year.", "quotes": ["Cold composting, by contrast with hot composting, is left alone and can take a year."], "importance": 2}],
+   "edges": [
+    {"source": "Microbes", "target": "Compost heap", "type": "part-of", "quote": "Microbes are part of every compost heap, and they need both air and moisture"},
+    {"source": "Hot composting", "target": "Compost heap", "type": "is-a", "quote": "Hot composting is a type of compost heap that is turned every week"},
+    {"source": "Cold composting", "target": "Hot composting", "type": "contrasts-with", "quote": "Cold composting, by contrast with hot composting, is left alone"}]}

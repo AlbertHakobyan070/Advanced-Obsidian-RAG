@@ -23,6 +23,9 @@ python main.py ingest-md --include-path "<scope>" --output data/<name>_chunks.js
 python main.py ingest-canvas [--include-path "<scope>" --output data/<name>_chunks.jsonl] [--context-depth 0|1|2] [--max-chunk-size N] [--force-tags "a,b"]  # Obsidian .canvas files; a scoped run needs its own output
 python main.py ocr-studio-ingest --doc "<vault-relative PDF or image>" --output data/ocrstudio_<name>_chunks.jsonl [--pages done|all]  # one document's OCR Studio pages
 python main.py graph-embed [--limit N]     # rebuild graph mode's own seed index from scratch (needs graph.embedding_provider)
+python main.py stamp-provenance --dry-run|--yes  # metadata-only: mark stored rows the provenance rule calls generated (--yes: servers down; :8051 refuses to start under drop/route until it has run once)
+python main.py route-pointers [--out PATH] # build route mode's pointer sidecar (each generated chunk -> the primary pages it cites); restart :8051 afterwards
+python main.py relocate --map rename_map.jsonl [--dry-run|--verify]  # metadata-only move of indexed files to new vault paths, no re-embed (servers down, then rebuild_bm25.py)
 python main.py fetch-web --urls "https://…" [--backend auto|requests|crawl4ai|scrapling|crawlee] [--format md|pdf]
 python main.py convert-files --files "report.docx" [--ocr-pages "1-4,9"]       # markitdown → .md
 python main.py query "<question>" [--preset code|concept|synthesis] [--top-k N] [--max-tokens N]
@@ -218,6 +221,8 @@ retrieval:
 | `scope_lanes` / `max_per_file` / `decompose` | `scope_lanes` forces the scope lanes on or off; `max_per_file` caps how many chunks of one source file reach the final list; `decompose` splits a multi-part question into separate searches with one LLM call. See [Ask and search](api.md#ask-and-search). |
 | `gate` / `gate_threshold` / `gate_scorer` | The optional post-rerank relevance gate: chunks scoring below the threshold are dropped, and when none pass `/query` abstains with the fixed "nothing relevant" answer and no LLM call. Off by default. See [Relevance gate](api.md#relevance-gate). |
 | `parent_context` / `neighbor_context` | E2 small-to-big, post-rerank: swap note chunks for their full section / append a PDF hit's adjacent pages. Carried by the `synthesis` preset; per-call override beats preset beats config. |
+| `generated_mode` | `drop` keeps generated chunks (maps, summaries an LLM wrote) out of this call's evidence; `route` does too and lets them find the primary pages they cite, each such source carrying `found_via`. `off` is config only (`retrieval.generated_mode`). Unset follows the configured mode. See [Route mode](api.md#route-mode). |
+| `source_file` / `pages` | Restrict every lane to one file's primary chunks, and with `pages: [first, last]` to a page range of it. `GET /outline` lists the files. Need `retrieval.sparse_backend: bm25s`; the echo's `file_filter` says whether anything matched. |
 | `max_tokens` | Cap the answer length. |
 | `provider` / `model` | `/query` and query-mode `/compare` only: select a configured provider and optionally override its default model. Endpoints and secrets cannot be supplied per request. |
 
@@ -410,7 +415,10 @@ persistent install settings, or provider secrets** → `:8052`.
 
 The complete endpoint listing for both services is the
 [API reference](api.md); the patterns for driving them efficiently from an LLM
-agent are in [Agent integration](agents.md).
+agent are in [Agent integration](agents.md). An agent that does not know the vault
+can start from `GET /outline` (what is indexed, by domain and course, with chunk
+and page counts) before it searches, and the `noetrix-navigator` skill
+(`SKILL_NAVIGATOR.md`) turns a multi-hop question into the right calls.
 
 Agents that speak MCP can use the [MCP server](mcp.md) instead of raw HTTP. On
 Windows, `rag mcp` starts it over stdio for a client on the same machine (it

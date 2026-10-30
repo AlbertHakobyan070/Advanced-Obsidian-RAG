@@ -361,8 +361,12 @@ class LLMClient:
         temperature: float | None = None,
         max_tokens: int | None = None,
         images: list[tuple[bytes, str]] | None = None,
+        json_mode: bool = False,
     ) -> LLMResponse:
         """Single-turn system+user completion. Synchronous.
+
+        `json_mode` asks an OpenAI-compatible endpoint for a JSON object
+        (response_format); the Anthropic branch ignores it.
 
         `images` = [(bytes, mime), ...] go with the user message, and only to a
         client marked vision: true: some OpenAI-compatible endpoints drop image
@@ -381,7 +385,8 @@ class LLMClient:
 
         if self.provider == "anthropic":
             return self._complete_anthropic(system, user, temp, maxtok, images=images)
-        return self._complete_openai_compatible(system, user, temp, maxtok, images=images)
+        return self._complete_openai_compatible(system, user, temp, maxtok, images=images,
+                                                json_mode=json_mode)
 
     def _complete_anthropic(self, system, user, temp, maxtok, images=None) -> LLMResponse:
         content: Any = user
@@ -409,7 +414,7 @@ class LLMClient:
         return LLMResponse(text=text, model=self.model, provider=self.provider, usage=usage)
 
     def _complete_openai_compatible(self, system, user, temp, maxtok,
-                                    images=None) -> LLMResponse:
+                                    images=None, json_mode=False) -> LLMResponse:
         content: Any = user
         if images:
             # Same part shape as ocr_vlm.py's page OCR.
@@ -417,6 +422,7 @@ class LLMClient:
                 {"type": "image_url", "image_url": {
                     "url": f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"}}
                 for data, mime in images]
+        extra = {"response_format": {"type": "json_object"}} if json_mode else {}
         resp = self._client.chat.completions.create(
             model=self.model,
             temperature=temp,
@@ -425,6 +431,7 @@ class LLMClient:
                 {"role": "system", "content": system},
                 {"role": "user", "content": content},
             ],
+            **extra,
         )
         text = resp.choices[0].message.content or ""
         usage = None

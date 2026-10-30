@@ -75,6 +75,7 @@ One YAML record per question, in `eval/sets/<suite>.yaml` (the directory is
       pages: [212, 213]             # optional: inclusive PDF page range
       heading: "Ch 4 > Bisection"   # optional: heading-path prefix
       required: true      # multihop: every required source must be found
+      hop: 1              # optional: which step of a chain this source answers (1, 2, …)
   nuggets: ["…"]          # atomic facts a complete answer contains
   expect_course: null
   provenance:
@@ -82,6 +83,7 @@ One YAML record per question, in `eval/sets/<suite>.yaml` (the directory is
     status: draft         # draft | verified | edited | rejected
     reviewed_at: null     # drafts also carry drafted_by and seed_chunks
   notes: ""
+  strategy: fact          # optional: fact | explain | prerequisites | compare | synthesis | procedure | history
 ```
 
 These decisions are worth knowing:
@@ -100,6 +102,13 @@ These decisions are worth knowing:
   `personal` questions) measure finding the right file, not the right cell or node.
   Read them beside the document-level numbers; finer locators (cell ranges, canvas
   node ids) are future work.
+- **`hop` and `strategy` are optional, and written back only when set**, so a set
+  that does not use them comes out of a rewrite unchanged. `strategy` (the list
+  is `STRATEGIES` in `eval/bench/questions.py`) names what the question asks the
+  system to do, and the report then breaks results down by it. `hop` on a
+  required gold entry gives the step of a chain that the entry answers, and the
+  report then shows recall@10 per hop. An alternative shares its entry's hop.
+  Both exist for [graph question sets](#graph-question-sets).
 - **The split is stored, not computed.** It is assigned once and written into the
   YAML, so adding questions never reshuffles existing ones.
 - **One writer at a time.** The drafter, the console's review save and `bench split`
@@ -178,6 +187,8 @@ configurations:
 | `hyde` | `H-off` (the R5 pipeline) and `H-on` (R5 plus HyDE), paired. |
 | `diversity` | **Per-file cap.** The shipped retrieval pipeline with HyDE switched off so no LLM is in the loop (R5, scope lanes and metadata boost off) uncapped (`D-off`), then with `max_per_file` 2 (`D-cap2`) and 3 (`D-cap3`), each paired against `D-off`. The cap targets recall@10 and complete@10; nDCG@10 and hit@1 are its guards. |
 | `decompose` | **Query decomposition** over `D-off`'s pipeline: `Q-off`, `Q-on`, and `Q-on-cap2` (decomposition plus the per-file cap at 2), each paired against `Q-off`. It needs an LLM: run it with `--llm replay:<store>` so every sub-query comes from one fixed model (see "Replay stores" below). |
+| `graph` | **Graph walks** over `D-off`'s pipeline, with the same final `top_k`: `G-off` (the search alone), `G-legacy` (plus the walk as it was before the walk switches existed: drawn canvas edges only) and `G-e1e4` (plus bridges, cross-canvas hops and wikilinks, in both directions and with no type filter). All three go through `RAGPipeline.graph_search`, the function behind `POST /evidence_pack`: the search, then (except `G-off`) a walk, then one rerank of the search hits and the walked chunks down to the same `top_k`, so a walk never wins by having more slots. `G-legacy` is paired against `G-off`, and `G-e1e4` against `G-legacy`. The walk's own query seeding (canvas hits the search lacked) also enters that rerank, so the `G-legacy` vs `G-off` delta includes it; the "Graph contribution" table keeps those chunks apart as `seeded` and never credits them to the walk. All three arms switch the relevance gate and `decompose` off and walk in both directions, and a `graph.edge_types` set in `config.yaml` refuses the run (a per-call walk cannot ask for every edge back). `graph.enabled` is not consulted, so graph mode is measured before it is switched on. See [Graph question sets](#graph-question-sets). |
+| `generated` | **Generated chunks as evidence** (`retrieval.generated_mode`), over `G-off`'s pipeline, in three arms: `GM-off` (`generated_mode: off`: generated chunks compete as evidence), `GM-drop` (`generated_mode: drop`: kept out of every lane) and `GM-route` (`generated_mode: route`: kept out too, and generated hits bring in the primary pages they cite, see [Route mode](api.md#route-mode)). `GM-off` and `GM-drop` are `G-off` plus the knob. `GM-route` is `G-off` plus the knob plus the `routed` lane: `G-off` names its lanes and a lane outside that list never runs, so without it route would equal drop. All three go through `RAGPipeline.graph_search`, so the run reports each final list's generated share. `GM-drop` is paired against `GM-off`. `GM-route` is paired against `GM-drop` (`paired`) and against `GM-off` as well (`paired_also` in `summary.json`, a second row in the paired table). An arm whose rows carry the retrieval echo's `route` also gets a per-arm `route` block: the mean per question, over the rows without an error, of `router_hits`, `routed`, `unrouted`, `targets`, `targets_missing` and `new`. When every scored question has an `rtc` or `rtu` id prefix and both prefixes occur, each configuration also gets `by_prefix`: per stratum, the metrics over all of its questions (`ALL`) and per suite. The bench sets the mode per call in-process; over HTTP a per-call `off` is refused. With generated rows in the store, `GM-route`'s warm-up fails the whole run unless the route sidecar exists (`python main.py route-pointers`). |
 | `name[,name…]` | Hand-written configurations from `eval/configs.yaml`. |
 
 The generated sets are built from the same binary factors (`FACTORS` in
@@ -212,6 +223,12 @@ How a run behaves:
   generation backend, and later runs replay it. The row records `hyde_cache`.
 - One discarded warm-up search per distinct rerank mode runs before anything is
   timed, because the first embed and the first rerank in a process pay one-off costs.
+  When a configuration walks the graph, one discarded walk with every switch on
+  also runs first, so the canvas index is built outside the timed rows. A
+  configuration with `generated_mode: route` also runs one discarded route-mode
+  search with its lanes. With generated rows in the store, that warm-up fails the
+  whole run, before any row, unless the route sidecar exists: build it with
+  `python main.py route-pointers`.
 - `--split dev` is the default. `test` and `all` are sealed, see below.
 - `--limit N` keeps the first N questions of the split, for smoke runs;
   `eval/smoke/` holds a few hand-checked questions for exercising the runner
@@ -222,6 +239,65 @@ How a run behaves:
   `ERROR: …` and exits 2. A component that is switched off is never quietly
   swapped: a run that asks for `laya-rerank` while Laya is disabled fails with the
   refusal text instead of scoring another reranker.
+
+### Graph question sets
+
+Questions for the graph walks live in `eval/graph_sets/*.yaml`, a directory of
+their own, so the main sets, the review queue and `bench split` over
+`eval/sets` never mix them in. Pass the directory to every command that reads
+them:
+
+```bash
+python main.py bench validate --sets eval/graph_sets
+python main.py bench split --sets eval/graph_sets
+python main.py bench run --sets eval/graph_sets --configs graph --split dev
+```
+
+A record is the schema above plus `hop` and `strategy`:
+
+```yaml
+- id: gph-0001                       # lowercase letters, '-', four digits; unique in the directory
+  question: <a question that needs two sources joined by a graph edge>
+  suite: multihop                    # multi-hop items; single-hop controls use books|canvas; unanswerable uses unanswerable
+  tier: T3
+  split: null                        # `main.py bench split --sets eval/graph_sets` fills it once
+  answerable: true
+  strategy: synthesis                # fact|explain|prerequisites|compare|synthesis|procedure|history
+  gold:                              # PRIMARY sources only: book PDF pages, course files, your notes
+  - file: <vault-relative path, as stored>
+    pages: [210, 212]
+    required: true
+    hop: 1                           # the first fact the chain needs
+  - file: <vault-relative path>
+    heading: <H1 > H2 prefix>
+    required: true
+    hop: 2                           # reachable only by following an edge from hop 1
+  nuggets: [<one atomic fact per hop>]
+  expect_course: null
+  provenance: {author: draft, drafted_by: <agent>, status: verified}   # the QUESTION's provenance, not a chunk's
+  notes: <which canvas edge links hop 1 to hop 2>
+```
+
+The rules:
+
+- **Gold never names a generated note or canvas.** A generated source may appear
+  only as `required: false` context. Otherwise a graph walk could score by
+  finding its own summaries. `bench validate` reports a scored gold entry that
+  only generated chunks satisfy as a `gold-generated` error.
+- **Single-hop controls (`strategy: fact`) must not regress under `G-e1e4`.** They
+  are what shows a walk crowding out a direct answer.
+- **Unanswerable items** sit next to topics the graphs cover but are absent from
+  the vault (`answerable: false`, no gold). They are judged for abstention
+  through `run --answers` and `bench judge`.
+
+The report adds three sections, each only when a run has its data, so older
+reports render exactly as before. "Graph contribution" gives, per configuration
+and over the rows without an error, the mean chunks the walk added by following
+an edge, how many of them the rerank kept, the required gold found only through
+walked chunks and absent from the search's own top 10 (per answerable question),
+the generated share of the final list, and the query seeds its seeding added.
+"Recall@10 by hop" appears when gold names hops. A strategy table appears when
+questions name strategies.
 
 ### Replay stores (a fixed LLM)
 

@@ -1,0 +1,21 @@
+version: 1
+system: |
+  You choose how a book chapter will be mapped. Each template below fits one
+  dominant purpose. Read the chapter's title, its section titles and its
+  opening text, and pick the ONE template whose purpose fits the chapter best.
+  Use outline only when no other template fits.
+
+  Templates:
+  {templates}
+
+  Reply with ONE JSON object and nothing else:
+  {{"template": "<one of: {names}>", "reason": "<one short sentence>"}}
+
+user: |
+  Chapter: {chapter}
+  Sections:
+  {sections}
+  Captions (figures and tables): {captions}
+
+  Opening text of the chapter:
+  {opening}

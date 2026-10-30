@@ -40,18 +40,22 @@ import json
 import logging
 import os
 import time
+from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-from eval.bench.configs import BASELINES
+from eval.bench.configs import BASELINES, GATE_PAIRS
 from eval.bench.fingerprint import config_digest, git_state, index_fingerprint
-from eval.bench.metrics import retrieval_metrics
-from eval.bench.questions import AUTHORS, SUITES, TIERS, question_to_dict
+from eval.bench.metrics import gold_only_via, hop_recall, retrieval_metrics
+from eval.bench.questions import AUTHORS, STRATEGIES, SUITES, TIERS, question_to_dict
 from eval.bench.relevance import Judged, judge
 from eval.bench.report import render
+from eval.bench.route_strata import STRATA_PREFIXES
 from eval.bench.stats import bootstrap_ci, mcnemar_exact, paired_diff_ci, percentiles
 from src.retrieval.hyde_cache import HydeCache
+from src.utils.provenance import RouteUnavailableError
+from src.utils.timing import ROUTE_KEYS
 
 # Anchored at the checkout, not the working directory: the ledger is the audit
 # trail of the sealed split, and a run started from another directory must not
@@ -128,7 +132,7 @@ def _run_one(rag, q, name: str, overrides: dict, *, answer_k: int | None = None,
     back to the raw question, which under a fixed LLM is a broken run, not a
     degraded one, so that row becomes an error."""
     row = {"qid": q.id, "config": name, "suite": q.suite, "tier": q.tier, "split": q.split,
-           "author": q.provenance.get("author"), "answerable": q.answerable,
+           "author": q.provenance.get("author"), "answerable": q.answerable, "strategy": q.strategy,
            "ids": [], "files": [], "match": [], "doc_match": [],
            "timings": {}, "lanes_run": {}, "cold": False, "hyde_cache": None}
     lanes = overrides.get("lanes")
@@ -138,7 +142,11 @@ def _run_one(rag, q, name: str, overrides: dict, *, answer_k: int | None = None,
             row["metrics"] = retrieval_metrics(Judged([], []), q.gold)     # all 0.0
         return row
     try:
-        docs, info = rag.search(q.question, **overrides)
+        if "graph" in overrides:              # the graph ablation: search, walk, union rerank
+            rest = {k: v for k, v in overrides.items() if k != "graph"}
+            docs, info = rag.graph_search(q.question, graph=overrides["graph"], **rest)
+        else:
+            docs, info = rag.search(q.question, **overrides)
     except Exception as e:
         row["error"] = f"{type(e).__name__}: {e}"
         return row
@@ -148,8 +156,22 @@ def _run_one(rag, q, name: str, overrides: dict, *, answer_k: int | None = None,
                match=[sorted(s) for s in j.matches], doc_match=[sorted(s) for s in j.doc_matches],
                timings=info["timings"], lanes_run=info["lanes_run"], cold=info["cold"],
                hyde_cache=info["hyde_cache"])
+    if info.get("graph"):
+        # Credit the walk only with its own chunks (not the query seeds) and only with
+        # gold the search's own top 10, before the union rerank, did not hold.
+        g = info["graph"]
+        added = set(g["added_ids"])
+        flagged = [d.id in added for d in docs]
+        searched = judge(g["search_metas"], q.gold).matches if q.answerable else []
+        row["graph"] = {"walk": g["walk"], "added": len(g["added_ids"]), "added_in_final": sum(flagged),
+                        "gold_via_graph": (gold_only_via(j.matches, flagged, q.gold, 10, searched=searched)
+                                           if q.answerable else 0),
+                        "seeded": len(g["seed_ids"]),
+                        "provenance": dict(Counter(g["provenance"]))}
     if info.get("decompose"):
         row["decompose"] = info["decompose"]
+    if "route" in info:                       # set by search() under generated_mode route only
+        row["route"] = info["route"]
     if strict_llm and info["hyde_cache"] == "error":
         row["error"] = "HyDE got no draft from the replay store (ReplayMiss); the row is not scored"
         return row
@@ -163,6 +185,8 @@ def _run_one(rag, q, name: str, overrides: dict, *, answer_k: int | None = None,
                          "cited": [c.number for c in ans.citations], "k": len(docs[:answer_k])}
     if q.answerable:
         row["metrics"] = retrieval_metrics(j, q.gold)
+        if any(g.hop is not None for g in q.gold):
+            row["hop_recall"] = hop_recall(j.matches, q.gold, 10)
     return row
 
 
@@ -201,6 +225,41 @@ def _latency(rows: list[dict]) -> dict:
     return {stage: {**percentiles(v), "n": len(v)} for stage, v in stages.items()}
 
 
+def _graph(rows: list[dict]) -> dict:
+    """Means over the error-free rows that went through graph_search: the chunks the walk
+    added, how many of them the union rerank kept, the query seeds its seeding added, and
+    the generated share of the final list (an empty list has none); the required gold only
+    walked chunks found, per answerable question like every metric (None when none was
+    scored)."""
+    g = [r["graph"] for r in rows]
+    out = {k: sum(x[k] for x in g) / len(g) for k in ("added", "added_in_final", "seeded")}
+    scored = [r["graph"]["gold_via_graph"] for r in rows if "metrics" in r]
+    out["gold_via_graph"] = sum(scored) / len(scored) if scored else None
+    shares = [x["provenance"].get("generated", 0) / (sum(x["provenance"].values()) or 1) for x in g]
+    out["generated_share"] = sum(shares) / len(g)
+    return out
+
+
+def _by_hop(rows: list[dict]) -> dict:
+    """{hop: {mean, n}} of recall@10, in hop order; a row counts toward the hops its gold names."""
+    per: dict[str, list[float]] = {}
+    for r in rows:
+        for hop, v in r.get("hop_recall", {}).items():
+            per.setdefault(hop, []).append(v)
+    return {hop: {"mean": sum(v) / len(v), "n": len(v)}
+            for hop, v in sorted(per.items(), key=lambda kv: int(kv[0]))}
+
+
+def _by_prefix(scored: list[dict]) -> dict:
+    """{stratum: {"ALL": agg, suite: agg, ...}} over the route strata (qid prefix). Rows carry
+    no prefix key, so each stratum is filtered here and then grouped like by_suite."""
+    out = {}
+    for p in STRATA_PREFIXES:
+        rows = [r for r in scored if r["qid"].split("-")[0] == p]
+        out[p] = {"ALL": _agg(rows), **_by(rows, "suite", SUITES)}
+    return out
+
+
 def _paired(rows_a: list[dict], rows_b: list[dict]) -> dict | None:
     """B minus A over the questions BOTH scored: the per-question difference has
     far less variance than two independent means."""
@@ -223,7 +282,13 @@ def summarise(rows_by_config: dict[str, list[dict]]) -> dict:
     and, for each BASELINES pair (neighbouring ladder rungs, the routing variants
     against F-full, H-on against H-off) that both ran, `paired` on the later one.
     by_author keeps drafted questions (`draft`) apart from hand-written ones
-    (`owner`), so a gap between the two shows instead of averaging away."""
+    (`owner`), so a gap between the two shows instead of averaging away.
+    by_strategy, graph, by_hop and route appear only when some row carries that data,
+    by_prefix only when every scored question is in a route stratum and both strata
+    occur, and paired_also only for a GATE_PAIRS pair that both ran (GM-route against
+    GM-off), so the summary of a run without graph or route questions or configs is
+    what it always was. route = the mean of each routed-lane count over the error-free
+    rows that carry one, like graph."""
     summary = {}
     for name, rows in rows_by_config.items():
         scored = [r for r in rows if "metrics" in r]
@@ -234,11 +299,28 @@ def summarise(rows_by_config: dict[str, list[dict]]) -> dict:
             "cold_rows": sum(1 for r in rows if r["cold"]),
             "errors": sum(1 for r in rows if "error" in r),
         }
+        if any(r.get("strategy") for r in scored):   # .get: hand-built rows may predate the key
+            summary[name]["by_strategy"] = _by(scored, "strategy", STRATEGIES)
+        walked = [r for r in rows if "graph" in r and "error" not in r]
+        if walked:
+            summary[name]["graph"] = _graph(walked)
+        if any("hop_recall" in r for r in scored):
+            summary[name]["by_hop"] = _by_hop(scored)
+        routed = [r["route"] for r in rows if "route" in r and "error" not in r]
+        if routed:
+            summary[name]["route"] = {k: sum(x[k] for x in routed) / len(routed) for k in ROUTE_KEYS}
+        if {r["qid"].split("-")[0] for r in scored} == set(STRATA_PREFIXES):
+            summary[name]["by_prefix"] = _by_prefix(scored)
     for b, a in BASELINES.items():
         if a in rows_by_config and b in rows_by_config:
             paired = _paired(rows_by_config[a], rows_by_config[b])
             if paired:
                 summary[b]["paired"] = {"vs": a, **paired}
+    for b, a in GATE_PAIRS.items():
+        if a in rows_by_config and b in rows_by_config:
+            paired = _paired(rows_by_config[a], rows_by_config[b])
+            if paired:
+                summary[b]["paired_also"] = [{"vs": a, **paired}]
     return summary
 
 
@@ -248,13 +330,33 @@ def _warm_up(rag, configs) -> None:
     """One discarded search per distinct rerank mode, before anything is timed. The
     first embed and the first rerank in a process pay one-off costs (kernel and
     tokenizer initialisation as well as the lazy loads) — measured at ~5 s on the
-    first "warm" row of a live run — and the cold flag does not see all of them."""
+    first "warm" row of a live run — and the cold flag does not see all of them. A
+    route arm adds one route-mode search with its lanes: the first routed retrieve()
+    builds the store's per-file row index. Like every warm call it fails the run here,
+    before any row is timed, when the store cannot route; a missing sidecar fails it as
+    a RunSetupError naming the build."""
     modes = {o.get("rerank") for _, o in configs if o.get("lanes") != []}
     for mode in sorted(modes, key=str):
         kw = {"hyde": False, "top_k": 1}
         if mode is not None:
             kw["rerank"] = mode
         rag.search("warm-up", **kw)
+    if any(o.get("graph") is not None for _, o in configs):
+        # the first walk with cross_canvas on builds the canvas index (a read of the whole lane)
+        rag.graph_search("warm-up", graph={"bridges": True, "cross_canvas": True, "wikilinks": True},
+                         hyde=False, top_k=1)
+    route = next((o for _, o in configs if o.get("generated_mode") == "route" and o.get("lanes") != []), None)
+    if route is not None:
+        try:
+            rag.search("warm-up", hyde=False, top_k=1, generated_mode="route", lanes=route.get("lanes"))
+        except RouteUnavailableError as e:
+            # The bench builds its own pipeline, which loads the sidecar at start: the
+            # 409's "restart :8051" does not apply here.
+            raise RunSetupError(
+                "a generated_mode route configuration needs the route pointer sidecar "
+                "(retrieval.route.pointers_file), and the store holds generated rows with "
+                "none loaded: build it with python main.py route-pointers, then re-run the "
+                "bench (no :8051 restart needed)") from e
 
 
 def run_bench(cfg, questions, configs, *, split: str = "dev", unseal_test: bool = False,
@@ -299,6 +401,15 @@ def run_bench(cfg, questions, configs, *, split: str = "dev", unseal_test: bool 
     if rag is None:
         from src.pipeline import RAGPipeline          # heavy: torch, chroma, the models
         rag = RAGPipeline.from_config(cfg)
+    # A walk that names no edge_types inherits graph.edge_types, and a per-call walk cannot
+    # ask for "every edge" back: the graph ablation's arms are defined as unfiltered walks.
+    inherits = [n for n, o in configs if o.get("graph") is not None and o["graph"].get("edge_types") is None]
+    configured = getattr(getattr(rag, "graph", None), "edge_types", None)
+    if inherits and configured is not None:
+        raise RunSetupError(
+            f"graph.edge_types is set ({', '.join(sorted(configured))}) and {', '.join(inherits)} would "
+            f"inherit it, but those walks are measured unfiltered: set graph.edge_types: null in "
+            f"config.yaml for the bench run, or give each walk config its own edge_types")
     if rag.hyde.cache is None:
         rag.hyde.cache = HydeCache(cfg.path("retrieval.hyde_cache.path", "data/cache/hyde.sqlite"))
     if llm is not None:

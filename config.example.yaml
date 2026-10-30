@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 #  Personal RAG — central configuration
 #  Copy this file to config.yaml and adapt the paths to your machine.
 #  config.yaml is gitignored, so pulls never overwrite your settings.
@@ -15,7 +15,10 @@ parser:
   min_chunk_size: 200
   overlap_size: 150
   chunking: heading              # heading | fixed | document | none (how OVERSIZED sections split)
-  skip_dirs: [".obsidian", ".trash", ".git", "__path_fix_backups", "__MACOSX"]
+  # Directory NAMES pruned at any depth by EVERY ingest lane (md, pdf, notebooks, code, canvas), on top of each lane's built-in set. Exact names. Nothing indexed is removed, but a whole-lane re-ingest drops their rows from that lane's JSONL (so from sparse) while dense keeps them: delete those sources (POST /api/documents/delete) before such a run.
+  skip_dirs: [".obsidian", ".trash", ".git", "__path_fix_backups", "__MACOSX", "venv", ".venv", "site-packages", "_vendor", ".ipynb_checkpoints", ".Rproj.user", "node_modules", "__pycache__", "_vault_quarantine"]
+  # Top-level vault folders (first path component, case-insensitive) EVERY ingest lane (md, pdf, notebooks, code, canvas) skips unless a run scopes them back in with --include-path. code.skip_roots: null adds these to its built-in roots; canvas.skip_roots adds its own. Rows already indexed: as skip_dirs.
+  skip_roots: []
 
 # ---------------------------------------------------------------------------
 # What the folder-derived grouping label is CALLED, and where it comes from.
@@ -274,7 +277,7 @@ retrieval:
   # the pickle by the build_tantivy job (rebuilt with the pickle while this is
   # set). Same tokenizer and rows; see src/retrieval/sparse_tantivy.py.
   sparse_backend: bm25s                     # bm25s | tantivy
-  tantivy_filter_pool: 2000                 # tantivy only: hits a filtered lane (scope/code) filters
+  tantivy_filter_pool: 2000                 # tantivy only: hits a filtered lane (scope/code, generated_mode drop) filters
   rrf_k: 60
   rerank_top_k: 7
   rerank_mode: cross_encoder                # cross_encoder | http | lexical | none | laya
@@ -343,12 +346,13 @@ retrieval:
   # Every lane defaults to 1.0, which is plain unweighted RRF — leaving this
   # block as-is changes nothing at all.
   #
-  # There are EIGHT lanes, not two. dense/sparse are the always-on core;
+  # Not just two lanes. dense/sparse are the always-on core;
   # dense_code/sparse_code open on code-intent queries (boost_code);
   # dense_scope/sparse_scope open when the query names a domain or content
   # type; omnisearch is the live-vault lane; hype is the question-matching
-  # lane. Weighting them individually is a much finer instrument than
-  # "more keyword, less vector".
+  # lane; routed (generated_mode: route) brings in the primary pages that
+  # generated hits cite. Weighting them individually is a much finer
+  # instrument than "more keyword, less vector".
   #
   # A weight of 0 does NOT disable a lane: its candidates still reach the
   # reranker, they just stop contributing to the fused ORDER. To remove a
@@ -357,7 +361,7 @@ retrieval:
   # Per-call override: {"lane_weights": {"sparse": 1.5}} on /search and
   # /query. Per-preset override: a lane_weights map inside retrieval.presets.*.
   # Both MERGE lane by lane over this one, so setting one lane leaves the
-  # other seven where they were. An unknown lane name is an error, not a
+  # other lanes where they were. An unknown lane name is an error, not a
   # silent no-op.
   #
   # Tune these with the bench (`main.py bench run`, on a labelled question
@@ -371,6 +375,7 @@ retrieval:
     sparse_scope: 1.0
     omnisearch: 1.0
     hype: 1.0
+    routed: 1.0
 
   use_hyde: false
   # HyDE cache: the hypothetical answer for a question is generated once and
@@ -394,6 +399,19 @@ retrieval:
   # Stops one book filling every seat and crowding out a second source.
   # 0 = no cap. Per-call override: {"max_per_file": 2} on /search and /query.
   max_per_file: 0
+  # What generated chunks (maps, summaries, agent files: provenance generated) do in
+  # retrieval. off = they compete as evidence (config only, never per call);
+  # drop = kept out of every evidence path; route = drop, and they bring the primary
+  # pages they cite into the pool (needs `main.py route-pointers`). Missing = drop.
+  generated_mode: drop
+  # Route (generated_mode: route): generated hits look up the primary pages they cite
+  # in this sidecar (built by `main.py route-pointers` or the route_pointers job).
+  route:
+    pointers_file: "data/route_pointers.json"
+    router_k: 10        # generated hits per lane that may route (tuned on eval/graph_sets only, never the blind set)
+    per_target: 1       # primary chunks ranked per routed span (tuned on eval/graph_sets only, never the blind set)
+    max_targets: 8      # distinct spans per call, in router order
+    max_new: 4          # net-new candidates the routed lane may add (each costs one more rerank; tuned on eval/graph_sets)
   # Query decomposition: one LLM call (src/prompts/decompose.yaml) splits a
   # multi-part question into up to max_subqueries searches; each is retrieved
   # and reranked against its own text, then all branches merge by reciprocal
@@ -614,6 +632,46 @@ graph:
   # step with the main one, query seeding answers with the reason and seeding
   # by chunk id keeps working.
   embedding_provider: null
+  # Navigator engine (POST /graph/expand, POST /evidence_pack). Every key below
+  # defaults to the walk as it was before these keys existed - a canvas-only walk
+  # over hand-drawn edges - and each is also a per-request field. Switch them on
+  # per call; make one a default only after `main.py bench run --configs graph`
+  # has measured it (docs/evaluation.md).
+  bridges: false               # a canvas file node or Source: line resolves to the chunks of the note/PDF page it cites
+  cross_canvas: false          # hop between canvases: same-as titles, a shared file node, a file node -> .canvas
+  wikilinks: false             # follow [[wikilinks]] from a reached note to the notes it links to (outgoing only)
+  direction: both              # both | down (along the arrowhead) | up (against it); '--' edges (no arrowheads) only under both, '<>' edges under any
+  edge_types: null             # null = every edge; a list of labels = only those (same-as and bridges always pass)
+  target_max_chunks: 4         # chunks taken from one resolved note/PDF page (bridges and wikilinks)
+  bridge_max_total: 20         # bridge chunks in one traversal; NOT counted in max_total
+  same_as_min_chars: 4         # a normalised title shorter than this never joins two canvases
+  same_as_max_canvases: 4      # a title found in more canvases than this is generic and joins none
+
+# Where a chunk's evidence comes from, shown to agents (POST /evidence_pack) and,
+# when switched on below, to the generator:
+#   authored   your own notes, canvases, code and notebooks
+#   source     books, papers and other primary material
+#   generated  LLM-written summaries and maps (md frontmatter `generated: true`,
+#              canvas.generated_markers)
+# First match wins: a stored `generated`; generated_paths, agent-instruction names, canvas
+# markers; any other stored value; by_file_type; authored.
+provenance:
+  by_file_type: {pdf: source}        # file types not listed are authored
+  label_generated: false             # true = the generator's numbered sources say which are generated
+  generated_only_confidence: null    # null = off; MEDIUM | LOW = cap an answer whose every citation is generated
+  # Vault path prefixes whose files are generated (navigation, never evidence),
+  # whatever their own frontmatter says. Matched case-, slash- and NFC/NFD-insensitively.
+  generated_paths: []
+  # Agent-instruction files are never evidence: they tell agents what to do.
+  agent_instruction_files: [AGENTS.md, CLAUDE.md, GEMINI.md, SKILL.md]
+  agent_instruction_dirs: [.claude]
+
+# POST /evidence_pack: search (plus an optional graph walk) per sub-question, one call.
+evidence_pack:
+  max_sub_questions: 4     # more is a 400
+  top_k: 5                 # evidence per sub-question; a request's top_k beats it
+  include_text: 600        # characters of text per evidence item; a request's include_text beats it
+  min_score: null          # null = everything retrieved counts as coverage; a number = a reranker-unit floor (tune on the dev split)
 
 eval:
   sets_dir: "eval/sets"         # labelled question sets the Eval tab reviews (local data; relative = from the project root)
@@ -784,9 +842,10 @@ canvas:
   # skip_dirs: null = the built-in set mirroring ObsidianParser's defaults
   # (.obsidian, .trash, .git, node_modules, .smart-connections,
   # .obsidian-git, _Backups). Set a list to override.
+  # parser.skip_dirs is added either way.
   skip_dirs: null
-  # skip_roots: null = no roots skipped by default (canvases carry no
-  # agent-project convention to scope out, unlike ingest-code). Set a list to add some.
+  # skip_roots: null = none of the canvas lane's own (exact names, skipped even
+  # under --include-path). Set a list to add some. parser.skip_roots apply either way.
   skip_roots: null
   # Graph tab (console): every save keeps the canvas's previous bytes here,
   # OUTSIDE the vault (a path inside it is refused). Relative = project root.
@@ -796,6 +855,21 @@ canvas:
   # next time that canvas is ingested. Metadata only: chunk text and doc_ids do
   # not change. false = no canvas chunk carries tags from its edge labels.
   label_tags: false
+  # Connections footer: write a file node's subpath (#Heading, #page=N) after its
+  # path. false = the footer every indexed canvas chunk was built with. It changes
+  # chunk TEXT, so turning it on re-embeds, at their next ingest, the chunks whose
+  # file neighbours carry a subpath (canvas_refresh.py's plan reports how many).
+  footer_subpath: false
+  # A canvas whose vault path contains one of these (case-insensitive) was written
+  # by an LLM: its chunks get provenance: generated. Name such canvases
+  # "<title> (generated).canvas" BEFORE their first ingest - the path is part of
+  # every node's doc_id, so renaming later re-ids the whole canvas.
+  generated_markers: ["(generated)"]
+  # A text-node line "Source: <vault path>[ p. N | pp. a-b, c]" also becomes a
+  # bridge target in canvas_edge_files (at most 2 citation groups per Source line and 6 per node; a page
+  # group bridges to its first page, a range also to the next page). Metadata only:
+  # chunk text and ids never change.
+  source_lines: true
   # Graph tab "suggest label" (docs/superpowers/specs/2026-10-04-canvas-augmentation-plan.md).
   # A suggestion only fills the label box; nothing is written until Save.
   augment:
@@ -887,3 +961,75 @@ webui:
 security:
   allowed_hosts: []      # extra Host names beyond loopback (a LAN name, a k8s Service)
   allowed_origins: []    # extra browser origins allowed to POST
+
+# Knowledge-map harness (src/knowledge_map, `rag map`): turns one PDF chapter into
+# a typed, quote-grounded graph (map.json) and a staged (generated) canvas. It
+# writes only under staging_dir and never ingests; placing a map is a manual step.
+knowledge_map:
+  # Where maps are staged, one folder per book and chapter. Must be OUTSIDE
+  # parser.vault_path (the loader refuses otherwise).
+  staging_dir: "<runtime-dir>/canvas_maps/staging"
+  # A run fails (nothing but its run record is written) if fewer than this share
+  # of the non-hub candidate nodes end up located in the text and supported.
+  min_grounded_ratio: 0.9
+  max_span_pages: 3         # a concept node's quotes may span at most this many PDF pages
+  node_cap: 40              # node cap per chapter, raised to what its headings need (coverage); lowest-importance nodes are cut and listed as rejects
+  fanout_max: 8             # most edges drawn from one node on the canvas
+  quote_words: [5, 30]      # a quote must be this many words, min and max
+  max_wall_minutes: 30      # a run is stopped (and fails) after this long
+  max_llm_calls: 150        # ... or after this many model calls
+  retries: 2                # a failed attempt retries this many times, then moves to the next fallback
+  verify_batch: 10          # nodes checked per verifier call
+  rate_limit_sleep_s: 20    # pause before retrying a 429 (a 5xx retries at once)
+  request_timeout_s: 300    # one model request is abandoned after this long; the SDK's own
+                            # retries are off, so every attempt is logged and charged
+  vision: null              # the figure slot: empty in v1 (figure nodes quote text only)
+  # One entry per model step. provider is a `providers:` name; model "auto" lets
+  # the proxy pick. A named model that is served by a different one counts as a
+  # failed attempt. fallbacks are tried in order after the retries run out.
+  classify:                 # picks the template for a chapter
+    provider: freellmapi
+    model: auto
+    max_tokens: 800
+    temperature: 0.0
+    fallbacks:
+      - {provider: freellmapi, model: gpt-oss-120b}
+  extract:                  # nodes, quotes and stated edges, one call per section unit
+    provider: freellmapi
+    model: auto
+    max_tokens: 6000
+    temperature: 0.0
+    fallbacks:
+      - {provider: freellmapi, model: gpt-oss-120b}
+    max_unit_chars: 24000   # a section longer than this is split into units
+  link:                     # cross-section edges
+    provider: freellmapi
+    model: auto
+    max_tokens: 4000
+    temperature: 0.0
+    fallbacks:
+      - {provider: freellmapi, model: gpt-oss-120b}
+  verify:                   # checks each located quote supports its node; PINNED, never "auto"
+    provider: freellmapi
+    model: gpt-oss-120b
+    max_tokens: 3000
+    temperature: 0.0
+    fallbacks:
+      - {provider: freellmapi, model: gpt-oss-20b}
+  reverify:                 # re-checks a summary the verifier cut down; PINNED, and none of its
+    provider: freellmapi    # models may be a verify model (no model grades its own rewrite)
+    model: qwen3.8-27b
+    max_tokens: 3000
+    temperature: 0.0
+    fallbacks:
+      - {provider: freellmapi, model: gemini-2.5-flash-lite}
+  # Scout: samples the PDF before any model call.
+  scout:
+    window_pages: 8         # pages per sampling window
+    max_scanned_ratio: 0.2  # refuse a range with more scanned (no text layer) pages than this
+  # Coverage: after the first verify pass, a heading with fewer kept nodes than its length needs
+  # gets a gap-fill extract call over its pages (an --import-extract run only reports it).
+  coverage:
+    heading_min_ratio: 1.15 # a line set this many times the body font size is a heading
+    min_section_chars: 400  # a heading with less text than this under it is not checked
+    chars_per_node: 2000    # a heading needs one kept node per this many characters; 0 turns gap-fill off

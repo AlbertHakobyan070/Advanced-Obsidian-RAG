@@ -255,3 +255,39 @@ def test_a_dead_writers_lock_is_broken(tmp_path):
     with sets_lock(tmp_path):
         assert lock.read_text() == str(os.getpid())          # taken over
     assert not lock.exists()
+
+
+# ---- hop and strategy (slice D, E7: per-hop gold for graph questions) ----
+
+# save_suite's text for _d() with every pre-slice gold key, captured on the code
+# before hop and strategy existed: a record that uses neither must keep it.
+PRE_SLICE_DUMP = (
+    "- id: lex-0001\n  question: What does BM25's k1 control?\n  suite: lexical\n  tier: T1\n"
+    "  split: null\n  answerable: true\n  gold:\n  - file: a.md\n    pages:\n    - 1\n    - 2\n"
+    "    heading: H\n    required: false\n    alternatives:\n    - file: b.md\n      pages:\n"
+    "      - 3\n      - 3\n      heading: H2\n  nuggets:\n  - term-frequency saturation\n"
+    "  expect_course: null\n  provenance:\n    author: draft\n    drafted_by: claude-sonnet-5.5\n"
+    "    seed_chunks:\n    - x\n    status: draft\n    reviewed_at: null\n  notes: ''\n")
+
+
+def test_hop_and_strategy_parse_and_round_trip_only_when_set(tmp_path):
+    q = question_from_dict(_d(strategy="synthesis", gold=[{"file": "a.md", "hop": 1},
+                                                          {"file": "b.pdf", "pages": 3, "hop": 2}]), "t")
+    assert q.strategy == "synthesis" and [g.hop for g in q.gold] == [1, 2]
+    d = question_to_dict(q)
+    assert list(d)[-1] == "strategy" and d["gold"][0] == {"file": "a.md", "required": True, "hop": 1}
+    assert question_from_dict(d, "t") == q
+    for bad in ({"strategy": "nope"}, {"strategy": ["compare"]},
+                {"gold": [{"file": "a.md", "hop": 0}]}, {"gold": [{"file": "a.md", "hop": True}]},
+                {"gold": [{"file": "a.md", "hop": "1"}]},
+                # an alternative is the same passage, so it shares its entry's hop
+                {"gold": [{"file": "a.md", "hop": 1, "alternatives": [{"file": "b.md", "hop": 2}]}]}):
+        with pytest.raises(SchemaError):
+            question_from_dict(_d(**bad), "t")
+    plain = question_from_dict(_d(gold=[{"file": "a.md", "pages": [1, 2], "heading": "H",
+                                         "required": False,
+                                         "alternatives": [{"file": "b.md", "pages": 3,
+                                                           "heading": "H2"}]}]), "t")
+    assert plain.strategy is None and plain.gold[0].hop is None
+    save_suite(tmp_path / "lexical.yaml", [plain])
+    assert (tmp_path / "lexical.yaml").read_text(encoding="utf-8") == PRE_SLICE_DUMP

@@ -138,6 +138,7 @@ DOMAIN_MAP = {
     "Linear Algebra": "math",
     "Numerical Methods": "math",
     "Generative AI": "ml",
+    "AI Engineering": "ml",
     "Marketing Analytics": "biz",
     "Reinforcement Learning": "ml",
     # Added from vault scout
@@ -210,6 +211,7 @@ FOLDER_COURSE_MAP = {
     "tsf":                              "Time Series & Forecasting",
     "dataviz":                          "Data Visualization",
     "dv":                               "Data Visualization",
+    "ai engineering":                   "AI Engineering",
     # --- 01-Passed leaf course folders (exact names, incl. suffixes) ---
     "ai (a+)":                          "Intro to AI",
     "ai":                               "Intro to AI",
@@ -244,6 +246,8 @@ FOLDER_COURSE_MAP = {
     "software architecture": "Software Architecture",
     "web development":       "Web Development",
     "data science":          "Data Science (Books)",
+    "data science (books)":  "Data Science (Books)",
+    "ai engineering & llms": "AI Engineering",
     "python development":    "Python Development",
 }
 
@@ -662,6 +666,27 @@ def detect_course_from_heading(heading: str) -> Optional[str]:
     return None
 
 
+def detect_md_course_from_path(parts) -> Optional[str]:
+    """The md lane's PATH rule (ObsidianParser._detect_course_from_path without the
+    frontmatter step) over VAULT-RELATIVE parts ending in the filename:
+      1. exact FOLDER_COURSE_MAP, root first. This runs BEFORE the abbreviations, so
+         a folder named "AI Engineering" is not read as the "AI" course;
+      2. heading-pattern abbreviations on each part, root first;
+      3. heading patterns on the filename stem.
+    Returns a course code or name, or None (never "__SKIP__").
+    recalibrate_courses.py and the remaster course-diff gate call this directly."""
+    for part in parts:
+        match = FOLDER_COURSE_MAP.get(part.lower().strip())
+        if match:
+            return match
+    for part in parts:
+        course = detect_course_from_heading(part)
+        if course and course != "__SKIP__":
+            return course
+    course = detect_course_from_heading(Path(parts[-1]).stem) if parts else None
+    return None if course == "__SKIP__" else course
+
+
 def resolve_course_metadata(course_id: Optional[str]) -> dict:
     """Given a course code or name, return enriched metadata."""
     if not course_id:
@@ -735,9 +760,18 @@ def extract_date_from_filename(filepath: Path) -> Optional[str]:
 # Wikilink + tag extraction
 # ─────────────────────────────────────────────────────────────────────
 
+MAX_WIKILINKS = 20     # links kept per note in chunk metadata (size); index_ops.plan reads notes at the cap
+
+
 def extract_wikilinks(text: str) -> list[str]:
     """Extract [[wikilinks]] and [[wikilinks|display text]]."""
     return re.findall(r"\[\[([^\]|]+?)(?:\|[^\]]+?)?\]\]", text)
+
+
+# A CSS hex colour (6 or 8 hex digits) with at least one digit, as written in
+# inline styles ("color: #e67e22"). Matched with fullmatch against a tag's body.
+# Not the 3/4 forms: they are real tags too often (#e2e, #b2b, #ec2, #db2)
+_HEX_COLOUR = re.compile(r"(?=[0-9a-f]*\d)(?:[0-9a-f]{6}|[0-9a-f]{8})", re.I)
 
 
 def extract_tags(text: str) -> list[str]:
@@ -750,7 +784,9 @@ def extract_tags(text: str) -> list[str]:
             in_code = not in_code
             continue
         if not in_code:
-            tags.update(re.findall(r"(?:^|\s)#([a-zA-Z][\w/-]*)", line))
+            # ponytail: a short (#f00) or all-letter colour (#fff) still passes as a tag; a real tag must not be eaten
+            tags.update(t for t in re.findall(r"(?:^|\s)#([a-zA-Z][\w/-]*)", line)
+                        if not _HEX_COLOUR.fullmatch(t))
     return sorted(tags)
 
 
@@ -1074,6 +1110,33 @@ def _normalise_tag(tag) -> str:
     return " ".join(str(tag).replace(",", " ").split())
 
 
+def _frontmatter_tags(value) -> list[str]:
+    """Frontmatter `tags:` as normalised tags. Obsidian writes it as a list, a
+    scalar ("tags: ML") or a comma/space string ("#NLP, Transformers"); a null or
+    a mapping carries none. `#` is stripped, the value lowercased and passed
+    through _normalise_tag; empties dropped, duplicates removed, order kept."""
+    if isinstance(value, (list, tuple)):
+        raw = [t for t in value if t is not None]
+    elif isinstance(value, str):
+        raw = re.split(r"[,\s]+", value)
+    elif isinstance(value, (int, float, bool)):
+        raw = [str(value)]
+    else:
+        return []
+    tags = (_normalise_tag(str(t).strip().lstrip("#").lower()) for t in raw)
+    return list(dict.fromkeys(t for t in tags if t))
+
+
+# Allowed values of frontmatter `provenance:`, which parse_file validates.
+_PROVENANCE = ("authored", "source", "generated")
+
+
+class ProvenanceError(ValueError):
+    """A note's frontmatter `provenance:` is not one of _PROVENANCE. parse_all lets it
+    stop the run instead of skipping the note: a skipped note is a note missing from the
+    output that a green job reports as done."""
+
+
 def apply_forced_meta(meta: dict, force_domain: str | None,
                       force_tags: list[str] | None) -> None:
     """Stamp a batch/per-file domain + tags onto a chunk's metadata IN PLACE.
@@ -1158,6 +1221,9 @@ class ObsidianParser:
             raise FileNotFoundError(f"Vault not found: {vault_path}")
 
         self.config = config or {}
+        # provenance.provenance_rule(cfg): its path rule stamps `generated` (parse_file).
+        # None = no stamp, for direct constructions in tests; every CLI passes it.
+        self.provenance_rule = self.config.get("provenance_rule")
         self.min_chunk = self.config.get("min_chunk_size", MIN_CHUNK_SIZE)
         self.max_chunk = self.config.get("max_chunk_size", MAX_CHUNK_SIZE)
         self.overlap = self.config.get("overlap_size", OVERLAP_SIZE)
@@ -1179,13 +1245,13 @@ class ObsidianParser:
         self.skip_dirs = {".obsidian", ".trash", ".git", "node_modules",
                           ".smart-connections", ".obsidian-git", "_Backups"}
         self.skip_dirs.update(set(self.config.get("skip_dirs", [])))
-        # Top-level vault trees to exclude (exact match on the FIRST path
-        # component only — safer than skip_dirs for names like "Documents"
+        # Top-level vault trees to exclude (case-insensitive match on the FIRST
+        # path component only — safer than skip_dirs for names like "Documents"
         # that could legitimately appear deeper inside course folders).
         # Session 8: the agent-project trees (Workspace1/Workspace2/Workspace3/...)
         # ballooned an unscoped parse 7K -> 88.7K chunks; the markdown corpus
         # stays scoped to coursework until the author decides otherwise.
-        self.skip_roots = set(self.config.get("skip_roots", []))
+        self.skip_roots = {str(r).lower() for r in self.config.get("skip_roots", [])}
         # Optional scoped parse: only .md files whose vault-relative posix path
         # contains this substring (case-insensitive). Powers the inbox md lane —
         # a scoped parse MUST also set a non-default output so it never
@@ -1227,7 +1293,7 @@ class ObsidianParser:
         for f in iter_vault_files(self.vault_path, {".md"}, self.skip_dirs):
             rel_parts = f.relative_to(self.vault_path).parts
             # Skip excluded top-level trees (agent projects etc.)
-            if rel_parts and rel_parts[0] in self.skip_roots:
+            if rel_parts and rel_parts[0].lower() in self.skip_roots:
                 self.stats["files_skipped"] += 1
                 continue
             # Scoped parse (inbox md lane): substring filter on the rel path
@@ -1260,14 +1326,21 @@ class ObsidianParser:
             "file_type": "daily_note" if is_daily_note(filepath, self.vault_path) else "note",
             "vault_path": str(self.vault_path),
             "tags": extract_tags(body),
-            "wikilinks": extract_wikilinks(body)[:20],  # cap for metadata size
+            "wikilinks": extract_wikilinks(body)[:MAX_WIKILINKS],  # cap for metadata size
         }
+        prov = frontmatter.get("provenance")
+        if prov is not None and prov not in _PROVENANCE:
+            raise ProvenanceError(f"{rel_path}: frontmatter provenance must be one of "
+                                  f"{', '.join(_PROVENANCE)}, got {prov!r}")
+        base_meta["provenance"] = prov or ("generated" if frontmatter.get("generated") is True else "authored")
+        # The path rule beats frontmatter, as provenance_of does. Imported here: this
+        # module imports nothing from src/ at import time.
+        from src.utils.provenance import stamp_generated
+        stamp_generated(base_meta, self.provenance_rule)
 
         # Merge frontmatter (user's YAML takes priority)
         if "tags" in frontmatter:
-            fm_tags = frontmatter["tags"]
-            if isinstance(fm_tags, list):
-                base_meta["tags"] = list(set(base_meta["tags"] + fm_tags))
+            base_meta["tags"] = sorted(set(base_meta["tags"]) | set(_frontmatter_tags(frontmatter["tags"])))
         if "course" in frontmatter:
             base_meta["frontmatter_course"] = frontmatter["course"]
         if "date" in frontmatter:
@@ -1296,38 +1369,20 @@ class ObsidianParser:
 
         Priority order:
           1. Frontmatter 'course' key
-          2. Heading-pattern match on directory/filename parts
-          3. FOLDER_COURSE_MAP exact lookup (catches full names with & / spaces)
+          2. FOLDER_COURSE_MAP exact lookup (catches full names with & / spaces)
+          3. Heading-pattern match on directory/filename parts
           4. Heading-pattern match on the filename stem
 
-        Steps 2-3 walk the VAULT-RELATIVE parts, root first: folders above the
-        vault root say nothing about a note, so a vault stored under a folder
-        named "ML Notes" is not labelled "Machine Learning & AI".
+        Steps 2-4 are detect_md_course_from_path, over the VAULT-RELATIVE parts,
+        root first: folders above the vault root say nothing about a note, so a
+        vault stored under a folder named "ML Notes" is not labelled "Machine
+        Learning & AI".
         """
         # 1. Frontmatter wins
         if "course" in frontmatter:
             return str(frontmatter["course"])
 
-        parts = filepath.relative_to(self.vault_path).parts
-
-        # 2. Try heading-pattern detection on each path part
-        for part in parts:
-            course = detect_course_from_heading(part)
-            if course and course != "__SKIP__":
-                return course
-
-        # 3. Folder-name exact lookup (case-insensitive) — catches full-title
-        #    folder names like "Statistics & Inference" that have special chars
-        for part in parts:
-            match = FOLDER_COURSE_MAP.get(part.lower().strip())
-            if match:
-                return match
-
-        # 4. Check filename via heading detection
-        course = detect_course_from_heading(filepath.stem)
-        if course == "__SKIP__":
-            return None
-        return course
+        return detect_md_course_from_path(filepath.relative_to(self.vault_path).parts)
 
     # ---- E2 parent-child helpers ----
 
@@ -1503,7 +1558,7 @@ class ObsidianParser:
             # If no course detected yet, try from this heading
             if base_meta.get("course_code") is None or base_meta.get("course_code") == "unknown":
                 detected = detect_course_from_heading(node.title)
-                if detected:
+                if detected and detected != "__SKIP__":
                     base_meta.update(resolve_course_metadata(detected))
 
             chunk_meta = {**base_meta}
@@ -1547,21 +1602,31 @@ class ObsidianParser:
         """
         Parse the entire vault. Returns all documents.
 
-        This is the main entry point.
+        This is the main entry point. A note that fails to parse is reported and skipped,
+        except for an invalid frontmatter provenance: that raises ProvenanceError, naming
+        every such note, because a skipped note is missing from the output unannounced.
         """
         files = self.discover_files()
         if verbose:
             print(f"[parser] Found {len(files)} markdown files in {self.vault_path}")
 
         all_docs = []
+        bad_provenance = []
         for filepath in files:
             try:
                 docs = self.parse_file(filepath)
                 all_docs.extend(docs)
                 self.stats["files_processed"] += 1
+            except ProvenanceError as e:
+                bad_provenance.append(str(e))    # raised below, once every note has been seen
             except Exception as e:
                 print(f"[parser] ERROR processing {filepath}: {e}", file=sys.stderr)
                 self.stats["files_skipped"] += 1
+        if bad_provenance:
+            raise ProvenanceError(
+                f"{len(bad_provenance)} note(s) have an invalid frontmatter provenance. Fix them "
+                f"(or remove the key), then re-run; nothing is written for a run that would "
+                f"leave a note out:\n" + "\n".join(bad_provenance))
 
         if verbose:
             self._print_stats()
@@ -1620,7 +1685,9 @@ def main():
     Takes the chunking strategy and the taxonomy from config.yaml — see the
     module docstring; the flags below still override."""
     import argparse
+    from src.utils import lane_guard
     from src.utils.config_loader import load_config
+    from src.utils.provenance import provenance_rule
     ap = argparse.ArgumentParser(description="Parse Obsidian vault for RAG ingestion")
     ap.add_argument("vault_path", help="Path to Obsidian vault root")
     ap.add_argument("-o", "--output", default="chunks.jsonl",
@@ -1639,33 +1706,42 @@ def main():
                     help="Print N sample chunks to stdout")
     ap.add_argument("--parents-out", default="data/parents_md.jsonl",
                     help="Sidecar JSONL for E2 parent sections "
-                         "(default: data/parents_md.jsonl; '' disables)")
-    ap.add_argument("--skip-roots", default="",
+                         "(default: data/parents_md.jsonl; '' disables). A scoped "
+                         "parse (--include-path) must pass --parents-out ''")
+    ap.add_argument("--skip-roots", default=None,
                     help="Comma-separated TOP-LEVEL vault folders to exclude "
-                         "(e.g. \"Workspace1,Workspace2\" — agent trees, not coursework)")
+                         "(default: parser.skip_roots from config.yaml, unless "
+                         "--include-path scopes the run; an empty value = none)")
     ap.add_argument("--include-path", default="",
                     help="Only parse .md files whose vault-relative path contains "
-                         "this substring (scoped parse — ALWAYS pair with a "
-                         "non-default --output so chunks.jsonl is never clobbered)")
+                         "this substring (scoped parse — ALWAYS pair with its own "
+                         "-o, never chunks.jsonl, and with --parents-out '')")
 
     args = ap.parse_args()
-    if args.include_path and args.output == "chunks.jsonl":
-        ap.error("--include-path requires an explicit non-default --output "
-                 "(a scoped parse would clobber the full chunks.jsonl)")
 
     cfg = load_config()
     # Run as `python -m`, this file is __main__: load_config() applies the
     # taxonomy to a second copy of it imported by name, not to the maps this
     # copy's ObsidianParser reads. configure_taxonomy is idempotent.
     configure_taxonomy(cfg)
+    # A whole-vault run keeps the defaults (-o chunks.jsonl, --parents-out
+    # data/parents_md.jsonl); a scoped run would replace both with partial files.
+    lane_guard.exit_if_refused(cfg, "markdown", args.output, scoped=bool(args.include_path),
+                               parents_out=args.parents_out)
 
     config = {
         "max_chunk_size": args.max_chunk,
         "min_chunk_size": args.min_chunk,
         "overlap_size": args.overlap,
         "chunking": args.chunking or cfg.get("parser.chunking", "heading"),
-        "skip_roots": [s.strip() for s in args.skip_roots.split(",") if s.strip()],
+        "skip_dirs": list(cfg.get("parser.skip_dirs") or []),
+        # A scoped run is the user asking for that tree (as code_loader does).
+        "skip_roots": ([s.strip() for s in args.skip_roots.split(",") if s.strip()]
+                       if args.skip_roots is not None
+                       else ([] if args.include_path
+                             else list(cfg.get("parser.skip_roots") or []))),
         "include_path": args.include_path or None,
+        "provenance_rule": provenance_rule(cfg),
     }
 
     parser = ObsidianParser(args.vault_path, config=config)

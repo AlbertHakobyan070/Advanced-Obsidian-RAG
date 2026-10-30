@@ -33,6 +33,9 @@ FETCH_BACKENDS = ("auto", "requests", "crawl4ai", "scrapling", "crawlee")
 
 _SAFE_NAME = re.compile(r"[^\w.\- ()\[\]]")
 
+# staged web pages and converted files are sources, not the author's notes: the answer contract cites them as source (design 1.1 step 5)
+_SOURCE_FRONTMATTER = "---\nprovenance: source\n---\n"
+
 
 def _slug_for(url: str) -> str:
     tail = re.sub(r"[?#].*$", "", url).rstrip("/").rsplit("/", 1)[-1] or "page"
@@ -260,7 +263,7 @@ def fetch_urls(urls: list[str], dest_dir: Path, backend: str = "auto",
             header = f"# {stem}\n\n> Source: {url}\n> Fetched: " \
                      f"{time.strftime('%Y-%m-%d %H:%M')}\n\n"
             dest = _unique(dest_dir, stem, ".md")
-            dest.write_text(header + text, encoding="utf-8")
+            dest.write_text(_SOURCE_FRONTMATTER + header + text, encoding="utf-8")
             out.append({"url": url, "ok": True, "file": dest.name,
                         "chars": len(text)})
             log.info("fetched %s -> %s (%d chars)", url, dest.name, len(text))
@@ -342,7 +345,7 @@ def convert_files(files: list[str], inbox: Path, dest_dir: Path,
                 text += f"\n\n---\n\n# OCR (pages {ocr_pages})\n\n{ocr_txt}"
             dest = _unique(dest_dir, src.stem, ".md")
             header = f"# {src.stem}\n\n> Converted from: {name}\n\n"
-            dest.write_text(header + text, encoding="utf-8")
+            dest.write_text(_SOURCE_FRONTMATTER + header + text, encoding="utf-8")
             out.append({"file": name, "ok": True, "output": dest.name,
                         "chars": len(text)})
             log.info("converted %s -> %s (%d chars)", name, dest.name, len(text))

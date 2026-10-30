@@ -11,9 +11,14 @@ THE KEY DESIGN DECISION
   The graph is flattened into each chunk AT INGEST TIME — both as a
   human-readable "Connections" footer inside the chunk text, and as edge
   metadata (canvas_edges / canvas_neighbors / canvas_edge_labels /
-  canvas_file_refs / canvas_degree). canvas_edges is the ALIGNED one — one
-  entry per edge, so a traversal can pair a label with the edge it belongs
-  to; the other two are unaligned lists of different lengths.
+  canvas_file_refs / canvas_edge_files / canvas_degree). canvas_edges is the
+  ALIGNED one — one entry per edge, so a traversal can pair a label with the
+  edge it belongs to; the other two are unaligned lists of different lengths.
+  canvas_edges directions follow the arrowheads as drawn (-> <- -- <>), while
+  the footer keeps the from/to orientation, so no chunk text changes.
+  canvas_edge_files is the second aligned key, in the same codec: one entry
+  per edge to a file node (file node id, vault path, subpath), then one per
+  "Source:" line citation (node id "", cited path, subpath).
 
   The graph is therefore visible to the embedder, the reranker and the LLM
   with ZERO retrieval-time code in the MAIN query path. (The optional Graph
@@ -50,6 +55,7 @@ import hashlib
 import json
 import os
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -67,6 +73,9 @@ from src.ingestion.obsidian_parser import (
 )
 from src.utils.config_loader import Config
 from src.utils.logger import get_logger
+from src.utils.provenance import (
+    CANVAS_MARKERS_DEFAULT, ProvenanceRule, canvas_markers, marks_generated_canvas, provenance_rule,
+    stamp_generated)
 
 log = get_logger(__name__)
 
@@ -188,6 +197,92 @@ def decode_canvas_edges(value) -> list[dict]:
     return edges
 
 
+def decode_canvas_files(value) -> list[dict]:
+    """canvas_edge_files back from either stored shape: [{"node", "file", "subpath"}].
+    The same three-field codec as canvas_edges (written by encode_canvas_edge), so a
+    malformed entry raises the same ValueError. node "" = a Source: line citation."""
+    return [{"node": e["neighbor"], "file": e["direction"], "subpath": e["label"]}
+            for e in decode_canvas_edges(value)]
+
+
+def norm_vault_path(p) -> str:
+    """One comparison form for a vault path, whoever stored it: NFC, forward slashes,
+    no edge slashes, casefolded. Canvas file fields use '/', md/pdf source_file '\\',
+    and a Mac can hand back NFD. The walk's bridges and cross-canvas index and
+    relocate's canvas-reference rewrite (T3b) all use it, so they agree on 'the same file'."""
+    return unicodedata.normalize("NFC", str(p)).replace("\\", "/").strip("/").casefold()
+
+
+def edge_ends(edge: dict) -> tuple[bool, bool]:
+    """(arrowhead at fromNode, arrowhead at toNode). JSON Canvas defaults: fromEnd none, toEnd arrow."""
+    return ((edge.get("fromEnd") or "none") == "arrow",
+            (edge.get("toEnd") or "arrow") == "arrow")
+
+
+def edge_direction(edge: dict, node_id: str) -> str:
+    """The direction stored in canvas_edges, from node_id's side, as the arrowheads draw it:
+    '->' points away from this node, '<-' points at it, '--' no arrowheads, '<>' both."""
+    back, ahead = edge_ends(edge)
+    if back and ahead:
+        return "<>"
+    if not (back or ahead):
+        return "--"
+    out = ahead if edge.get("fromNode") == node_id else back
+    return "->" if out else "<-"
+
+
+# Contract §5 node format, "Source: <vault path> pp. a-b" (decision 13). Whole line.
+SOURCE_LINE_RE = re.compile(
+    r"^Source: (?P<path>[^\n]+?\.(?:pdf|md)) ?(?:pp?\. (?P<pages>\d+(?:-\d+)?(?:, ?\d+(?:-\d+)?)*))?$")
+SOURCE_MAX_GROUPS_PER_LINE = 2   # each cited file keeps its first groups, so a node citing several sources bridges to each
+SOURCE_MAX_GROUPS_PER_NODE = 6   # ponytail: constants; a node citing more groups is a gallery, not a concept
+
+
+def _source_entries(body: str, seen: set[tuple[str, str]]) -> tuple[list[str], int, int]:
+    """Source: lines -> canvas_edge_files entries. A PDF page group bridges to its first
+    page and, for a range, to the next page too: a section heading often sits at the foot
+    of its first cited page, with the content on the next (decision 20). The cap counts
+    citation groups, not entries; target_max_chunks and bridge_max_total cap the bridged total.
+
+    Returns (entries, unparsed, capped). `seen` holds the (path, subpath) pairs already
+    present (the node's file-node entries) and grows with every pair emitted."""
+    entries: list[str] = []
+    unparsed = capped = groups = 0
+    for line in body.splitlines():
+        s = line.strip()
+        if not s.lower().startswith("source:"):
+            continue
+        m = SOURCE_LINE_RE.fullmatch(s)
+        if not m:
+            unparsed += 1
+            continue
+        path, pages = m.group("path"), m.group("pages")
+        if path.endswith(".pdf") and pages:
+            line_pairs = []
+            for g in pages.split(","):
+                first, _, last = g.strip().partition("-")
+                pairs = [(path, f"#page={int(first)}")]
+                if last and int(last) > int(first):
+                    pairs.append((path, f"#page={int(first) + 1}"))
+                line_pairs.append(pairs)
+        else:
+            line_pairs = [[(path, "")]]          # a page-less pdf, or an md (its pages ignored)
+        line_groups = 0
+        for pairs in line_pairs:
+            new = [p for p in pairs if p not in seen]
+            if not new:
+                continue                         # already present: uses no cap, not counted
+            if line_groups == SOURCE_MAX_GROUPS_PER_LINE or groups == SOURCE_MAX_GROUPS_PER_NODE:
+                capped += 1
+                continue
+            for p in new:
+                entries.append(encode_canvas_edge("", *p))
+                seen.add(p)
+            groups += 1
+            line_groups += 1
+    return entries, unparsed, capped
+
+
 def _first_nonempty_line(text: str) -> str:
     for ln in (text or "").splitlines():
         if ln.strip():
@@ -200,17 +295,18 @@ def _truncate(s: str, limit: int = 80) -> str:
     return s if len(s) <= limit else s[:limit].rstrip() + "…"
 
 
-def _describe_target(node: dict | None) -> str:
+def _describe_target(node: dict | None, subpath: bool = False) -> str:
     """Short human label for an edge's OTHER endpoint, used in the
     Connections footer. text -> first line (truncated); file -> its vault
-    path; link -> its url; group -> its label."""
+    path (plus its #subpath when `subpath`, canvas.footer_subpath); link -> its
+    url; group -> its label."""
     if not node:
         return "(missing node)"
     ntype = node.get("type")
     if ntype == "text":
         return _truncate(_first_nonempty_line(node.get("text", "")))
     if ntype == "file":
-        return node.get("file", "") or ""
+        return (node.get("file", "") or "") + ((node.get("subpath") or "") if subpath else "")
     if ntype == "link":
         return node.get("url", "") or ""
     if ntype == "group":
@@ -286,6 +382,10 @@ class CanvasLoader:
     graph context (Connections footer + edge metadata). `file`/`link`/`group`
     nodes never get their own chunk."""
 
+    # parser.skip_roots (lowercased), set by from_config: skipped unless include_path scopes
+    # the run, the md/nb/code rule. canvas.skip_roots (skip_roots below) keeps its own.
+    extra_skip_roots: frozenset = frozenset()
+
     def __init__(
         self,
         vault_path: Path,
@@ -300,6 +400,10 @@ class CanvasLoader:
         context_depth: int = 0,
         context_chars: int = 400,
         label_tags: bool = False,
+        footer_subpath: bool = False,
+        generated_markers: list[str] | None = None,
+        source_lines: bool = True,
+        provenance_rule: ProvenanceRule | None = None,
     ):
         self.vault_path = Path(vault_path)
         self.output_file = Path(output_file)
@@ -335,6 +439,19 @@ class CanvasLoader:
         # Metadata only (the label is already in both footers), so ids and text
         # never change; off = no chunk carries tags from its edge labels.
         self.label_tags = bool(label_tags)
+        # A file node's #subpath in the footer. Off = the footer every indexed
+        # canvas chunk was built with; on changes TEXT, so it re-embeds.
+        self.footer_subpath = bool(footer_subpath)
+        # A canvas whose path contains one of these (casefolded) is LLM-written:
+        # its chunks get provenance: generated. None/[] = no canvas is. Parsed by
+        # provenance.canvas_markers (a string raises), the rule provenance_of uses.
+        self.generated_markers = list(canvas_markers(generated_markers))
+        # "Source: <path> pp. a-b" lines become canvas_edge_files entries.
+        # Metadata only: text and ids never change.
+        self.source_lines = bool(source_lines)
+        # Its path rule stamps provenance: generated. None = no stamp (direct test
+        # constructions only); from_config passes provenance_rule(cfg).
+        self.provenance_rule = provenance_rule
 
         # Per-file / batch metadata overrides — metadata only, doc_ids unaffected.
         self.force_domain: str | None = None
@@ -350,6 +467,8 @@ class CanvasLoader:
             "nodes_split": 0,
             "chars_total": 0,
             "chars_context": 0,
+            "source_lines_unparsed": 0,
+            "source_entries_capped": 0,
         }
 
     @classmethod
@@ -363,7 +482,7 @@ class CanvasLoader:
                else cfg.project_root / "data" / "canvas_chunks.jsonl")
         skip_dirs = cfg.get("canvas.skip_dirs", None)
         skip_roots = cfg.get("canvas.skip_roots", None)
-        return cls(
+        loader = cls(
             vault_path=Path(vault),
             output_file=out,
             # Default 50, not the 200 the markdown/code loaders use: canvas
@@ -379,7 +498,14 @@ class CanvasLoader:
             context_depth=cfg.get("canvas.context_depth", 0),
             context_chars=cfg.get("canvas.context_chars", 400),
             label_tags=cfg.get("canvas.label_tags", False),
+            footer_subpath=cfg.get("canvas.footer_subpath", False),
+            generated_markers=cfg.get("canvas.generated_markers", CANVAS_MARKERS_DEFAULT),
+            source_lines=cfg.get("canvas.source_lines", True),
+            provenance_rule=provenance_rule(cfg),
         )
+        loader.skip_dirs |= set(cfg.get("parser.skip_dirs") or [])
+        loader.extra_skip_roots = frozenset(str(r).lower() for r in (cfg.get("parser.skip_roots") or []))
+        return loader
 
     # ---- discovery ----
 
@@ -387,7 +513,8 @@ class CanvasLoader:
         files = []
         for f in iter_canvas_files(self.vault_path, self.skip_dirs):
             rel_parts = f.relative_to(self.vault_path).parts
-            if rel_parts and rel_parts[0] in self.skip_roots:
+            if rel_parts and (rel_parts[0] in self.skip_roots or (
+                    not self.include_path and rel_parts[0].lower() in self.extra_skip_roots)):
                 self.stats["files_skipped"] += 1
                 continue
             if self.include_path and self.include_path not in \
@@ -487,6 +614,8 @@ class CanvasLoader:
             edge_labels: list[str] = []
             edges_aligned: list[str] = []
             file_refs: list[str] = []
+            edge_files: list[str] = []
+            seen_files: set[tuple[str, str]] = set()
             conn_lines: list[str] = []
             node_tags: set[str] = set()
             for e in touching:
@@ -505,13 +634,16 @@ class CanvasLoader:
                 # ONE entry per edge, labelled or not — this is the list a
                 # graph traversal can actually pair up. The two lists above
                 # are kept because the composed footer and existing indexed
-                # chunks are built from them.
+                # chunks are built from them. Its direction follows the
+                # arrowheads; the footer keeps `direction` (from/to orientation).
                 if other_id:
                     edges_aligned.append(
-                        encode_canvas_edge(other_id, direction, label))
+                        encode_canvas_edge(other_id, edge_direction(e, node_id), label))
                 if other and other.get("type") == "file" and other.get("file"):
                     file_refs.append(other["file"])
-                desc = _describe_target(other)
+                    edge_files.append(encode_canvas_edge(other_id, other["file"], other.get("subpath") or ""))
+                    seen_files.add((other["file"], other.get("subpath") or ""))
+                desc = _describe_target(other, self.footer_subpath)
                 conn_lines.append(f"  {direction} [{label}] {desc}" if label
                                   else f"  {direction} {desc}")
                 conn_lines.extend(
@@ -520,6 +652,11 @@ class CanvasLoader:
 
             header = _context_header(canvas_name, group_label)
             body = clean_text(node.get("text", "") or "")
+            if self.source_lines:
+                src, bad, over = _source_entries(body, seen_files)
+                edge_files.extend(src)
+                self.stats["source_lines_unparsed"] += bad
+                self.stats["source_entries_capped"] += over
             footer = ("\n\nConnections:\n" + "\n".join(conn_lines)
                       if conn_lines else "")
 
@@ -551,11 +688,15 @@ class CanvasLoader:
                 "canvas_edge_labels": edge_labels,
                 "canvas_edges": edges_aligned,
                 "canvas_file_refs": file_refs,
+                "canvas_edge_files": edge_files,
                 "canvas_degree": len(touching),
             }
             if group_label:
                 meta["canvas_group"] = group_label
             meta.update(course_meta)
+            if marks_generated_canvas(rel_path, self.generated_markers):
+                meta["provenance"] = "generated"
+            stamp_generated(meta, self.provenance_rule)
             if node_tags:
                 meta["tags"] = sorted(node_tags)
 
@@ -628,6 +769,14 @@ class CanvasLoader:
                          "context at context_depth=%d",
                          f"{total:,}", f"{ctx:,}", 100.0 * ctx / total,
                          self.context_depth)
+            if self.stats["source_lines_unparsed"]:
+                log.info("  %d Source: line(s) did not match 'Source: <path>.pdf|.md "
+                         "[p. N | pp. a-b, c]' and were ignored",
+                         self.stats["source_lines_unparsed"])
+            if self.stats["source_entries_capped"]:
+                log.info("  %d Source: citation group(s) over %d per line or %d per node "
+                         "were dropped", self.stats["source_entries_capped"],
+                         SOURCE_MAX_GROUPS_PER_LINE, SOURCE_MAX_GROUPS_PER_NODE)
             if self.stats["nodes_split"]:
                 log.info("  split %d oversized node(s) at max_chunk_size=%s "
                          "(chunking=%s)", self.stats["nodes_split"],

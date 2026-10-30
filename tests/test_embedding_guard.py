@@ -100,8 +100,8 @@ def _chunks(rows=ROWS):
     return [Chunk(i, t, {"source_file": "a.md"}) for i, t in rows]
 
 
-def _write_jsonl(path, rows):
-    path.write_text("".join(json.dumps({"doc_id": i, "text": t, "metadata": {"source_file": "a.md"}})
+def _write_jsonl(path, rows, source="a.md"):
+    path.write_text("".join(json.dumps({"doc_id": i, "text": t, "metadata": {"source_file": source}})
                             + "\n" for i, t in rows), encoding="utf-8")
 
 
@@ -337,7 +337,7 @@ def test_append_refuses_to_mix_two_embedders_in_one_collection(tmp_path):
     original._build_dense(_chunks())
     _write(original, "obsidian_vault")
     extra = tmp_path / "extra.jsonl"
-    _write_jsonl(extra, [("d9", "delta")])
+    _write_jsonl(extra, [("d9", "delta")], source="b.md")  # a NEW file: the embedder is the subject here
 
     with pytest.raises(EmbeddingMismatchError, match=MODEL_A):
         other.append_indexes(extra)
@@ -380,7 +380,7 @@ def test_append_into_an_unstamped_legacy_collection_proceeds_with_a_warning(tmp_
     emb = _embedder(cfg)
     emb._build_dense(_chunks())                            # the live store: vectors, no sidecar
     extra = tmp_path / "extra.jsonl"
-    _write_jsonl(extra, [("d9", "delta")])
+    _write_jsonl(extra, [("d9", "delta")], source="b.md")
 
     with caplog.at_level(logging.INFO):
         emb.append_indexes(extra)
@@ -390,6 +390,95 @@ def test_append_into_an_unstamped_legacy_collection_proceeds_with_a_warning(tmp_
     assert "'obsidian_vault' has no embedding fingerprint" in warning.getMessage()
     # Only `stamp`, after verifying, may vouch for a collection nobody fingerprinted.
     assert read_sidecar(emb.chroma_dir, "obsidian_vault") is None
+
+
+def test_append_refuses_rows_a_replace_would_remove(tmp_path):
+    """REGRESSION: appending an edited file kept its old rows beside the new ones
+    (new text means new doc_ids). The append now refuses, before anything is embedded."""
+    cfg = _cfg(tmp_path)
+    emb = _embedder(cfg)
+    emb._build_dense(_chunks())                            # d1-d3 under a.md
+    built = list(emb.backend.calls)
+    edited = tmp_path / "edited.jsonl"
+    _write_jsonl(edited, [("d9", "delta")])                # a.md again, with a row d1-d3 do not have
+
+    with pytest.raises(RuntimeError, match=r"(?s)a\.md.*REPLACE") as refused:
+        emb.append_indexes(edited)
+    assert emb.backend.calls == built                      # nothing embedded for the append
+    assert _count(emb) == 3
+    msg = str(refused.value)
+    # The refusal comes AFTER an inbox ingest has archived its PDFs, so it must not tell the
+    # operator to re-ingest: the chunks are still in this file, and the append is retried.
+    assert "Nothing was written" not in msg and "edited.jsonl" in msg and "again" in msg
+    assert '"keep_jsonls": ["edited.jsonl"]' in msg        # the delete must spare this file
+    assert "DIFFERENT document" in msg and "rename" in msg  # a same-path namesake is not deleted
+    assert "relocate" in msg                               # a rename is invisible here: it has another source
+
+    new_file = tmp_path / "new.jsonl"
+    _write_jsonl(new_file, [("d9", "delta")], source="b.md")
+    emb.append_indexes(new_file)                           # a file with nothing indexed yet still appends
+    assert _count(emb) == 4
+
+
+def test_following_the_replace_recipe_indexes_the_new_rows(management_module, tmp_path, monkeypatch):
+    """REGRESSION (review B2-1): the refusal said "delete the source, then run this append
+    again", but the console delete finds its files through the manifest, which lists the
+    incoming *_chunks.jsonl too, so it emptied that file as well: the retried append had
+    nothing for the source, and the document ended up in no store. The recipe now passes
+    keep_jsonls; this follows it through the real delete route and the real append."""
+    from src.index_ops import ReplaceRequired
+    m = management_module
+    data = tmp_path / "data"
+    data.mkdir()
+    cfg = Config({"paths": {"chunks_file": str(data / "chunks.jsonl"),
+                            "chroma_dir": str(tmp_path / "chroma_db"),
+                            "bm25_index": str(tmp_path / "bm25.pkl"), "collection_name": "obsidian_vault"},
+                  "retrieval": {"parents_file": str(data / "parents_md.jsonl")}}, tmp_path)
+    emb = _embedder(cfg)
+    _write_jsonl(cfg.path("paths.chunks_file"), ROWS)                 # a.md: d1-d3 in chunks.jsonl ...
+    emb._build_dense(_chunks())                                        # ... and in the dense index
+    incoming = data / "inbox_x_chunks.jsonl"                           # the edited re-ingest: d1 kept, d9 new
+    _write_jsonl(incoming, [("d1", "alpha"), ("d9", "delta")])
+    raw = incoming.read_bytes()
+    with pytest.raises(ReplaceRequired) as refused:
+        emb.append_indexes(incoming)
+    assert '"keep_jsonls": ["inbox_x_chunks.jsonl"]' in str(refused.value)
+    for name, value in (("CFG", cfg), ("COLLECTION", "obsidian_vault"), ("DATA_DIR", data),
+                        ("MANIFEST_CACHE", tmp_path / "manifest.json")):
+        monkeypatch.setattr(m, name, value)
+
+    r = TestClient(m.app, base_url="http://127.0.0.1").post("/api/documents/delete", json={
+        "source_files": ["a.md"], "keep_jsonls": ["inbox_x_chunks.jsonl"], "rebuild": False})
+
+    assert r.status_code == 200 and r.json()["ok"] is True, r.json()
+    assert r.json()["jsonl_removed"] == {"chunks.jsonl": 3}
+    assert incoming.read_bytes() == raw                                # the new rows survived the delete
+    assert emb.append_indexes(incoming)["appended"] == 2              # and the retried append keeps them
+    got = chromadb.PersistentClient(path=str(emb.chroma_dir)).get_collection("obsidian_vault").get(
+        where={"source_file": "a.md"}, include=[])
+    assert sorted(got["ids"]) == ["d1", "d9"]                          # the old d2, d3 are gone
+
+
+def test_index_append_turns_the_refusal_into_error_and_exit_2(tmp_path, monkeypatch, capsys):
+    """cmd_index must not let ReplaceRequired out as a traceback (or swallow it as exit 0)."""
+    import main
+    cfg = _cfg(tmp_path)
+    emb = _embedder(cfg)
+    emb._build_dense(_chunks())
+    edited = tmp_path / "edited.jsonl"
+    _write_jsonl(edited, [("d9", "delta")])
+    (tmp_path / "config.yaml").write_text("paths:\n  chunks_file: chunks.jsonl\n", encoding="utf-8")
+    monkeypatch.setattr(Embedder, "from_config", classmethod(lambda cls, c, **kw: emb))
+    args = main.build_parser().parse_args(
+        ["--config", str(tmp_path / "config.yaml"), "index", "--append", str(edited)])
+
+    with pytest.raises(SystemExit) as exc:
+        args.func(args)
+
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "ERROR: index --append refused" in err and "a.md" in err     # (stderr also carries log lines)
+    assert _count(emb) == 3
 
 
 def test_a_full_rebuild_replaces_a_stale_sidecar(tmp_path):

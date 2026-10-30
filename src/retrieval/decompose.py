@@ -62,13 +62,19 @@ def parse_subqueries(text: str, question: str, max_subqueries: int) -> list[str]
 def merge_branches(rankings: list[list[RetrievedDoc]], rrf_k: int) -> list[RetrievedDoc]:
     """One list from several best-first branch rankings, by summed reciprocal
     rank. The first ranking is the original question's: on a tie its chunks
-    come first, because the sort is stable over first-seen order."""
+    come first, because the sort is stable over first-seen order. Each chunk is
+    its first-seen doc, with the later branches' found_via (the maps that routed
+    it) unioned on by router id, first seen first."""
     score: dict[str, float] = {}
     first: dict[str, RetrievedDoc] = {}
     for ranking in rankings:
         for rank, d in enumerate(ranking, 1):
             score[d.id] = score.get(d.id, 0.0) + 1.0 / (rrf_k + rank)
-            first.setdefault(d.id, d)
+            kept = first.setdefault(d.id, d)
+            if kept is not d and d.debug.get("found_via"):
+                via = kept.debug.get("found_via") or []
+                seen = {f["id"] for f in via}
+                kept.debug["found_via"] = via + [f for f in d.debug["found_via"] if f["id"] not in seen]
     return sorted(first.values(), key=lambda d: -score[d.id])
 
 

@@ -63,6 +63,7 @@ from src.ingestion.obsidian_parser import (
 from src.ingestion.pdf_loader import detect_script, should_skip_script
 from src.utils.config_loader import Config
 from src.utils.logger import get_logger
+from src.utils.provenance import ProvenanceRule, provenance_rule, stamp_generated
 
 log = get_logger(__name__)
 
@@ -196,6 +197,8 @@ class CodeChunk:
 
 
 class CodeLoader:
+    extra_skip_dirs: frozenset = frozenset()   # parser.skip_dirs, set by from_config
+
     def __init__(
         self,
         vault_path: Path,
@@ -210,6 +213,7 @@ class CodeLoader:
         exclude_path: str | None = None,
         skip_roots: set[str] | None = None,
         max_file_bytes: int = 1_500_000,
+        provenance_rule: ProvenanceRule | None = None,
     ):
         self.vault_path = Path(vault_path)
         self.output_file = Path(output_file)
@@ -232,6 +236,9 @@ class CodeLoader:
         # stamp every chunk this run — metadata only, doc_ids unaffected.
         self.force_domain: str | None = None
         self.force_tags: list[str] = []
+        # Its path rule stamps provenance: generated. None = no stamp (direct test
+        # constructions only); from_config passes provenance_rule(cfg).
+        self.provenance_rule = provenance_rule
 
         self.include_files: set[str] | None = None
 
@@ -262,7 +269,7 @@ class CodeLoader:
                         **{str(k).lower(): str(v) for k, v in lang_override.items()}}
         exts = cfg.get("code.extensions", None)
         skip_roots = cfg.get("code.skip_roots", None)
-        return cls(
+        loader = cls(
             vault_path=Path(vault),
             output_file=out,
             min_chunk=cfg.get("code.min_chunk_size", cfg.get("parser.min_chunk_size", 200)),
@@ -275,7 +282,14 @@ class CodeLoader:
             exclude_path=cfg.get("code.exclude_path"),
             skip_roots={str(r).lower() for r in skip_roots} if skip_roots is not None else None,
             max_file_bytes=cfg.get("code.max_file_bytes", 1_500_000),
+            provenance_rule=provenance_rule(cfg),
         )
+        loader.extra_skip_dirs = frozenset(cfg.get("parser.skip_dirs") or [])
+        # code.skip_roots: null = the built-in roots PLUS parser.skip_roots; an
+        # explicit list (even []) is the whole answer, as documented.
+        if skip_roots is None:
+            loader.skip_roots |= {str(r).lower() for r in (cfg.get("parser.skip_roots") or [])}
+        return loader
 
     # ---- discovery ----
 
@@ -288,7 +302,8 @@ class CodeLoader:
         # filter and the is_file() guard against directories named like files
         # (this vault has a real "PSS2_Solutions.sql/" folder) all collapse
         # into the call.
-        for f in iter_vault_files(self.vault_path, self.exts, _SKIP_DIRS):
+        for f in iter_vault_files(self.vault_path, self.exts,
+                                  _SKIP_DIRS | self.extra_skip_dirs):
             rel = f.relative_to(self.vault_path)
             rel_posix = rel.as_posix().lower()
             # include_files: exact-filename scope for file-scoped custom jobs
@@ -394,6 +409,7 @@ class CodeLoader:
             "heading_path": title,
             "has_code": True,
         }
+        stamp_generated(base_meta, self.provenance_rule)
         context = build_context_header([title], base_meta)
 
         sub_chunks: list[str] = []
@@ -488,6 +504,7 @@ class CodeLoader:
 def main():
     import argparse
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from src.utils import lane_guard
     from src.utils.config_loader import load_config
 
     ap = argparse.ArgumentParser(description="Ingest raw source-code files into RAG chunks.")
@@ -503,6 +520,9 @@ def main():
     args = ap.parse_args()
 
     cfg = load_config(args.config)
+    lane_guard.exit_if_refused(
+        cfg, "code", args.output,
+        scoped=any((args.include_path, args.exclude_path, args.exts)))
     loader = CodeLoader.from_config(cfg)
     if args.vault:
         loader.vault_path = Path(args.vault)

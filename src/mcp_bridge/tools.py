@@ -1,4 +1,4 @@
-"""The tool surface: thirteen named tools and three tier dispatchers.
+"""The tool surface: the named tools and three tier dispatchers.
 
 A tool's tier decides its MCP annotations, and every mutating or destructive
 tool also carries PROMPT_META, because Claude Code ignores the annotations
@@ -30,16 +30,34 @@ JOB = "noetrix_job"
 JOB_GET = "GET /api/jobs/{jid}"
 JOBS_POST = "POST /api/jobs"
 _LOG_PARAMS = {"offset", "tail", "wait"}
+# route-then-cite §5.6: true in every mode, because /health reports the mode and every
+# returned source carries its provenance.
+_PROVENANCE = ("Each source says its provenance (authored, source or generated). Unless "
+               "noetrix_health shows generated_mode off, the server keeps generated chunks (maps, "
+               "summaries, agent files) out of the evidence; under off, cite only authored or source. "
+               "`found_via` names the map that found a source; cite the source, not the map.")
 
 NAMED: tuple[NamedTool, ...] = (
     NamedTool(HEALTH, "", False,
               "Call it first when a tool is missing or a call cannot connect."),
+    NamedTool("noetrix_outline", "GET /outline", False,
+              "Start here when you do not know the vault: the sources by course, with chapters; "
+              "maps are listed apart and are not evidence."),
     NamedTool(SEARCH, "POST /search", True,
               "Default to this one: reranked chunks with labels, text and stable ids, no generated "
-              "answer. Escalate to noetrix_query only for a cited write-up."),
+              "answer. Escalate to noetrix_query only for a cited write-up. " + _PROVENANCE),
+    NamedTool("noetrix_evidence_pack", "POST /evidence_pack", True,
+              "One call for a multi-part question: 2-4 sub_questions in, evidence with provenance, "
+              "coverage and gaps out. graph=true walks the vault's graphs (graph mode must be on). "
+              "Verify ids with noetrix_get_chunk. " + _PROVENANCE),
+    NamedTool("noetrix_graph_expand", "POST /graph/expand", False,
+              "Walk the canvas graphs from a query or chunk ids, with no LLM. bridges / cross_canvas / "
+              "wikilinks widen the walk; edge_types + direction type it; paths say how each node was reached. "
+              "Experimental: a 503 names the switch."),
     NamedTool("noetrix_query", "POST /query", True,
               "A generated, cited answer: it spends a generation call, so use it for a deliverable, "
-              "not to explore. confidence ERROR comes back as an error that keeps the sources."),
+              "not to explore. confidence ERROR comes back as an error that keeps the sources. "
+              + _PROVENANCE),
     NamedTool("noetrix_compare", "POST /compare", True,
               "Take ready-made branches from noetrix_compare_options."),
     NamedTool("noetrix_compare_options", "GET /compare/options", False,

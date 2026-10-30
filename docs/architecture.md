@@ -1,8 +1,8 @@
 # Architecture
 
 Every stage below is configured from `config.yaml` and can be swapped, tuned, or
-turned off. Solid paths are always on; the dotted paths (HyDE, the scope lanes)
-are off by default; the code lane opens only when a query calls for it.
+turned off. Solid paths are always on; the dotted paths (HyDE, the scope lanes,
+the routed lane) are off by default; the code lane opens only when a query calls for it.
 
 ## The query path
 
@@ -18,10 +18,13 @@ flowchart TD
     HY --> S["Sparse · bm25s"]
     HY -.-> SL["Scope lanes<br/>domain / path / file-type filters"]
     HY --> CL["Code lane<br/>.ipynb / .py / .R / .sql / …"]
-    D --> RRF["Reciprocal Rank Fusion (k=60)<br/>+ optional metadata boosts"]
-    S --> RRF
-    SL -.-> RRF
-    CL --> RRF
+    HY -.-> RT["Routed lane · generated_mode route<br/>primary pages a generated hit cites"]
+    D --> GF["Generated filter · inside every lane<br/>drop or route: generated chunks stay out"]
+    S --> GF
+    SL -.-> GF
+    CL --> GF
+    GF --> RRF["Reciprocal Rank Fusion (k=60)<br/>+ optional metadata boosts"]
+    RT -.-> RRF
     RRF --> RR["Configured rerank policy<br/>cross-encoder / HTTP / lexical / none<br/>(experimental: Laya)"]
     RR --> GT["Optional relevance gate<br/>drops weak chunks · abstains if none pass"]
     GT --> EX["Optional small-to-big<br/>context expansion"]
@@ -75,6 +78,19 @@ label — `taxonomy.label`, which defaults to `course` but is just as happily
     Each lane's term can be scaled — `w_ℓ / (k + r)` — with `retrieval.lane_weights`, per
     preset or per call. Every weight defaults to `1.0`, so an untouched config is plain
     RRF. See [Lane weights](api.md#lane-weights).
+
+!!! info "Generated content never grounds an answer"
+    Chunks an LLM wrote (knowledge maps, summaries, agent-instruction files) are
+    kept out of every lane by `retrieval.generated_mode`, whose shipped default is
+    `drop`: the dense lanes over-fetch and check each row's stored `provenance`, the
+    sparse lanes remove those rows before the top-k cut so each lane refills. Under `route` one more lane runs: it
+    searches the generated rows, reads the pointer sidecar
+    (`retrieval.route.pointers_file`) for the primary pages each hit cites, and
+    brings those pages into the pool as ordinary candidates. They fuse (the `routed`
+    lane weight) and rerank like any other, and each carries `found_via`. Route needs
+    `retrieval.sparse_backend: bm25s`. A call can also restrict every lane to one
+    file's primary chunks, or a page range of it, with `source_file` and `pages`. See
+    [Route mode](api.md#route-mode).
 
 ## Scope routing
 

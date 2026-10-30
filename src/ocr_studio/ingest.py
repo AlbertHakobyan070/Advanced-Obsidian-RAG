@@ -34,6 +34,7 @@ def build_chunks(cfg, vault: Path, rel: str, pages: str = "done",
     """(chunks, info) for one document from its saved studio pages. Writes nothing."""
     import pymupdf
     from src.ingestion.pdf_loader import PDFLoader
+    from src.utils.provenance import provenance_rule
 
     if pages not in PAGE_SETS:
         raise ValueError(f"pages must be one of {PAGE_SETS}")
@@ -53,6 +54,7 @@ def build_chunks(cfg, vault: Path, rel: str, pages: str = "done",
         max_chunk=cfg.get("pdf.max_chunk_size", cfg.get("parser.max_chunk_size", 3000)),
         overlap=cfg.get("pdf.overlap_size", cfg.get("parser.overlap_size", 150)),
         ocr_enabled=False,
+        provenance_rule=provenance_rule(cfg),
     )
     loader.chunking = str(cfg.get("pdf.chunking", cfg.get("parser.chunking", "heading"))).lower()
 
@@ -83,6 +85,27 @@ def build_chunks(cfg, vault: Path, rel: str, pages: str = "done",
 
 
 def write_chunks(chunks: list, out: Path) -> Path:
+    """Replace `out` with these chunks. Each document has its own file (output_name), so a
+    file that already holds ANOTHER document's rows is refused: replacing it would drop them
+    from the sparse index while the dense one keeps them. This document's own rows, an empty
+    file (a delete leaves one) and no file at all are fine."""
+    out = Path(out)
+    ours = {c.metadata.get("source_file") for c in chunks}
+    if out.exists():
+        with open(out, "rb") as f:
+            for n, raw in enumerate(f, 1):
+                if not raw.strip():
+                    continue
+                try:
+                    sf = json.loads(raw)["metadata"]["source_file"]
+                except (ValueError, KeyError, TypeError) as e:
+                    raise ValueError(f"{out.name} line {n} is not a chunk row ({type(e).__name__}); "
+                                     f"it is not this document's file: delete {out} if it is stale") from e
+                if sf not in ours:
+                    raise ValueError(
+                        f"{out.name} holds rows of {sf!r}, not of {', '.join(sorted(map(str, ours)))}: "
+                        f"writing it would drop them from the sparse index. Each document has its "
+                        f"own file (output_name); use that one, or delete {out} if it is stale")
     data = "".join(json.dumps(c.to_dict(), ensure_ascii=False) + "\n" for c in chunks)
-    atomic_write(Path(out), data.encode("utf-8"))
-    return Path(out)
+    atomic_write(out, data.encode("utf-8"))
+    return out

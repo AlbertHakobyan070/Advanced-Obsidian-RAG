@@ -15,6 +15,8 @@ Endpoints (agent-facing; GET /schema returns this list machine-readably):
     GET  /config       -> live retrieval/generation defaults and provenance
     GET  /providers    -> configured generation backends and key readiness
     GET  /stats        -> corpus size, per-domain / per-file-type breakdown
+    GET  /outline      -> what the vault holds: sources by domain/course, maps apart
+    GET  /outline/{source} -> one file's chapters, or a map's concepts and their pages
     GET  /history      -> recent calls and effective retrieval settings
     GET  /chunks/{id}  -> fetch one stable evidence id when lookup is available
     GET  /omnisearch   -> raw LIVE-vault results (Obsidian passthrough)
@@ -22,6 +24,7 @@ Endpoints (agent-facing; GET /schema returns this list machine-readably):
     POST /query        -> full RAG (retrieve + grounded, cited generation)
     POST /graph/expand -> Graph RAG: walk canvas edges, no LLM (mode c)
     POST /answer       -> generate over a CALLER-SUPPLIED doc set (modes a + b)
+    POST /evidence_pack -> search (+ optional walk) per sub-question, no LLM
     POST /compare      -> bounded query tree across retrieval/provider branches
     GET  /compare/options -> ready-to-post branch sets for /compare
     POST /config       -> live-update retrieval defaults
@@ -69,7 +72,7 @@ import traceback
 from collections import Counter, deque
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Iterator, Literal
+from typing import Annotated, Any, Iterator, Literal
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException
@@ -79,10 +82,14 @@ from pydantic import BaseModel, Field
 from src.generation.generator import Generator
 from src.llm.llm_client import LLMClient
 from src.pipeline import RAGPipeline
+from src.retrieval.evidence_pack import build_evidence_pack
+from src.retrieval.outline import source_outline
 from src.retrieval.retriever import LANES, RetrievedDoc
 from src.retrieval.reranker import RERANK_MODES, RerankerExecutionError
 from src.utils.config_loader import Config, load_config, persist_config_values
 from src.utils.http_guard import GuardSettings, guard_settings, install_guard
+from src.utils.provenance import (PROVENANCE, RouteUnavailableError, UnstampedProvenanceError,
+                                   provenance_of)
 from src.utils.branding import QUERY_API_TITLE, QUERY_SERVICE
 from src.utils.release import PRODUCT_VERSION, git_head
 from src.utils.logger import get_logger
@@ -236,16 +243,16 @@ class QueryIn(BaseModel):
     rerank_instruction: str | None = Field(default=None, max_length=2000)
     # Per-lane RRF fusion weights, e.g. {"sparse": 1.5, "hype": 0.5}. Merged
     # over the configured retrieval.lane_weights and over the preset's, lane
-    # by lane — so setting one lane leaves the other seven where they were.
+    # by lane — so setting one lane leaves the other eight where they were.
     # Every lane defaults to 1.0. A weight of 0 keeps the lane's candidates in
     # the pool for the reranker but drops its contribution to the fused order.
     # Lanes: dense, sparse, dense_code, sparse_code, dense_scope, sparse_scope,
-    # omnisearch, hype. An unknown lane name is an error, not a no-op.
+    # omnisearch, hype, routed. An unknown lane name is an error, not a no-op.
     lane_weights: dict[str, float] | None = None
     # Restrict this call to these lanes (see retrieve()): lanes outside the
     # list are not run at all. Restricts only — a conditional lane (code,
-    # scope, omnisearch, hype) still needs its own trigger. Unknown or empty
-    # is an error.
+    # scope, omnisearch, hype, routed) still needs its own trigger. Unknown or
+    # empty is an error.
     lanes: list[str] | None = None
     # Force the course/domain/tag metadata boost on or off for this call.
     metadata_boost: bool | None = None
@@ -276,6 +283,18 @@ class QueryIn(BaseModel):
     # are in the scorer's units); sent alone it turns the gate on. An unknown
     # name is an error, not a no-op.
     gate_scorer: str | None = None
+    # What generated chunks do in this call's retrieval (spec §5.1): drop or
+    # route. off is config-only (retrieval.generated_mode), so a per-call off
+    # is a 422 and no caller can bring generated text back as evidence. route
+    # is a 409 while the store holds generated rows and no route pointer
+    # sidecar is loaded. Unset = the configured mode.
+    generated_mode: Literal["drop", "route"] | None = None
+    # Restrict every lane to one file's primary chunks (any stored spelling of its
+    # path; GET /outline lists the sources), and with pages = [first, last] to those
+    # overlapping them. pages needs source_file. The echo's file_filter says whether
+    # the store holds anything there (matched).
+    source_file: str | None = None
+    pages: list[int] | None = Field(None, min_length=2, max_length=2)
     # true = skip generation entirely; the response carries the reranked chunks
     # (with labels + text) and confidence "RETRIEVE_ONLY". No LLM involved, so
     # this works even when the generation proxy is down — the calling agent can
@@ -323,16 +342,16 @@ class SearchIn(BaseModel):
     rerank_instruction: str | None = Field(default=None, max_length=2000)
     # Per-lane RRF fusion weights, e.g. {"sparse": 1.5, "hype": 0.5}. Merged
     # over the configured retrieval.lane_weights and over the preset's, lane
-    # by lane — so setting one lane leaves the other seven where they were.
+    # by lane — so setting one lane leaves the other eight where they were.
     # Every lane defaults to 1.0. A weight of 0 keeps the lane's candidates in
     # the pool for the reranker but drops its contribution to the fused order.
     # Lanes: dense, sparse, dense_code, sparse_code, dense_scope, sparse_scope,
-    # omnisearch, hype. An unknown lane name is an error, not a no-op.
+    # omnisearch, hype, routed. An unknown lane name is an error, not a no-op.
     lane_weights: dict[str, float] | None = None
     # Restrict this call to these lanes (see retrieve()): lanes outside the
     # list are not run at all. Restricts only — a conditional lane (code,
-    # scope, omnisearch, hype) still needs its own trigger. Unknown or empty
-    # is an error.
+    # scope, omnisearch, hype, routed) still needs its own trigger. Unknown or
+    # empty is an error.
     lanes: list[str] | None = None
     # Force the course/domain/tag metadata boost on or off for this call.
     metadata_boost: bool | None = None
@@ -355,6 +374,11 @@ class SearchIn(BaseModel):
     gate_threshold: float | None = Field(default=None, allow_inf_nan=False)
     # The gate's scorer for this call (rerank_score | laya), as on /query.
     gate_scorer: str | None = None
+    # drop or route, as on /query: off is config-only, so a per-call off is a 422.
+    generated_mode: Literal["drop", "route"] | None = None
+    # One file's primary chunks, optionally within pages = [first, last], as on /query.
+    source_file: str | None = None
+    pages: list[int] | None = Field(None, min_length=2, max_length=2)
     include_text: int = Field(default=1200, ge=0, le=6000)
     max_sources: int | None = Field(default=None, ge=1)
 
@@ -362,6 +386,11 @@ class SearchIn(BaseModel):
 class CitationOut(BaseModel):
     n: int
     label: str
+
+
+class FoundViaOut(BaseModel):
+    id: str          # the generated chunk (a map) that routed this source
+    label: str       # that map's file label
 
 
 class SourceOut(BaseModel):
@@ -381,6 +410,12 @@ class SourceOut(BaseModel):
     live: bool = False            # came from the live-vault (Omnisearch) lane
     score: float | None = None    # fused / rerank score, for agent triage
     text: str | None = None       # present when include_text > 0
+    # authored | source | generated, by the one rule (src/utils/provenance.py).
+    # None only for a doc no pipeline path stamped.
+    provenance: str | None = None
+    # Under generated_mode route: the maps whose cites brought this source into
+    # the pool (spec §5.4). [] for every other source.
+    found_via: list[FoundViaOut] = []
 
 
 class QueryOut(BaseModel):
@@ -424,6 +459,13 @@ class CompareBranchIn(BaseModel):
     gate: bool | None = None
     gate_threshold: float | None = Field(default=None, allow_inf_nan=False)
     gate_scorer: str | None = None
+    # drop or route, as on /query. Part of the retrieval key, so branches that
+    # differ only by mode do not share one evidence set.
+    generated_mode: Literal["drop", "route"] | None = None
+    # One file's primary chunks, optionally within pages, as on /query. Part of the
+    # retrieval key.
+    source_file: str | None = None
+    pages: list[int] | None = Field(None, min_length=2, max_length=2)
     provider: str | None = None
     model: str | None = None
 
@@ -448,7 +490,17 @@ class CompareIn(BaseModel):
     max_tokens: int | None = Field(default=None, ge=64, le=8192)
 
 
-class GraphExpandIn(BaseModel):
+class _NavigatorWalk(BaseModel):
+    """The Navigator walk switches, shared by /graph/expand and /evidence_pack."""
+    bridges: bool | None = None                 # None = graph.bridges
+    cross_canvas: bool | None = None            # None = graph.cross_canvas
+    wikilinks: bool | None = None               # None = graph.wikilinks
+    direction: Literal["both", "up", "down"] | None = None              # None = graph.direction
+    # None = graph.edge_types; a blank label is a 422 here, before any seeding
+    edge_types: list[Annotated[str, Field(pattern=r"\S")]] | None = Field(default=None, min_length=1, max_length=20)
+
+
+class GraphExpandIn(_NavigatorWalk):
     """Graph RAG traversal. This is human-in-the-loop option (c): retrieval
     with NO generation at all."""
     # Exactly one of q / seeds. Supplying both is a 400, not a silent
@@ -478,6 +530,19 @@ class AnswerIn(BaseModel):
     max_tokens: int | None = Field(default=None, ge=64, le=8192)
     include_text: int | None = Field(default=None, ge=0, le=6000)
     max_sources: int | None = Field(default=None, ge=1)
+
+
+class EvidencePackIn(SearchIn, _NavigatorWalk):
+    """One call for a multi-part question: the retrieval body (q is the question),
+    plus sub-questions and an optional graph walk. No LLM runs."""
+    sub_questions: list[str] | None = Field(default=None, min_length=1)   # None = q alone
+    graph: bool = False                         # true = walk too; needs graph.enabled
+    min_score: float | None = Field(default=None, allow_inf_nan=False)    # None = evidence_pack.min_score
+    include_text: int | None = Field(default=None, ge=0, le=6000)         # None = evidence_pack.include_text
+    depth: int | None = Field(default=None, ge=0, le=5)
+    max_per_hop: int | None = Field(default=None, ge=1, le=50)
+    max_total: int | None = Field(default=None, ge=1, le=500)
+    seed_top_k: int | None = Field(default=None, ge=1, le=50)
 
 
 class ConfigIn(BaseModel):
@@ -570,6 +635,8 @@ def _sources_out(
                 live=live,
                 score=_doc_score(doc),
                 text=text,
+                provenance=(getattr(doc, "debug", {}) or {}).get("provenance"),
+                found_via=(getattr(doc, "debug", {}) or {}).get("found_via") or [],
             )
         )
     return out
@@ -584,7 +651,11 @@ _RETRIEVAL_FIELDS = (
     "hyde", "omnisearch", "parent_context", "neighbor_context", "hype",
     "rerank", "rerank_instruction", "lane_weights", "lanes", "metadata_boost",
     "scope_lanes", "gate", "gate_threshold", "gate_scorer", "max_per_file", "decompose",
+    "generated_mode", "source_file", "pages",
 )
+# The walk knobs /evidence_pack hands RAGPipeline.graph_search (its WALK_KEYS).
+_WALK_FIELDS = ("depth", "max_per_hop", "max_total", "seed_top_k", "bridges",
+                "cross_canvas", "wikilinks", "direction", "edge_types")
 
 
 def _retrieval_kwargs(body: BaseModel) -> dict[str, Any]:
@@ -669,6 +740,16 @@ def _generation_out(generator: Generator, usage: dict | None = None) -> dict[str
         "model": llm.model,
         "usage": usage,
     }
+
+
+def _put_confidence_note(generation: dict[str, Any], ans: Any) -> None:
+    """Say why `confidence` is lower than the model's own level, when
+    provenance.generated_only_confidence capped it. Absent otherwise, so a
+    response is unchanged while the cap is off. getattr: the answer is
+    duck-typed here, and a stand-in without the field has nothing to say."""
+    note = getattr(ans, "confidence_note", None)
+    if note:
+        generation["confidence_note"] = note
 
 
 def _comparison_summary(branches: list[dict[str, Any]]) -> dict[str, Any]:
@@ -798,11 +879,25 @@ def health() -> dict:
         "version": PRODUCT_VERSION,
         "commit": _STARTED_COMMIT,
     }
+    if ready:
+        # retrieval.generated_mode as the pipeline resolved it (spec §5.1).
+        out["generated_mode"] = getattr(_STATE.get("rag"), "generated_mode", None)
+        # Generated ids in the store vs in the route sidecar (spec §5.4):
+        # {generated_rows, with_pointers, sidecar}; None = not computed.
+        out["route"] = getattr(_STATE.get("rag"), "route_coverage", None)
     if err:
         out["error"] = err
-        out["hint"] = ("the pipeline could not be built with the current "
-                       "config — check the model ids and index paths that "
-                       "were changed most recently")
+        if err.startswith(f"{UnstampedProvenanceError.__name__}:"):   # boot_error's own format
+            out["hint"] = ("stored rows are not stamped with the provenance the rule "
+                           "gives them: read the error field for the "
+                           "stamp-provenance fix")
+        elif err.startswith(f"{RouteUnavailableError.__name__}:"):
+            out["hint"] = ("build the route sidecar: python main.py route-pointers, or "
+                           "the route_pointers job, then restart :8051")
+        else:
+            out["hint"] = ("the pipeline could not be built with the current "
+                           "config — check the model ids and index paths that "
+                           "were changed most recently")
     return out
 
 
@@ -859,6 +954,8 @@ def query(body: QueryIn) -> QueryOut:
         except RerankerExecutionError as e:
             return QueryOut(answer=f"Reranking failed: {e}",
                             confidence="ERROR", citations=[], sources=[])
+        except RouteUnavailableError as e:
+            raise HTTPException(status_code=409, detail={"error": str(e)}) from e
         except Exception as e:
             return QueryOut(
                 answer=f"Retrieval failed ({type(e).__name__}: {e})",
@@ -896,6 +993,8 @@ def query(body: QueryIn) -> QueryOut:
             citations=[],
             sources=[],
         )
+    except RouteUnavailableError as e:
+        raise HTTPException(status_code=409, detail={"error": str(e)}) from e
     except Exception as e:
         return QueryOut(
             answer=f"Retrieval failed ({type(e).__name__}: {e})",
@@ -963,6 +1062,7 @@ def query(body: QueryIn) -> QueryOut:
     # are in retrieval["timings"].
     generation = _generation_out(generator, ans.usage)
     generation["timings"] = ans.timings or {}
+    _put_confidence_note(generation, ans)
     return QueryOut(
         answer=ans.text,
         confidence=ans.confidence,
@@ -991,6 +1091,8 @@ def search(body: SearchIn) -> dict:
     except RerankerExecutionError as e:
         return {"error": f"Reranking failed: {e}",
                 "results": [], "retrieval": {}}
+    except RouteUnavailableError as e:
+        raise HTTPException(status_code=409, detail={"error": str(e)}) from e
     except Exception as e:
         return {"error": f"Retrieval failed ({type(e).__name__}: {e})",
                 "results": [], "retrieval": {}}
@@ -1075,7 +1177,13 @@ def graph_expand(body: GraphExpandIn) -> dict:
     try:
         result = graph.expand(seeds, depth=body.depth,
                               max_per_hop=body.max_per_hop,
-                              max_total=body.max_total)
+                              max_total=body.max_total,
+                              bridges=body.bridges, cross_canvas=body.cross_canvas,
+                              wikilinks=body.wikilinks, direction=body.direction,
+                              edge_types=body.edge_types)
+        # The map view only (graph_search walks never pay for it): each generated
+        # node's routed_ids, which the console sends /answer in its place.
+        graph.attach_routed_ids(result["nodes"])
     except Exception as e:
         return {"error": f"Traversal failed ({type(e).__name__}: {e})",
                 "nodes": [], "tree": []}
@@ -1095,6 +1203,12 @@ def graph_expand(body: GraphExpandIn) -> dict:
             "some chunks predate the aligned canvas_edges metadata, so their "
             "edges came back UNLABELLED (direction '--'). Re-run "
             "`main.py ingest-canvas` and append to restore labels.")
+    unbridged = result["stats"].get("bridges_unavailable")
+    if unbridged:
+        msg = (f"{unbridged} canvas chunk(s) predate canvas_edge_files, so their file nodes "
+               "were not bridged: run canvas_refresh.py, then rebuild_bm25.py, then restart "
+               "this API")
+        result["note"] = f"{result['note']} {msg}" if result.get("note") else msg
     return result
 
 
@@ -1139,6 +1253,22 @@ def answer(body: AnswerIn) -> QueryOut:
                     "unknown": missing})
     docs = [RetrievedDoc(id=i, text=by_id[i][0] or "", metadata=by_id[i][1] or {})
             for i in ids]
+    for d in docs:
+        d.debug["provenance"] = provenance_of(d.metadata, rag.provenance_map)
+    if rag.generated_mode != "off":
+        # Spec §5.5: these ids skip retrieval, so the mode is applied here. Refused,
+        # never dropped: an answer over fewer documents is a different answer.
+        generated = [d.id for d in docs if d.debug["provenance"] == "generated"]
+        if generated:
+            detail = {"error": "generated chunks are maps, not evidence: answer "
+                               "from the primary pages they cite",
+                      "ids": generated}
+            rp = rag.retriever.route_pointers
+            if rp is not None:      # each id's targets the store can serve; none: the id is left out
+                detail["routes_to"] = {
+                    g: t for g in generated
+                    if (t := [x for x in rp.targets(g) or [] if rag.retriever.servable(x)])}
+            raise HTTPException(status_code=400, detail=detail)
     # Built BEFORE generation so a generation failure still reports what
     # grounded the attempt — an error payload with an empty echo reads as if
     # nothing was chosen, when in fact the caller chose everything.
@@ -1174,6 +1304,8 @@ def answer(body: AnswerIn) -> QueryOut:
 
     ans.retrieval = info
     _record_history("/answer", body, info, ans.confidence, len(ans.sources), t0)
+    generation = _generation_out(generator, ans.usage)
+    _put_confidence_note(generation, ans)
     return QueryOut(
         answer=ans.text,
         confidence=ans.confidence,
@@ -1182,8 +1314,51 @@ def answer(body: AnswerIn) -> QueryOut:
         sources=_sources_out(ans.sources, ans.citations,
                              body.include_text or 0, body.max_sources),
         retrieval=info,
-        generation=_generation_out(generator, ans.usage),
+        generation=generation,
     )
+
+
+@app.post("/evidence_pack")
+def evidence_pack(body: EvidencePackIn) -> dict:
+    """
+    One call for a multi-part question: a search (plus, with graph=true, a graph
+    walk) per sub-question, merged into one evidence list with provenance,
+    coverage and gaps. NO LLM: the calling agent does the reasoning. Indexed
+    evidence only, so every id is checkable with GET /chunks/{id}.
+    """
+    rag = _rag()
+    t0 = time.perf_counter()
+    if body.max_sources is not None:
+        raise HTTPException(
+            status_code=400,
+            detail="max_sources does not apply to an evidence pack: top_k is per "
+                   "sub-question, so send top_k instead")
+    if body.graph:
+        _graph()            # the 503 naming graph.enabled, never a graph-less pack
+    cfg = _STATE["cfg"]
+    kw = _retrieval_kwargs(body)
+    kw["top_k"] = body.top_k or cfg.get("evidence_pack.top_k", 5)
+    walk = {k: getattr(body, k) for k in _WALK_FIELDS} if body.graph else None
+    try:
+        pack = build_evidence_pack(
+            rag, question=body.q, sub_questions=body.sub_questions, search_kwargs=kw,
+            graph=walk, top_k=kw["top_k"],
+            min_score=(body.min_score if body.min_score is not None
+                       else cfg.get("evidence_pack.min_score")),
+            include_text=(body.include_text if body.include_text is not None
+                          else cfg.get("evidence_pack.include_text", 600)),
+            max_sub_questions=int(cfg.get("evidence_pack.max_sub_questions", 4)))
+    except (KeyError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=e.args[0]) from e
+    except RerankerExecutionError as e:
+        return {"error": f"Reranking failed: {e}", "evidence": [], "retrieval": []}
+    except RouteUnavailableError as e:
+        raise HTTPException(status_code=409, detail={"error": str(e)}) from e
+    except Exception as e:
+        return {"error": f"Evidence pack failed ({type(e).__name__}: {e})",
+                "evidence": [], "retrieval": []}
+    pack["ms"] = int((time.perf_counter() - t0) * 1000)
+    return pack
 
 
 @app.get("/providers")
@@ -1314,6 +1489,9 @@ def compare(body: CompareIn) -> dict:
             row["retrieval_error"] = True
             out.append(row)
             continue
+        except RouteUnavailableError as e:
+            # Not a branch result: this server cannot route, so the whole request is a 409.
+            raise HTTPException(status_code=409, detail={"error": str(e)}) from e
         except Exception as e:
             row["error"] = f"Retrieval failed ({type(e).__name__}: {e})"
             row["retrieval_error"] = True
@@ -1362,6 +1540,7 @@ def compare(body: CompareIn) -> dict:
                             body.max_sources)
                     ]
                     row["generation"] = _generation_out(generator, answer.usage)
+                    _put_confidence_note(row["generation"], answer)
                 except Exception as e:
                     row["confidence"] = "ERROR"
                     row["generation"] = {
@@ -1581,6 +1760,49 @@ def stats() -> dict:
     return {**out, "latency": _latency()}
 
 
+# GET /outline's page size and its clamp, as GET /api/documents pages. Declared once so
+# /schema publishes the numbers the route applies.
+_OUTLINE_LIMIT, _OUTLINE_MAX = 50, 500
+
+
+@app.get("/outline")
+def outline(limit: int = _OUTLINE_LIMIT, offset: int = 0, domain: str = "", course: str = "") -> dict:
+    """What the vault holds, for an agent that does not know it (route-then-cite §5.7):
+    the primary sources by domain and course, paged over sources, and the generated
+    maps whole and apart. Built when this API started (RAGPipeline.outline)."""
+    out = _rag().outline
+    limit, offset = max(1, min(limit, _OUTLINE_MAX)), max(0, offset)
+    rows = [(g["domain"], g["course"], s) for g in out["groups"] for s in g["sources"]
+            if (not domain or g["domain"] == domain)
+            and (not course or course.lower() in g["course"].lower())]
+    groups: list[dict] = []
+    for dom, crs, s in rows[offset:offset + limit]:     # the page's groups, rebuilt
+        if not groups or (groups[-1]["domain"], groups[-1]["course"]) != (dom, crs):
+            groups.append({"domain": dom, "course": crs, "sources": []})
+        groups[-1]["sources"].append(s)
+    return {"total": len(rows), "groups": groups, "maps": out["maps"]}
+
+
+@app.get("/outline/{source:path}")
+def outline_source(source: str) -> dict:
+    """One file's outline: a source's chapters with page ranges, or a map's concepts with
+    the primary pages each cites. 404 for a file the index does not hold and for an
+    agent-instruction file; 503, as /chunks answers for its store, while no bm25 index
+    is built."""
+    rag = _rag()
+    try:
+        payload = rag.retriever._get_bm25()
+    except FileNotFoundError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"BM25 payload unavailable ({type(e).__name__}: {e}): nothing is indexed "
+                   "yet, so no file has an outline. Index the vault, then restart :8051") from e
+    try:
+        return source_outline(payload, source, rag.provenance_map, rag.retriever.route_pointers)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=e.args[0]) from e
+
+
 # The tier of every route above, as GET /schema reports it under `permissions`.
 # Keys are "METHOD /path" exactly as the routes are declared (the `endpoints` map
 # adds query hints such as "?limit="). read: safe to call unprompted. mutating:
@@ -1596,10 +1818,13 @@ ROUTE_PERMISSIONS = {
     "GET /providers": "read",
     "GET /chunks/{chunk_id}": "read",
     "GET /stats": "read",
+    "GET /outline": "read",
+    "GET /outline/{source:path}": "read",
     "GET /omnisearch": "read",
     "POST /search": "read",
     "POST /graph/expand": "read",
     "POST /answer": "read",
+    "POST /evidence_pack": "read",
     "POST /query": "read",
     "POST /compare": "read",
     "GET /compare/options": "read",
@@ -1619,6 +1844,7 @@ def schema() -> dict:
     graph_on = bool(getattr(getattr(rag, "graph", None), "enabled", False))
     # The reranker only holds a Laya scorer when retrieval.laya.enabled is on.
     laya_on = getattr(getattr(rag, "reranker", None), "laya_scorer", None) is not None
+    generated_mode = getattr(rag, "generated_mode", None)
     retrieval_body = {
         "q": "str",
         "top_k": "1-50? (reranked chunks returned)",
@@ -1665,10 +1891,11 @@ def schema() -> dict:
             "restricts_only": "never forces a conditional lane on: "
                               "dense_code/sparse_code still need the code "
                               "preset, dense_scope/sparse_scope a detected "
-                              "scope, omnisearch and hype their own switch. "
+                              "scope, omnisearch and hype their own switch, "
+                              "routed generated_mode route. "
                               "Naming a lane with no trigger runs nothing",
             "embedding": "no query embedding is computed when no dense, "
-                         "dense_code, dense_scope or hype lane is left",
+                         "dense_code, dense_scope, hype or routed lane is left",
             "errors": "an empty list or an unknown lane name is an error that "
                       "names the problem, never a silent no-op; the echo's "
                       "lanes_requested and lanes_run show what ran",
@@ -1705,6 +1932,33 @@ def schema() -> dict:
                        "laya is EXPERIMENTAL and needs retrieval.laya.enabled. "
                        "A scorer other than the configured one needs its own "
                        "gate_threshold; an unknown name is an error)",
+        "generated_mode": "drop|route? (generated chunks out of the evidence; off is "
+                          "config-only; route is a 409 while the store held generated rows "
+                          "at startup and no sidecar is loaded)",
+        "source_file": "str? (restrict every lane to this file's primary chunks, any stored "
+                       "spelling of its path, as GET /outline lists the sources; neighbor_context "
+                       "pages stay inside too, and omnisearch does not run. The echo's "
+                       "file_filter repeats it with pages, and its matched is false when the "
+                       "store holds no primary chunk there: an unknown file, pages outside it, "
+                       "or a map. Needs sparse_backend bm25s; /evidence_pack refuses it with "
+                       "graph true)",
+        "pages": "[first, last]? (with source_file only: the chunks whose pages overlap "
+                 "first..last, 1 <= first <= last; a chunk without pages is outside)",
+    }
+    # The Navigator walk switches, on /graph/expand and /evidence_pack.
+    walk_body = {
+        "bridges": "bool? (null = graph.bridges) a canvas file node or Source: line "
+                   "resolves to the chunks of the note or PDF page it cites; a PDF "
+                   "needs #page=N, else it bridges nothing and is counted",
+        "cross_canvas": "bool? (null = graph.cross_canvas) hop between canvases: "
+                        "same-as titles, a shared file node, a file node -> .canvas",
+        "wikilinks": "bool? (null = graph.wikilinks) follow [[wikilinks]] from a "
+                     "reached note, outgoing only; the stem matches case-sensitively",
+        "direction": "both|down|up? (null = graph.direction) down follows the "
+                     "arrowhead, up goes against it; an edge drawn with no "
+                     "arrowheads is followed only under both, one with two under any",
+        "edge_types": "list[str]? 1-20 non-blank (null = graph.edge_types) follow only these "
+                      "edge labels; same-as and bridges always pass",
     }
     return {
         "service": QUERY_SERVICE,
@@ -1731,6 +1985,23 @@ def schema() -> dict:
             "GET /stats": "corpus size + per-domain/file-type breakdown, and "
                           "`latency`: p50/p95 total and per stage for each "
                           "endpoint over the recent calls (price a call first)",
+            "GET /outline?limit=&offset=&domain=&course=": (
+                "what the vault holds, for an agent that does not know it: groups "
+                "[{domain, course, sources: [{source_file, file_type, chunks, pages}]}] of the "
+                "primary sources (pages: the distinct pages indexed, null for none), paged over "
+                f"sources (limit {_OUTLINE_LIMIT} by default, clamped to 1-{_OUTLINE_MAX}; offset "
+                "from 0; total counts the sources matching domain, exactly, and course, as a "
+                "substring in any case), and maps [{source_file, chunks}]: the generated files, "
+                "whole and apart, which are not evidence. GET /outline/{source} outlines one "
+                "file. Built when this API started; a restart refreshes it"),
+            "GET /outline/{source}": (
+                "one file's outline, by any stored spelling of its path: a source's chapters "
+                "[{chapter, page_start, page_end, chunks}] (a PDF's ToC chapters in page order, "
+                "one entry per run; a note's top-level headings, with null pages), or a map's "
+                "{map: true, concepts: [{label, targets}]}, each concept with the primary spans "
+                "{source_file, page_start, page_end} it cites ([] with no route sidecar loaded). "
+                "404 for a file the index does not hold and for an agent-instruction file; 503 "
+                "while no bm25 index is built"),
             "GET /omnisearch?q=&k=": "raw live-vault results (Obsidian must be open)",
             "POST /search": {
                 "purpose": "retrieval only — chunks + labels + text; no LLM needed",
@@ -1762,13 +2033,26 @@ def schema() -> dict:
                     "rerank": f"{'|'.join(rerank_choices)}? — orders "
                               "query-seeded seeds; ignored when seeds are given",
                     "include_text": "0-6000 chars (default 1200)",
+                    **walk_body,
                 },
                 "response": "nodes (with depth + graph metadata), tree "
                             "(parent->child with each edge's label and "
                             "direction), cross_edges (edges back onto nodes "
                             "already reached — canvas graphs are cyclic), and "
                             "stats.truncated_at naming the cap that stopped "
-                            "the walk",
+                            "the walk. A direction is -> (away from the node), "
+                            "<- (at it), -- (no arrowheads) or <> (both). With "
+                            "any walk switch off its default, nodes and edges "
+                            "carry a kind (canvas, note, bridge, same-as, "
+                            "shares-bridge, opens-canvas, links-to), `paths` says "
+                            "how each node was reached, and stats counts every "
+                            "bridge, hop and miss. With a route sidecar loaded, "
+                            "each generated node carries routed_ids, to send "
+                            "/answer in its place: the first "
+                            "retrieval.route.per_target primary chunks of each "
+                            "span it cites, in page order, for at most "
+                            "retrieval.route.max_targets spans (a cite with no "
+                            "pages gives the file's first chunks, in document order)",
             },
             "POST /answer": {
                 # /answer itself is not gated — it needs no graph — but it is
@@ -1783,13 +2067,68 @@ def schema() -> dict:
                 "body": {
                     "q": "str",
                     "docs": "list[str] (1-100 chunk ids). An unknown id is a "
-                            "400 — never a silently smaller context",
+                            "400 — never a silently smaller context. Unless "
+                            "generated_mode is off, generated ids are a 400 "
+                            "naming them (ids) and, with a route sidecar "
+                            "loaded, routes_to {id: [{source_file, page_start, "
+                            "page_end}]} for each one it routes, listing only the "
+                            "spans the store serves (one whose file is not "
+                            "indexed, or with no primary row in its pages, is "
+                            "what the routed lane counts in targets_missing; an "
+                            "id left with none is omitted): the "
+                            "full cited spans, as pages, not chunk ids (send a "
+                            "/graph/expand node's routed_ids, each span's first "
+                            "chunks, in the map's place)",
                     "provider": "str?", "model": "str?",
                     "max_tokens": "64-8192?",
                     "include_text": "0-6000?", "max_sources": "int?",
                 },
                 "response": "the /query shape: answer, citations, sources, "
                             "generation provenance",
+            },
+            "POST /evidence_pack": {
+                # Available without graph mode: only graph=true needs it.
+                "experimental": True,
+                "available": True,
+                "purpose": "one call for a multi-part question: a search (plus, with "
+                           "graph=true, a graph walk) per sub-question, merged into "
+                           "evidence with provenance, coverage and gaps. NO LLM. "
+                           "Indexed evidence only: every id is checkable with "
+                           "GET /chunks/{id}",
+                "body": {
+                    **retrieval_body,
+                    "q": "str — the question; searched alone when sub_questions is null",
+                    "top_k": "1-50? evidence per sub-question (null = evidence_pack.top_k)",
+                    "omnisearch": "refused when true: live excerpts are not indexed evidence",
+                    "max_sources": "refused (400): top_k is per sub-question",
+                    "sub_questions": "list[str]? at most evidence_pack.max_sub_questions; "
+                                     "null = q alone",
+                    "graph": "bool (default false); true walks the graph too and needs "
+                             "graph mode, else a 503 naming graph.enabled. With source_file "
+                             "or pages it is a 400: the walk leaves the file",
+                    "min_score": "float? (null = evidence_pack.min_score) a floor in the "
+                                 "reranker's units; needs a scoring rerank mode",
+                    "include_text": "0-6000? chars per evidence item (null = "
+                                    "evidence_pack.include_text)",
+                    "depth": "0-5? (null = graph.max_depth)",
+                    "max_per_hop": "1-50? (null = graph.max_per_hop)",
+                    "max_total": "1-500? (null = graph.max_total)",
+                    "seed_top_k": "1-50? (null = graph.seed_top_k)",
+                    **walk_body,
+                },
+                "response": "question, sub_questions, evidence [{id, origin_id, text, "
+                            "source, source_file, file_type, pages, heading, course, "
+                            "provenance (authored|source|generated), score, via_path "
+                            "([] for a direct hit or a routed page), found_via (the "
+                            "maps that routed it, [{id, label}]), sub_questions}], "
+                            "paths (the walk "
+                            "paths some evidence uses), coverage {sub-question: [ids]}, "
+                            "gaps (sub-questions with no evidence), generated_only "
+                            "(sub-questions whose every evidence is generated), "
+                            "provenance_mix, dropped_below_min_score, graph, retrieval "
+                            "[{q, rerank_mode, timings, graph_stats, route (search "
+                            "time), graph_route (the walk's own routing; graph=true "
+                            "under route only)}], ms",
             },
             "POST /query": {
                 "purpose": "full RAG: retrieve + grounded, cited answer",
@@ -1858,6 +2197,47 @@ def schema() -> dict:
             "sources": "stable evidence ids support overlap comparison; "
                        "origin_id preserves the indexed child and "
                        "lookup_available gates GET /chunks",
+            "chunk_origin": {
+                "values": list(PROVENANCE),
+                "field": "provenance, on every source, evidence item and "
+                         "/graph/expand node",
+                "rule": ["a stored provenance: generated -> generated",
+                         "a source_file under provenance.generated_paths, an "
+                         "agent-instruction file or a canvas.generated_markers "
+                         "canvas -> generated",
+                         "any other stored provenance",
+                         "provenance.by_file_type",
+                         "authored"],
+            },
+            "generated_mode": {
+                "config_key": "retrieval.generated_mode",
+                "active": generated_mode,
+                "modes": {
+                    "off": "generated chunks compete as evidence; config only, "
+                           "so a per-call off is a 422",
+                    "drop": "generated chunks are kept out of every evidence "
+                            "path. The dense and sparse lanes refill with primary "
+                            "chunks (a tantivy sparse backend only within "
+                            "retrieval.tantivy_filter_pool); HyPE and Omnisearch "
+                            "results lose theirs with no refill. /answer refuses "
+                            "a generated id with a 400 naming it",
+                    "route": "drop, plus generated hits route: the primary pages "
+                             "they cite (the route pointer sidecar) join the pool "
+                             "through the routed lane, and each such source's "
+                             "found_via names the maps that routed it. Needs the "
+                             "retrieval.route block. Needs sparse_backend: bm25s. "
+                             "While the store held generated rows at startup and "
+                             "no sidecar is loaded, a per-call "
+                             "route is a 409 and a configured route refuses to "
+                             "start; with zero generated rows it starts without "
+                             "one. Build it with `python main.py route-pointers` "
+                             "(or the route_pointers job), then restart; `route` "
+                             "beside these modes is its coverage",
+                },
+                # Generated ids in the store vs in the sidecar: {generated_rows,
+                # with_pointers, sidecar (the loaded path)}; None = not computed.
+                "route": getattr(rag, "route_coverage", None),
+            },
         },
         # Which endpoints are NOT part of the stable contract, and whether
         # each is switched on right now. A 503 already explains itself when a
@@ -1873,10 +2253,12 @@ def schema() -> dict:
                 "graph_rag": {
                     "config_key": "graph.enabled",
                     "enabled": graph_on,
-                    "endpoints": ["POST /graph/expand", "POST /answer"],
-                    "unmeasured": "traversal has never been scored on the "
-                                  "bench's labelled question sets — the cost "
-                                  "is known, the retrieval benefit is not",
+                    "endpoints": ["POST /graph/expand", "POST /answer", "POST /evidence_pack"],
+                    "unmeasured": "the walk's effect has not been scored "
+                                  "against the shipped generated_mode on "
+                                  "labelled question sets, so whether it adds "
+                                  "evidence that plain search under that mode "
+                                  "lacks is not known",
                     "when_off": "POST /graph/expand answers 503 with the "
                                 "config key to set; /query and /search are "
                                 "unaffected and the "

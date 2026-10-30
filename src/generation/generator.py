@@ -26,6 +26,7 @@ from src.retrieval.retriever import RetrievedDoc
 from src.utils.citations import CITATION_RE, CONFIDENCE_RE
 from src.utils.config_loader import Config
 from src.utils.logger import get_logger
+from src.utils.provenance import provenance_of, provenance_rule
 from src.utils.timing import StageTrace
 
 log = get_logger(__name__)
@@ -36,6 +37,9 @@ log = get_logger(__name__)
 _CONFIDENCE_RE = CONFIDENCE_RE
 _CITATION_RE = CITATION_RE
 _THINK_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
+# provenance.generated_only_confidence compares levels by this order; UNKNOWN
+# ranks lowest, so a cap never touches it.
+_RANK = {"UNKNOWN": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3}
 
 
 def _strip_reasoning(text: str) -> str:
@@ -76,12 +80,24 @@ class Answer:
     # Wall-clock ms of this answer's own stages — generate (the LLM call),
     # parse, and verify when it ran. Retrieval's stages are in retrieval["timings"].
     timings: dict[str, Any] | None = field(default=None)
+    # Why `confidence` is not the model's own level: set only when
+    # provenance.generated_only_confidence capped it.
+    confidence_note: str | None = None
 
 
 class Generator:
-    def __init__(self, llm: LLMClient, verify_citations: bool = True):
+    def __init__(self, llm: LLMClient, verify_citations: bool = True,
+                 provenance: dict | None = None, label_generated: bool = False,
+                 generated_only_cap: str | None = None):
+        if generated_only_cap not in (None, "MEDIUM", "LOW"):
+            raise ValueError(
+                f"provenance.generated_only_confidence must be null, MEDIUM or LOW, "
+                f"got {generated_only_cap!r}: fix it in config.yaml")
         self.llm = llm
         self.verify_citations = verify_citations
+        self.provenance = provenance or {}
+        self.label_generated = label_generated
+        self.generated_only_cap = generated_only_cap
         self._gen_prompt = load_prompt("generation")
         self._verify_prompt = load_prompt("verify")
 
@@ -90,6 +106,9 @@ class Generator:
         return cls(
             llm=llm,
             verify_citations=cfg.get("generation.verify_citations", True),
+            provenance=provenance_rule(cfg),
+            label_generated=bool(cfg.get("provenance.label_generated", False)),
+            generated_only_cap=cfg.get("provenance.generated_only_confidence"),
         )
 
     # ---- context formatting ----
@@ -140,10 +159,15 @@ class Generator:
         return clip(fname, 55) if fname else (fallback or "note")
 
     @staticmethod
-    def _format_context(docs: list[RetrievedDoc]) -> str:
+    def _format_context(docs: list[RetrievedDoc], generated: frozenset = frozenset()) -> str:
+        """Numbered sources. A doc whose id is in `generated` says so in its
+        header, so the model can weigh an LLM-written summary below a primary
+        source; empty `generated` (the default) gives the context as it always was."""
         blocks = []
         for i, d in enumerate(docs, start=1):
             label = Generator._source_label(d.metadata, getattr(d, "source_label", ""))
+            if d.id in generated:
+                label += "; generated, not a primary source"
             blocks.append(f"[{i}] (from {label})\n{d.text.strip()}")
         return "\n\n".join(blocks)
 
@@ -170,7 +194,12 @@ class Generator:
             )
 
         tr = StageTrace()
-        context = self._format_context(docs)
+        cap = self.generated_only_cap
+        generated: frozenset = frozenset()
+        if self.label_generated or cap:
+            generated = frozenset(d.id for d in docs
+                                  if provenance_of(d.metadata, self.provenance) == "generated")
+        context = self._format_context(docs, generated if self.label_generated else frozenset())
         with tr.span("generate"):
             resp = self.llm.complete(
                 system=self._gen_prompt["system"],
@@ -193,6 +222,12 @@ class Generator:
             sources=docs,
             usage=resp.usage,
         )
+        # The model's own level is about its sources' support, not their origin:
+        # an answer resting only on LLM-written summaries is capped, and says so.
+        if (cap and citations and all(c.chunk_id in generated for c in citations)
+                and _RANK[confidence] > _RANK[cap]):
+            answer.confidence = confidence = cap
+            answer.confidence_note = f"capped at {cap}: every cited source is generated"
 
         if self.verify_citations and citations:
             with tr.span("verify"):

@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pytest
 
 from src.ingestion.canvas_loader import (
-    CanvasLoader, CanvasChunk, decode_canvas_edges, encode_canvas_edge,
+    CanvasLoader, CanvasChunk, decode_canvas_edges, decode_canvas_files, encode_canvas_edge,
 )
 
 
@@ -533,3 +533,165 @@ def test_a_hash_before_a_digit_is_not_a_tag_but_hash_p_is(tmp_path):
     tags = {c.metadata["canvas_node_id"]: c.metadata.get("tags")
             for c in _tag_loader(tmp_path, True).load_file(canvas)}
     assert tags == {"a": None, "b": ["p"], "c": ["p"]}
+
+
+# ---- slice D T2: aligned file refs, Source lines, arrowheads, subpath, generated ----
+
+def _file_canvas(tmp_path: Path, text: str = "Text node citing a PDF page, long enough for the floor.",
+                 name: str = "files.canvas") -> Path:
+    return _write_canvas(tmp_path / name, nodes=[
+        {"id": "t", "type": "text", "x": 0, "y": 0, "width": 200, "height": 100, "text": text},
+        {"id": "f", "type": "file", "file": "B/x.pdf", "subpath": "#page=7",
+         "x": 400, "y": 0, "width": 200, "height": 100},
+    ], edges=[{"id": "e1", "fromNode": "t", "toNode": "f", "label": "cites"}])
+
+
+def _node_chunk(loader: CanvasLoader, canvas: Path, node_id: str = "t") -> CanvasChunk:
+    return {c.metadata["canvas_node_id"]: c for c in loader.load_file(canvas)}[node_id]
+
+
+def test_file_node_subpath_survives_in_aligned_metadata(tmp_path):
+    """REGRESSION: canvas_file_refs keeps the path only, so a #page=7 file node
+    could never bridge to its page. canvas_edge_files keeps node id, path, subpath."""
+    meta = _node_chunk(_loader(tmp_path), _file_canvas(tmp_path)).metadata
+    assert decode_canvas_files(meta.get("canvas_edge_files")) == [
+        {"node": "f", "file": "B/x.pdf", "subpath": "#page=7"}]
+
+
+def test_footer_subpath_off_keeps_text_identical(tmp_path):
+    canvas = _file_canvas(tmp_path)
+    default = _node_chunk(_loader(tmp_path), canvas)
+    off = _node_chunk(CanvasLoader(vault_path=tmp_path, output_file=tmp_path / "o.jsonl",
+                                   min_chunk=10, footer_subpath=False), canvas)
+    assert off.text == default.text
+    assert off.text.endswith("-> [cites] B/x.pdf")
+
+
+def test_footer_subpath_on_appends_it(tmp_path):
+    on = _node_chunk(CanvasLoader(vault_path=tmp_path, output_file=tmp_path / "o.jsonl",
+                                  min_chunk=10, footer_subpath=True), _file_canvas(tmp_path))
+    assert on.text.endswith("-> [cites] B/x.pdf#page=7")
+
+
+def test_generated_marker_stamps_provenance(tmp_path):
+    (tmp_path / "Maps").mkdir()
+    canvas = _file_canvas(tmp_path, name="Maps/SVM Map (Generated).canvas")
+    loader = CanvasLoader(vault_path=tmp_path, output_file=tmp_path / "o.jsonl",
+                          min_chunk=10, generated_markers=["(generated)"])
+    assert _node_chunk(loader, canvas).metadata["provenance"] == "generated"
+
+
+def test_no_marker_no_key(tmp_path):
+    canvas = _file_canvas(tmp_path, name="SVM Map.canvas")
+    loader = CanvasLoader(vault_path=tmp_path, output_file=tmp_path / "o.jsonl",
+                          min_chunk=10, generated_markers=["(generated)"])
+    assert "provenance" not in _node_chunk(loader, canvas).metadata
+    marked = _file_canvas(tmp_path, name="Other (generated).canvas")
+    assert "provenance" not in _node_chunk(_loader(tmp_path), marked).metadata   # no markers given
+
+
+def test_from_config_ships_the_yaml_defaults(tmp_path):
+    from src.utils.config_loader import Config
+    loader = CanvasLoader.from_config(Config({"parser": {"vault_path": str(tmp_path)}}, tmp_path))
+    assert loader.generated_markers == ["(generated)"]
+    assert loader.source_lines is True
+    assert loader.footer_subpath is False
+
+
+_SOURCE_TEXT = ("Soft margin SVM\nSlack variables trade margin width for violations.\n"
+                "Source: Books/svm.pdf pp. 210-212, 250\nSource: Notes/ch6.md")
+
+
+def test_source_lines_become_bridge_entries(tmp_path):
+    canvas = _file_canvas(tmp_path, text=_SOURCE_TEXT)
+    on = _node_chunk(_loader(tmp_path), canvas)
+    assert decode_canvas_files(on.metadata["canvas_edge_files"]) == [
+        {"node": "f", "file": "B/x.pdf", "subpath": "#page=7"},
+        {"node": "", "file": "Books/svm.pdf", "subpath": "#page=210"},
+        {"node": "", "file": "Books/svm.pdf", "subpath": "#page=211"},
+        {"node": "", "file": "Books/svm.pdf", "subpath": "#page=250"},
+        {"node": "", "file": "Notes/ch6.md", "subpath": ""},
+    ]
+    off = _node_chunk(CanvasLoader(vault_path=tmp_path, output_file=tmp_path / "o.jsonl",
+                                   min_chunk=10, source_lines=False), canvas)
+    assert on.text == off.text
+    assert on.doc_id == off.doc_id
+
+
+def _source_entries_of(tmp_path: Path, text: str, name: str):
+    loader = _loader(tmp_path)
+    meta = _node_chunk(loader, _file_canvas(tmp_path, text=text, name=name)).metadata
+    got = [(e["file"], e["subpath"]) for e in decode_canvas_files(meta["canvas_edge_files"])
+           if e["node"] == ""]
+    return got, loader.stats["source_entries_capped"]
+
+
+def test_source_lines_are_capped_per_line_and_per_node(tmp_path):
+    got, capped = _source_entries_of(tmp_path, "Topic\nSource: Books/a.pdf pp. 1, 3, 5, 7, 9", "c1.canvas")
+    assert got == [("Books/a.pdf", "#page=1"), ("Books/a.pdf", "#page=3")]
+    assert capped == 3
+
+    got, capped = _source_entries_of(tmp_path, "Topic\nSource: Books/a.pdf pp. 1-2, 5-6, 9", "c2.canvas")
+    assert [s for _, s in got] == ["#page=1", "#page=2", "#page=5", "#page=6"]
+    assert capped == 1
+
+    lines = "\n".join(f"Source: B/{f}.pdf pp. 1, 3" for f in "abcd")
+    got, capped = _source_entries_of(tmp_path, "Topic\n" + lines, "c3.canvas")
+    assert got == [(f"B/{f}.pdf", f"#page={p}") for f in "abc" for p in (1, 3)]
+    assert capped == 2
+
+    # A citation equal to the node's own file-node entry is not repeated, and uses no cap.
+    got, capped = _source_entries_of(tmp_path, "Topic\nSource: B/x.pdf pp. 7, 9, 11", "c4.canvas")
+    assert got == [("B/x.pdf", "#page=9"), ("B/x.pdf", "#page=11")]
+    assert capped == 0
+
+
+def test_a_malformed_source_line_is_ignored_and_counted(tmp_path):
+    text = ("Topic\nSource: Books/svm.pdf, chapter 3\nsource: x.pdf\n"
+            "Sources are listed below, long enough for the floor.")
+    loader = _loader(tmp_path)
+    meta = _node_chunk(loader, _file_canvas(tmp_path, text=text)).metadata
+    assert [e["node"] for e in decode_canvas_files(meta["canvas_edge_files"])] == ["f"]
+    assert loader.stats["source_lines_unparsed"] == 2
+
+
+def test_source_lines_off_adds_no_entries(tmp_path):
+    loader = CanvasLoader(vault_path=tmp_path, output_file=tmp_path / "o.jsonl",
+                          min_chunk=10, source_lines=False)
+    meta = _node_chunk(loader, _file_canvas(tmp_path, text=_SOURCE_TEXT)).metadata
+    assert all(e["node"] for e in decode_canvas_files(meta["canvas_edge_files"]))
+    assert loader.stats["source_lines_unparsed"] == loader.stats["source_entries_capped"] == 0
+
+
+def _arrow_canvas(tmp_path: Path, with_ends: bool = True) -> Path:
+    ends = [{}, {"fromEnd": "none", "toEnd": "none"}, {"fromEnd": "arrow", "toEnd": "arrow"},
+            {"fromEnd": "arrow", "toEnd": "none"}]
+    return _write_canvas(tmp_path / "arrows.canvas", nodes=[
+        {"id": "a", "type": "text", "x": 0, "y": 0, "width": 200, "height": 100,
+         "text": "Node A, four edges to B, long enough for the floor."},
+        {"id": "b", "type": "text", "x": 400, "y": 0, "width": 200, "height": 100,
+         "text": "Node B, four edges from A, long enough for the floor."},
+    ], edges=[{"id": f"e{i}", "fromNode": "a", "toNode": "b", "label": f"l{i}",
+               **(end if with_ends else {})} for i, end in enumerate(ends)])
+
+
+def test_edge_direction_follows_the_arrowheads(tmp_path):
+    chunks = {c.metadata["canvas_node_id"]: c for c in _loader(tmp_path).load_file(_arrow_canvas(tmp_path))}
+    dirs = {n: [e["direction"] for e in decode_canvas_edges(c.metadata["canvas_edges"])]
+            for n, c in chunks.items()}
+    assert dirs == {"a": ["->", "--", "<>", "<-"], "b": ["<-", "--", "<>", "->"]}
+
+
+def test_footer_text_ignores_the_arrowheads(tmp_path):
+    drawn = [c.text for c in _loader(tmp_path).load_file(_arrow_canvas(tmp_path))]
+    bare = [c.text for c in _loader(tmp_path).load_file(_arrow_canvas(tmp_path, with_ends=False))]
+    assert drawn == bare
+    assert "-> [l1]" in drawn[0] and "<- [l3]" in drawn[1]       # the from/to orientation, as before
+
+
+def test_generated_markers_as_a_string_is_refused(tmp_path):
+    """`generated_markers: (generated)` in YAML is a string; iterated, its letters would
+    stamp nearly every canvas generated."""
+    with pytest.raises(ValueError, match="canvas.generated_markers must be a list"):
+        CanvasLoader(vault_path=tmp_path, output_file=tmp_path / "o.jsonl",
+                     generated_markers="(generated)")
