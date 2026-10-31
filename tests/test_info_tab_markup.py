@@ -29,7 +29,7 @@ MISSING = object()
 # the day one is added to the example and this list stops being true.
 EXAMPLE_LACKS = {
     "retrieval.hype.enabled", "retrieval.hype.collection", "retrieval.hype.top_k",
-    "code.output_file", "code.extensions", "code.skip_roots", "code.max_file_bytes",
+    "code.extensions", "code.skip_roots", "code.max_file_bytes",
 }
 
 

@@ -882,19 +882,19 @@ annotations and prompts.
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/schema` | This capability map, with tiers. |
-| `GET /api/overview` | Corpus summary: chunk/doc counts, per-domain and per-JSONL breakdown, vector count, disk use, query-API health, recent jobs. |
+| `GET /api/overview` | Corpus summary: chunk/doc counts, per-domain and per-JSONL breakdown with each JSONL's last-modified time (`jsonl_mtime`, epoch seconds), vector count, disk use, query-API health, recent jobs. |
 | `GET /api/documents` | Search / filter indexed documents. |
 | `GET /api/facets` | Available domains, group labels, tags, file types. |
 | `GET /api/documents/preview` | Preview a document's indexed chunks. |
 | `GET /api/vault/tree` | Browse the vault tree, with in-index status per file. |
 | `GET /api/vault/search` | Find files by name in the vault. |
 | `GET /api/browse` | Filesystem folder picker (for choosing paths the container can see). |
-| `GET /api/settings` | The editable config surface, provider registry status, reranker suggestions, device capabilities, taxonomy. |
-| `GET /api/vaults` | Registered vaults and their per-vault index settings. |
+| `GET /api/settings` | The editable config surface, provider registry status, reranker suggestions, device capabilities, taxonomy, and `embedders`: each known local model and `embedding.providers` entry with the finished chunk collections in the active Chroma dir that it built. |
+| `GET /api/vaults` | Registered vaults and their per-vault settings (index paths, lane chunk files, figure/backup/staging folders, inbox and tree root, the embedder). |
 | `GET /api/ocr/status` | What OCR this install can actually do right now, per engine. |
 | `GET /api/service/log` | Tail the query API's startup log. |
 | `GET /api/releases` | The version on disk (`VERSION`), each part of the install (this console, the query API, the installed agent skills, a packaged bundle) as `current`, `behind`, `missing`, `not running` or `invalid` with what to do, and the release notes from `CHANGELOG.md`. The console's header version chip opens it. |
-| `GET /api/jobs`, `GET /api/jobs/{id}`, `GET /api/jobs/{id}/log` | Job queue state and output. A job record carries `elapsed_s`, `queue_position`, `progress` (the current phase's `{done, total, line}`, read from the log) and an ETA (`typical` over past successful runs of that kind, and `eta_s`; both null without history). The log takes `tail` (last N lines) and `wait` (a long poll of up to 60 s that returns as soon as there is new output or a status change). |
+| `GET /api/jobs`, `GET /api/jobs/{id}`, `GET /api/jobs/{id}/log` | Job queue state and output. A job record carries `vault` (the vault active when it was queued; blank for older records), `elapsed_s`, `queue_position`, `progress` (the current phase's `{done, total, line}`, read from the log) and an ETA (`typical` over past successful runs of that kind, and `eta_s`; both null without history). The log takes `tail` (last N lines) and `wait` (a long poll of up to 60 s that returns as soon as there is new output or a status change). |
 | `GET /api/inbox`, `GET /api/import/converted`, `GET /api/import/file` | Staged-file listings and raw fetch. |
 | `GET /api/import/ocr_scan` | Which pages of a staged PDF carry no extractable text — run this before OCRing anything. |
 | `POST /api/rerank/check` | Preflight a cross-encoder: reachable? already cached (and where)? within its context limit? Downloads nothing. |

@@ -189,15 +189,17 @@ def test_every_vault_key_exists_in_the_shipped_config():
     """Adding a key to VAULT_KEYS that a config lacks makes EVERY vault switch
     raise "found 0 matches" — the switcher writes the whole set in one
     comment-preserving pass. Both configs are checked: the live one, and
-    config.example.yaml, which is what a new install actually starts from."""
-    from src.utils.config_loader import load_config
+    config.example.yaml, which is what a new install actually starts from.
+    Checked the way the writer resolves keys (one line each), so a key whose
+    value is null still counts as present."""
     for name in ("config.yaml", "config.example.yaml"):
         path = ROOT / name
         if not path.exists():
             continue
-        disk = load_config(path)
+        index = M._yaml_key_index(path.read_text(encoding="utf-8").split("\n"))
         for key in M.VAULT_KEYS:
-            assert disk.get(key) is not None, f"{key} in VAULT_KEYS, missing from {name}"
+            hits = sum(1 for _, dotted, _m in index if dotted == key)
+            assert hits == 1, f"{key} in VAULT_KEYS: {hits} lines in {name}"
 
 
 @needs_config

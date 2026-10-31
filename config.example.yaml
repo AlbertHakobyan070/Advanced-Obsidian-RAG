@@ -802,6 +802,12 @@ notebooks:
   save_figures: false                            # true = decode image outputs to figures_dir
   figures_dir: data/notebook_figures
 
+# Script files (.js/.ts/.sql/...) via `ingest-code`; every other code.* key
+# falls back to the notebooks/parser value. Per-vault: the switcher moves it.
+code:
+  # vault_path falls back to notebooks -> pdf -> parser vault_path if unset
+  output_file: "data/code_chunks.jsonl"
+
 # Obsidian .canvas ingestion: nodes + hand-drawn labelled edges, via
 # `ingest-canvas`. Only `text` nodes become chunks — `file`/`link`/`group`
 # nodes never get their own chunk. Each chunk carries its graph context
@@ -949,10 +955,14 @@ webui:
   # folder, where the next BM25 rebuild sweeps them into the wrong corpus.
 
 # NOTE: the vault switcher (Settings → Vaults) carries all of these PER VAULT —
-# vault_path, the index trio, collection name, inbox_dir, vault_tree_root and
-# manifest_cache travel together, so a second vault never inherits the first
-# one's browse root or cached in-RAG status. Every key it manages must EXIST in
-# this file, or a switch fails with "found 0 matches".
+# vault_path, the index trio, collection name, inbox_dir, vault_tree_root,
+# manifest_cache, the parents and route sidecars, every lane's output_file, the
+# figure and canvas-backup folders, the embedder (provider, local_model, both
+# prefixes, dimensions, graph.embedding_provider), ocr_studio.upload_dir and
+# knowledge_map.staging_dir travel together, so a second vault never inherits
+# the first one's files, browse root, cached in-RAG status or embedder. Every
+# key it manages must EXIST in this file, or a switch fails with "found 0
+# matches". List-valued keys (skip_roots, generated_paths, taxonomy) stay global.
 
 # Request guard on :8051 and :8052 (src/utils/http_guard.py). Loopback Host names
 # and the console's own origin are always allowed, so list only extras here. The

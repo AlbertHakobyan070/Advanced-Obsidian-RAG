@@ -15,6 +15,55 @@ reconstructed on 2026-10-14 from the commit history and the session notes,
 one per shipped milestone, so read them as a map of when things landed rather
 than as release-day notes.
 
+## [0.31.0] - 2026-10-31
+
+### Added
+- Settings picks the embedding model by name. A select before the embedding
+  fields lists every known local model and every `embedding.providers` entry,
+  each marked when a finished collection in the active vault was built with it
+  (read off the fingerprint sidecars). Choosing one fills the provider, model
+  and both prefixes. If a matching collection exists, a button points
+  `paths.collection_name` at it, so the swap needs no re-embed; if none does,
+  the hint gives the re-embed command, since `:8051` refuses vectors from
+  another embedder. `embedding.provider` and both prefixes are now editable
+  settings (a prefix keeps its trailing space), and `GET /api/settings`
+  returns the list as `embedders`.
+- The Query tab has Answer, Compare and Graph sub-tabs under the shared
+  presets and question box, in place of two fold-out panels. The knobs show
+  on Answer and Compare, because the comparison branches start from them;
+  Graph keeps its own controls and its tab follows the `graph_rag` switch.
+  The chosen sub-tab is remembered.
+- The console remembers the open tab across reloads (and in the address bar,
+  so a link opens that tab), and the header names the active vault.
+- The Ledger's chunk-file list scrolls under a pinned header with a Modified
+  column, and sorts newest first, oldest first or by chunk count (remembered).
+  `GET /api/overview` adds `jsonl_mtime`. Every other list that grows with use
+  (jobs, documents, inbox, converted files, vaults, providers, rerankers,
+  experimental features, the theme shelves and the theme designer's tokens)
+  scrolls inside its card instead of stretching the page.
+
+### Changed
+- Each vault keeps its own files and embedder. Besides the index paths, the
+  vault switcher now carries every lane's `output_file`, the PDF and notebook
+  figure folders, `canvas.backup_dir`, `knowledge_map.staging_dir`,
+  `ocr_studio.upload_dir` and the embedder (`embedding.provider`,
+  `local_model`, both prefixes, `dimensions`, `graph.embedding_provider`). A
+  new vault gets its files under `data/vaults/<name>/`, its own `Inbox`, and
+  the current embedder until it is changed in Settings. A vault registered
+  before this release is filled in from its own data folder, with the
+  embedder its collection's fingerprint names. List-valued settings (skip
+  roots, `provenance.generated_paths`, the taxonomy) stay shared.
+- Query history is kept per vault (the existing history moves to the active
+  vault once), and jobs record the vault they ran against: the Jobs tab shows
+  the active vault's, with an "all vaults" switch.
+
+### Fixed
+- After a vault switch, a pdf, notebook, code or canvas ingest run with no
+  output file wrote the lane file every vault shared, so its chunks reached
+  another vault's corpus.
+- A new vault was given the previous vault's inbox folder.
+- A vault switch turned a `null` setting into an empty string.
+
 ## [0.30.0] - 2026-10-30
 
 ### Added

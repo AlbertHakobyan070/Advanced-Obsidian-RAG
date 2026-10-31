@@ -110,7 +110,10 @@ Ordered by cost. Stop at the first kill.
    `--n-passages 500 --negatives 7`, run the notebook with `NPROC = 1` and `epochs=2` in its
    `TRAIN_CFG`. On the held-out passages, kill if Laya's nDCG@10 is not above MiniLM's, or if the
    run collapsed (cell 8 reports both, and the calibration reliability table). Promote to a full
-   run only on a pass.
+   run only on a pass. The paired interval cell 8 prints is reported, not required to exclude zero:
+   a few dozen held-out queries cannot resolve a gain of the size worth chasing (the mini-run's was
+   +0.055 [-0.017, +0.127] on 45 queries), so significance is required where it can be resolved,
+   on the bench's dev split (section 5.2).
    *Caution:* this run is small enough (about 100 optimizer updates, against roughly 70 in the
    upstream report, by arithmetic from their figures) to sit near the regime where upstream issue
    963 saw collapse. A collapsed spike says "too little data", not "no signal": rerun once with
@@ -317,12 +320,20 @@ Laya this package makes that concrete: it graduates as a reranker only if **all*
 1. **It beats MiniLM and `bge-reranker-v2-m3` on the dev split**, each with a paired 95% CI of the
    difference that excludes zero. MiniLM is the shipped default; `bge-reranker-v2-m3` is the teacher,
    and a student that cannot beat its own teacher adds nothing the RAG cannot already run.
-2. **It holds on the test split.** Section 11 does not define "holds" numerically. A defensible
-   reading, borrowed from the bar it sets for components that stay on by default: a test-split
-   delta of at least zero against each reference with the paired CI not entirely below zero, and no
-   suite with at least 30 questions regressing by more than 5 points. Open the test split **once**,
-   after the dev decisions are final: `--split test --unseal-test`, and every opening is appended to
-   `eval/test_ledger.jsonl`.
+2. **It holds on the test split, on one pre-registered look.** Section 11 does not define "holds"
+   numerically. A defensible reading, borrowed from the bar it sets for components that stay on by
+   default: a test-split delta of at least zero against each reference with the paired CI not
+   entirely below zero, and no suite with at least 30 questions regressing by more than 5 points.
+   After the dev decisions are final, commit the exact command, the configurations and this pass
+   rule, then open the test split **once**: `--split test --unseal-test`, and every opening is
+   appended to `eval/test_ledger.jsonl`. One look per decision: if Laya fails on test, the result
+   stands, and a retrained Laya needs a freshly sealed test set, not a second look at this one.
+
+   The split was opened once before, on 2026-10-30, for the route gate (run
+   `20261030-082336-6f59051`, configurations GM-off, GM-drop and GM-route). No reranker was run,
+   tuned or chosen on it, and the export's leakage guard keeps every gold file out of Laya's
+   training, so that opening does not spend the split for this decision: a test set is spent by
+   choices that adapt to what it showed, and no Laya choice has. (Decided 2026-10-31.)
 3. **Its p95 CPU rerank latency is no worse than `bge-reranker-v2-m3`'s.** This is the condition
    most likely to bind: no CPU speed advantage over the teacher is expected (section 3). The
    notebook's latency numbers are GPU timings and only a hint; measure CPU latency with the bench.

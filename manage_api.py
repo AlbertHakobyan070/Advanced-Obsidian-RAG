@@ -272,6 +272,9 @@ class Job:
     # coming, and so "interrupted" is readable as "the console died", not "the
     # job failed".
     restored: bool = False
+    # The vault (parser.vault_path) active when the job was queued, so the
+    # console can show each vault its own jobs. "" for a record that has none.
+    vault: str = ""
 
     def public(self) -> dict:
         d = asdict(self)
@@ -752,6 +755,7 @@ def _load_job_records(limit: int = 200) -> int:
             job.returncode = rec.get("returncode")
             job.log_file = str(JOBS_DIR / (rec.get("log_file") or f"{job.id}.log"))
             job.restored = True
+            job.vault = str(rec.get("vault_path") or "")
             restored.append(job)
         except Exception as e:
             log.warning("skipping unreadable job record %s: %s", p.name, e)
@@ -843,7 +847,8 @@ def _agent_view(job: Job) -> dict:
 
 def enqueue(kind: str, params: dict) -> Job:
     argv = _build_argv(kind, params or {})
-    job = Job(id=uuid.uuid4().hex[:10], kind=kind, argv=argv, params=params or {})
+    job = Job(id=uuid.uuid4().hex[:10], kind=kind, argv=argv, params=params or {},
+              vault=str(CFG.get("parser.vault_path") or ""))
     job.log_file = str(JOBS_DIR / f"{job.id}.log")
     with _jobs_lock:
         _JOBS[job.id] = job
@@ -1181,6 +1186,9 @@ def overview() -> dict:
         "rag_api": {"url": RAG_API, "ready": rag_ready},
         "recent_jobs": recent,
         "jsonl_files": [p.name for p in chunk_files()],
+        # Last-modified time per chunk file (epoch seconds), for the Ledger's
+        # "newest first" sort. A file that vanishes mid-scan is left out.
+        "jsonl_mtime": {p.name: p.stat().st_mtime for p in chunk_files() if p.exists()},
     }
 
 
@@ -2913,8 +2921,16 @@ EDITABLE_SETTINGS: dict[str, dict] = {
                                      "label": "BM25 index pickle (sparse)"},
     "paths.collection_name":        {"kind": "str",  "restart": ":8051 + :8052",
                                      "label": "Chroma collection name"},
+    # values: local + every embedding.providers entry, at request time. The
+    # console's model picker sets these four together.
+    "embedding.provider":           {"kind": "enum", "restart": ":8051", "values": [],
+                                     "label": "Embedding provider"},
     "embedding.local_model":        {"kind": "str",  "restart": ":8051",
                                      "label": "Embedding model (HF id or local path)"},
+    "embedding.query_prefix":       {"kind": "str",  "restart": ":8051", "allow_empty": True,
+                                     "label": "Embedding query prefix (local model)"},
+    "embedding.doc_prefix":         {"kind": "str",  "restart": ":8051", "allow_empty": True,
+                                     "label": "Embedding document prefix (local model)"},
     # Free text on purpose (any HF cross-encoder id works); the console offers
     # the known-good ones as suggestions with their measured cost.
     "retrieval.cross_encoder_model": {"kind": "str", "restart": ":8051",
@@ -3317,6 +3333,44 @@ class SettingsIn(BaseModel):
     changes: dict[str, Any] = Field(min_length=1)
 
 
+def _embedding_provider_values(cfg) -> list[str]:
+    return _with_current(["local", *(cfg.get("embedding.providers") or {})],
+                         cfg.get("embedding.provider"))
+
+
+def _embedder_options(cfg) -> list[dict]:
+    """The Settings model picker: each known local model and each
+    embedding.providers entry, by name, with the finished chunk collections in
+    the active chroma_dir that it built (from their fingerprint sidecars), so
+    choosing one can also point the vault at vectors that already match it."""
+    from src.embeddings.registry import KNOWN_EMBEDDERS, resolve_embedding_spec
+    built = [c for c in _probe_embeddings(cfg)["collections"] if c.get("status") == "complete"]
+
+    def made_by(provider, model):
+        return [c["name"] for c in built if c["provider"] == provider and c["model"] == model]
+
+    models = dict(KNOWN_EMBEDDERS)
+    current = str(cfg.get("embedding.local_model") or "")
+    if current and current not in models:    # a custom id or path: offered as itself
+        models[current] = {"label": current, "query_prefix": cfg.get("embedding.query_prefix") or "",
+                           "doc_prefix": cfg.get("embedding.doc_prefix") or "",
+                           "note": "The configured model (not one with known facts)."}
+    rows = [{"provider": "local", "model": mid, "label": k["label"],
+             "dimension": k.get("dimension"), "query_prefix": k["query_prefix"],
+             "doc_prefix": k["doc_prefix"], "note": k.get("note"),
+             "collections": made_by("local", mid)} for mid, k in models.items()]
+    for name in cfg.get("embedding.providers") or {}:
+        try:
+            spec = resolve_embedding_spec(cfg, name)
+        except ValueError as e:              # a broken entry is listed, with why
+            rows.append({"provider": name, "model": None, "label": name, "error": str(e),
+                         "collections": []})
+            continue
+        rows.append({"provider": name, "model": spec.model, "label": spec.label(),
+                     "dimension": spec.dimensions, "collections": made_by(name, spec.model)})
+    return rows
+
+
 @app.get("/api/settings")
 def settings() -> dict:
     # Re-read config.yaml fresh: after a save (no restart yet) the boot-time
@@ -3352,7 +3406,9 @@ def settings() -> dict:
         "null", "local", *(disk_cfg.get("embedding.providers") or {})]
     editable["graph.embedding_provider"]["value"] = (
         disk_cfg.get("graph.embedding_provider") or "null")
+    editable["embedding.provider"]["values"] = _embedding_provider_values(disk_cfg)
     return {
+        "embedders": _embedder_options(disk_cfg),
         "rag_api": RAG_API,
         "providers": provider_details,
         "hub": _hub_credentials(),
@@ -3408,7 +3464,15 @@ def settings_update(body: SettingsIn) -> dict:
         elif key == "graph.embedding_provider":
             spec = {**spec, "values": [
                 "null", "local", *(disk_cfg.get("embedding.providers") or {})]}
+        elif key == "embedding.provider":
+            spec = {**spec, "values": _embedding_provider_values(disk_cfg)}
         sval = str(value).strip()
+        if key in ("embedding.query_prefix", "embedding.doc_prefix"):
+            from src.embeddings.registry import check_prefix
+            try:                # a trailing space is part of a prefix: not stripped
+                sval = check_prefix(str(value), key)
+            except ValueError as e:
+                return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
         if not sval and not spec.get("allow_empty"):
             return JSONResponse({"ok": False, "error": f"{key}: empty value"},
                                 status_code=400)
@@ -5024,7 +5088,49 @@ VAULT_KEYS = ["parser.vault_path", "paths.chunks_file", "paths.chroma_dir",
               # The route sidecar is keyed by one corpus's doc_ids: vault B reading
               # vault A's map would boot past the missing-sidecar refusal and route
               # nothing, and B's route_pointers job would overwrite A's file.
-              "retrieval.route.pointers_file"]
+              "retrieval.route.pointers_file",
+              # Each lane's canonical chunk file. A run with no --output writes
+              # the configured one, so left global, a pdf ingest in vault B
+              # truncated vault A's pdf_chunks.jsonl.
+              *(key for key, _ in lane_guard.LANE_CHUNK_FILES.values()
+                if key != "paths.chunks_file"),
+              # Files extracted from, or backed up out of, one vault's sources.
+              "pdf.figures_dir", "notebooks.figures_dir", "canvas.backup_dir",
+              # The embedder that built THIS vault's collections: :8051 refuses a
+              # collection whose fingerprint sidecar names another one, so a
+              # global embedder broke every vault but the one it was set for.
+              # (embedding.device is the machine's, embedding.providers the
+              # install's: neither moves.)
+              "embedding.provider", "embedding.local_model",
+              "embedding.query_prefix", "embedding.doc_prefix",
+              "embedding.dimensions", "graph.embedding_provider",
+              # Vault-relative (upload_dir) or one corpus's maps (staging_dir).
+              "ocr_studio.upload_dir", "knowledge_map.staging_dir"]
+
+# What a key holds in a FRESH vault, and in a vault registered before the key
+# joined VAULT_KEYS (backfill), relative to that vault's own data dir. Keys
+# absent here and from _VAULT_FRESH_VALUES take the current vault's value: the
+# embedder, which a new vault inherits until it is changed in Settings.
+_VAULT_OWN_FILES = {
+    **{key: base for key, base in lane_guard.LANE_CHUNK_FILES.values()
+       if key != "paths.chunks_file"},
+    "webui.manifest_cache": ".manifest_cache.json",
+    "retrieval.parents_file": "parents_md.jsonl",
+    "retrieval.route.pointers_file": "route_pointers.json",
+    "pdf.figures_dir": "figures",
+    "notebooks.figures_dir": "notebook_figures",
+    "canvas.backup_dir": "canvas_backups",
+    "knowledge_map.staging_dir": "canvas_maps/staging",
+}
+# Vault-relative values: another vault's folder names mean nothing here.
+_VAULT_FRESH_VALUES = {
+    # Empty = browse from the vault root: any other default names a folder
+    # that exists in one specific vault and nowhere else.
+    "webui.vault_tree_root": "",
+    "webui.inbox_dir": "Inbox",
+    "ocr_studio.upload_dir": "OCR Studio",
+    "graph.embedding_provider": "null",
+}
 
 # Registry lives at a vault-INDEPENDENT path (DATA_DIR follows the per-vault
 # chunks_file, so it moves on switch — the registry must not move with it).
@@ -5052,7 +5158,32 @@ def _save_vaults(vaults: list[dict]) -> None:
 def _fresh_settings_snapshot() -> dict[str, str]:
     from src.utils.config_loader import load_config as _load
     disk = _load()
-    return {k: str(disk.get(k) or "") for k in VAULT_KEYS}
+    # None stays "null" (written back unquoted): as "" it would come back as an
+    # empty STRING, and graph.embedding_provider: "" is not "unset".
+    return {k: "null" if (v := disk.get(k)) is None else str(v) for k in VAULT_KEYS}
+
+
+def _embedding_from_sidecar(settings: dict) -> dict[str, str]:
+    """The embedding keys of the embedder that built this vault's collection,
+    read from its fingerprint sidecar; {} when there is none to read. Only the
+    keys the sidecar decides: an endpoint entry keeps its model in
+    embedding.providers, so local_model and the prefixes are left alone."""
+    from src.embeddings.sidecar import read_sidecar
+    chroma, coll = settings.get("paths.chroma_dir"), settings.get("paths.collection_name")
+    if not chroma or not coll:
+        return {}
+    try:
+        sc = read_sidecar(Path(chroma), coll)
+    except ValueError as e:           # untrustworthy: say so, and decide nothing
+        log.warning("vault backfill: %s", e)
+        return {}
+    if not sc:
+        return {}
+    if sc["provider"] != "local":
+        return {"embedding.provider": str(sc["provider"])}
+    return {"embedding.provider": "local", "embedding.local_model": str(sc["model"]),
+            "embedding.query_prefix": str(sc["query_prefix"]),
+            "embedding.doc_prefix": str(sc["doc_prefix"])}
 
 
 def _norm_vault(p: str) -> str:
@@ -5138,22 +5269,18 @@ def vaults_switch(body: VaultSwitchIn) -> dict:
         slug = re.sub(r"[^\w\-]+", "_", target.name).strip("_").lower() or "vault"
         chroma_root = _shared_chroma_root(snap["paths.chroma_dir"])
         if tgt is None or not tgt.get("settings"):
+            own = f"data/vaults/{slug}"
             settings = {
+                **{k: snap[k] for k in VAULT_KEYS},     # the embedder, inherited
+                **{k: f"{own}/{base}" for k, base in _VAULT_OWN_FILES.items()},
+                **_VAULT_FRESH_VALUES,
                 "parser.vault_path": str(target).replace("\\", "/"),
-                "paths.chunks_file": f"data/vaults/{slug}/chunks.jsonl",
+                "paths.chunks_file": f"{own}/chunks.jsonl",
                 "paths.chroma_dir": (chroma_root / f"vault_{slug}" / "chroma_db"
                                      ).as_posix(),
                 "paths.bm25_index": (chroma_root / f"vault_{slug}" / "bm25_index.pkl"
                                      ).as_posix(),
                 "paths.collection_name": snap["paths.collection_name"] or "obsidian_vault",
-                "webui.inbox_dir": snap["webui.inbox_dir"] or "Inbox",
-                # A fresh vault gets its OWN root and cache. The tree root is
-                # empty = browse from the vault root: any other default names a
-                # folder that exists in one specific vault and nowhere else.
-                "webui.vault_tree_root": "",
-                "webui.manifest_cache": f"data/vaults/{slug}/.manifest_cache.json",
-                "retrieval.parents_file": f"data/vaults/{slug}/parents_md.jsonl",
-                "retrieval.route.pointers_file": f"data/vaults/{slug}/route_pointers.json",
             }
             scaffolded = True
             if tgt is None:
@@ -5173,13 +5300,15 @@ def vaults_switch(body: VaultSwitchIn) -> dict:
             # new sidecar that would make parent_context silently find nothing.
             own = Path(tgt["settings"].get("paths.chunks_file")
                        or f"data/vaults/{slug}/chunks.jsonl").parent.as_posix()
-            defaults = {
-                "webui.vault_tree_root": "",
-                "webui.manifest_cache": f"{own}/.manifest_cache.json",
-                "retrieval.parents_file": f"{own}/parents_md.jsonl",
-                "retrieval.route.pointers_file": f"{own}/route_pointers.json",
-            }
             missing = [k for k in VAULT_KEYS if k not in tgt["settings"]]
+            # The embedder: whatever built this vault's collection, when its
+            # sidecar says; the current one is only a guess.
+            defaults = {
+                **{k: f"{own}/{base}" for k, base in _VAULT_OWN_FILES.items()},
+                **_VAULT_FRESH_VALUES,
+                **(_embedding_from_sidecar(tgt["settings"])
+                   if any(k.startswith("embedding.") for k in missing) else {}),
+            }
             for key in missing:
                 tgt["settings"][key] = defaults.get(key, snap.get(key, ""))
             if missing:

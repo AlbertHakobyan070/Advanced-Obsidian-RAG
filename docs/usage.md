@@ -268,15 +268,21 @@ model can change from one request to the next.
 Open **http://127.0.0.1:8052**. Every tab follows one design, drawn from the active
 theme's tokens: panels open with a small kicker line above their heading, actions
 carry icons from one icon set, and every confirmation or prompt is an in-page dialog
-in the theme, never a browser pop-up. Tabs:
+in the theme, never a browser pop-up. The header names the active vault, the console
+reopens on the tab you left (the address bar carries it too, so a link opens that tab),
+and any list that grows with use scrolls inside its card. Tabs:
 
 - **Ledger** — the corpus at a glance: chunk, document and vector counts, disk use, the
-  **Index health** card (below), each domain's share, every chunk file, and recent jobs.
-- **Query** — Ask / Search with its knobs in labeled groups (pool sizes, extra lanes
+  **Index health** card (below), each domain's share, every chunk file (with when it last
+  changed, sorted newest first, oldest first or by chunk count), and recent jobs.
+- **Query** — the presets, the query history (kept per vault) and the question box sit
+  above three sub-tabs: **Answer**, **Compare** and **Graph** (the last only while Graph
+  RAG is switched on). Answer is Ask / Search with its knobs in labeled groups (pool sizes, extra lanes
   HyDE/HyPE/Omnisearch, rerank method, E2 parents/neighbors), plus copy and `.md` export
   (ready to paste into any Markdown editor). The Markdown + LaTeX **Preview** toggle renders the answer *and every
-  source chunk* — math, tables and fenced code included. Its **Query comparison tree**
-  fans the current question across live-config presets and generation backends or the
+  source chunk* — math, tables and fenced code included. **Compare**, the **Query
+  comparison tree**, keeps the same knobs (its branches start from them) and fans the
+  current question across live-config presets and generation backends or the
   built-in rerank baselines, with evidence-only and generated-answer modes.
 - **Documents** — search, `#tag` filter, **retag** (domain / group label / tags —
   metadata-only, no re-embed), and **delete** from the index.
@@ -357,7 +363,8 @@ in the theme, never a browser pop-up. Tabs:
       Settings, builds the index through the job queue (`graph_embed`), follows the job,
       and then offers the restart. Choosing the main embedder only saves the setting, and
       no new build starts while one is queued or running.
-- **Jobs** — watch long-running ingest / maintenance jobs.
+- **Jobs** — watch long-running ingest / maintenance jobs: the active vault's by
+  default, every vault's with **all vaults**.
 - **Eval** — the review queue for the bench's question sets
   ([Eval review queue](api.md#eval-review-queue)): progress per suite against its quota,
   the questions filtered by suite, status and split, and one question at a time with its
@@ -376,9 +383,12 @@ in the theme, never a browser pop-up. Tabs:
   overwriting. **Font pickers** for headings / body / mono (system serif and sans
   choices like Times New Roman, Georgia, Arial — or any installed font by name) apply
   over every theme. Then a **vault switcher** that remembers
-  every vault ever opened together with its own path/index settings and swaps the whole
-  set atomically; and the editable config surface with **📁 folder pickers**: vault root,
-  Chroma / BM25 / chunks paths, embedding + cross-encoder models, default rerank &
+  every vault ever opened together with its own settings (index paths and collection,
+  every lane's chunk file, figure and backup folders, the inbox and tree root, and the
+  embedder) and swaps the whole set atomically; and the editable config surface with **📁 folder pickers**: vault root,
+  Chroma / BM25 / chunks paths, the embedding model (pick it **by name**: each known
+  model and `embedding.providers` entry, marked when a collection in this vault was
+  built with it, which one click makes the active collection), cross-encoder models, default rerank &
   chunking, generation endpoint, and the Graph tab's suggest-label backend and model,
   label-tag indexing and graph seed embedder. Saves rewrite `config.yaml` in place
   (comments preserved); nothing hot-applies — the response says which service to restart.
