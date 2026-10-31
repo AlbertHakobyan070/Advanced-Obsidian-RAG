@@ -178,6 +178,7 @@ def _print_pdf(url: str, dest: Path) -> None:
     highlighted code — which markdown conversion necessarily flattens."""
     try:
         from playwright.sync_api import Error as PWError, sync_playwright
+        from playwright.sync_api import TimeoutError as PWTimeout
     except ImportError as e:
         raise RuntimeError(
             "PDF fetch needs playwright — pip install playwright && "
@@ -198,7 +199,15 @@ def _print_pdf(url: str, dest: Path) -> None:
                     f"cache before launching. (playwright said: {e})") from e
             try:
                 page = browser.new_page(viewport={"width": 1280, "height": 1024})
-                page.goto(url, wait_until="networkidle", timeout=90_000)
+                page.goto(url, wait_until="load", timeout=90_000)
+                # Then let late requests settle, but only for so long: a page with
+                # constant background traffic (ads, analytics, polling) never goes
+                # network-idle, and waiting for it failed every such page after
+                # 90 s although it had long since rendered.
+                try:
+                    page.wait_for_load_state("networkidle", timeout=15_000)
+                except PWTimeout:
+                    pass
                 page.wait_for_timeout(1500)   # late math/highlight rendering
                 page.pdf(path=str(dest), format="A4", print_background=True,
                          margin={"top": "14mm", "bottom": "14mm",

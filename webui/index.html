@@ -477,7 +477,7 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
 #tab-query .q-run.primary .q-run-copy small{color:color-mix(in srgb,var(--btn-primary-ink) 72%,transparent)}
 
 #tab-query .fsets{margin:12px 20px 20px;padding:0;border:0;background:none;display:grid;
-  grid-template-columns:1.08fr .9fr 1.12fr;gap:10px;align-items:stretch}
+  grid-template-columns:1.08fr .9fr 1.12fr;gap:10px;align-items:start}
 #tab-query .fset{border:1px solid var(--line);border-radius:var(--r-lg);padding:13px;
   background:var(--panel-2);display:flex;flex-direction:column;gap:11px}
 #tab-query .fset-head{display:flex;align-items:center;gap:9px}
@@ -491,22 +491,33 @@ tr.fcfg td{background:var(--panel-2);border-bottom:1px solid var(--line);padding
 #tab-query .q-field{display:flex;flex-direction:column;gap:4px;min-width:0}
 #tab-query .q-field>span{font:9.5px var(--mono);color:var(--ink-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #tab-query .q-field input,#tab-query .q-field select{width:100%;min-width:0;box-sizing:border-box;height:34px;padding:6px 8px}
-#tab-query .q-lanes{display:grid;grid-template-columns:1fr;gap:7px}
+/* Lane chips are one line each (name, then its gloss, then the switch), so three of them end
+   level with the two-row grids beside them instead of stretching the row of cards. */
+#tab-query .q-lanes{display:grid;grid-template-columns:1fr;gap:4px}
 #tab-query .q-toggle{display:grid;grid-template-columns:minmax(0,1fr) 96px;align-items:center;column-gap:8px;
-  padding:7px 8px 7px 9px;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--panel)}
+  padding:4px 4px 4px 9px;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--panel)}
 #tab-query .q-toggle:hover{border-color:var(--amber-dim)}
-#tab-query .q-toggle select{width:96px;height:30px;min-width:0;padding:4px 6px;font-size:10.5px}
+#tab-query .q-toggle>div{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#tab-query .q-toggle select{width:96px;height:24px;min-width:0;padding:2px 6px;font-size:10.5px}
 #tab-query .q-toggle b{font-size:11.5px;font-weight:600;color:var(--ink)}
-#tab-query .q-toggle small{display:block;font-size:9.5px;color:var(--ink-faint);margin-top:1px}
+#tab-query .q-toggle small{display:inline;font-size:9.5px;color:var(--ink-faint);margin-left:6px}
 #tab-query .q-context-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 #tab-query .q-context-grid .q-field:last-child{grid-column:1/-1}
 #tab-query .q-compare{margin:0 20px 20px;border:1px solid var(--line);border-radius:var(--r-lg);
   background:var(--panel-2);padding:13px}
 /* Query modes: Answer / Compare / Graph share the composer above and switch
-   below it. The strip reuses the Info tab's segmented-button look (.qsub.on
-   sits on the .dgbtn.on rule); .q-off hides a pane, and is a class rather than
-   `hidden` because `hidden` belongs to the experimental gate. */
-#tab-query .q-subs{display:flex;gap:8px;flex-wrap:wrap;margin:14px 20px 12px}
+   below it. The strip is a centred segmented control: one pill track, the
+   active segment filled with the accent in the same pair .btn.primary uses
+   (--amber / --btn-primary-ink), so every theme preset carries it. .q-off
+   hides a pane, and is a class rather than `hidden` because `hidden` belongs
+   to the experimental gate. */
+#tab-query .q-subs{display:flex;gap:2px;width:fit-content;max-width:calc(100% - 40px);margin:14px auto 12px;padding:3px;
+  border:1px solid var(--line);border-radius:var(--r-pill);background:var(--panel-2)}
+#tab-query .q-subs .qsub{min-width:96px;height:30px;padding:0 18px;border:0;border-radius:var(--r-pill);
+  background:transparent;color:var(--ink-dim);font-weight:500;transition:background-color .15s,color .15s}
+#tab-query .q-subs .qsub:hover{color:var(--ink);background:color-mix(in srgb,var(--ink) 7%,transparent)}
+#tab-query .q-subs .qsub.on{background:var(--amber);color:var(--btn-primary-ink);font-weight:600}
+#tab-query .q-subs .qsub:focus-visible{outline:2px solid var(--amber);outline-offset:1px}
 #tab-query .q-off{display:none!important}
 /* Each mode pane opens with its name and what it does. */
 #tab-query .qcmp-bar{display:flex;align-items:baseline;gap:8px;margin:-13px -13px 0;padding:13px;
@@ -904,6 +915,8 @@ button.btn:has(>svg.i){display:inline-flex;align-items:center;justify-content:ce
 /* per-token designer: one row per THEME_VARS entry, bound both ways to the CSS box */
 .thm-vars{display:grid;grid-template-columns:repeat(auto-fill,minmax(228px,1fr));gap:4px 14px;margin-top:4px}
 .thm-vars .kicker{grid-column:1/-1;margin:10px 0 0;padding-bottom:3px;border-bottom:1px solid var(--line)}
+/* the Appearance card scrolls as one box; its token-group headings pin like the Ledger's table head */
+.thm-body .thm-vars .kicker{position:sticky;top:0;z-index:1;background:var(--panel);padding-top:4px}
 .thm-var{display:grid;grid-template-columns:26px 108px minmax(0,1fr);align-items:center;gap:6px;min-width:0}
 .thm-vn{font:11px var(--mono);color:var(--ink-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .thm-var input.thm-vv{min-width:0;width:100%;padding:3px 6px;font:11.5px var(--mono)}
@@ -1723,11 +1736,14 @@ button.btn:has(>svg.i){display:inline-flex;align-items:center;justify-content:ce
   <div class="panel">
     <div class="panel-head"><div><span class="kicker">This browser</span><h2>Appearance</h2></div></div>
     <div class="thm-msg bad" id="thm-warn" role="alert"></div>
+    <!-- One bounded scroll for the whole card body (the Ledger "Chunk files" recipe): the heading
+         and the warning stay put, the shelves / fonts / editor / bulk tools scroll inside. -->
+    <div class="scrollbox pad thm-body" style="--sb-h:62vh">
     <div class="desc">Themes and description mode are <b>browser-local</b> (saved in this browser, not in config.yaml). The two shelves keep dark and light presets apart; click a chip to apply it. Custom presets carry <b><svg class="i" aria-hidden="true"><use href="#i-pencil"/></svg> rename</b> and <b><svg class="i" aria-hidden="true"><use href="#i-x"/></svg> delete</b>; built-ins don't. The header theme button cycles through everything on both shelves.</div>
     <label class="f">Dark presets</label>
-    <div class="thm-shelf scrollbox" id="thm-dark-shelf" style="--sb-h:22vh;padding:6px 8px"></div>
+    <div class="thm-shelf" id="thm-dark-shelf"></div>
     <label class="f" style="margin-top:12px">Light presets</label>
-    <div class="thm-shelf scrollbox" id="thm-light-shelf" style="--sb-h:22vh;padding:6px 8px"></div>
+    <div class="thm-shelf" id="thm-light-shelf"></div>
     <div class="row" style="margin-top:14px">
       <label class="chk" title="Show inline explainers under every Ingest / Query section"><input type="checkbox" id="set-descs">description mode</label>
       <button class="btn" id="token-forget" title="Remove the API token this browser kept after the server asked for it (RAG_API_TOKEN). The next refused request asks again.">forget token</button>
@@ -1741,7 +1757,7 @@ button.btn:has(>svg.i){display:inline-flex;align-items:center;justify-content:ce
     </div>
     <div style="margin-top:16px"><label class="f">Theme editor — export, tweak, save as preset</label>
       <div class="hint" style="margin:2px 0 0">Each row edits one token in the CSS box below, and typing in the box updates the rows; either previews on this page at once. Editing starts from the theme in use: the first row you change fills an empty box with that theme's tokens and sets the shelf to match. A token the box leaves out falls back to Ledger dark, as it does in a saved preset.</div>
-      <div class="thm-vars scrollbox pad" id="thm-vars" style="--sb-h:44vh" role="group" aria-label="Theme tokens"></div>
+      <div class="thm-vars" id="thm-vars" role="group" aria-label="Theme tokens"></div>
       <div class="thm-msg" id="thm-preview" role="status"></div>
       <textarea id="thm-css" rows="6" style="width:100%;font-family:var(--mono);font-size:12px" spellcheck="false" placeholder='[data-theme="custom"]{&#10;  --bg:#101010; --panel:#181818; --amber:#E8A33D; …&#10;}'></textarea>
       <div class="row" style="margin-top:8px">
@@ -1765,6 +1781,7 @@ button.btn:has(>svg.i){display:inline-flex;align-items:center;justify-content:ce
       <div class="thm-msg bad" id="thm-bulk-err" role="alert"></div>
       <div class="hint" style="margin-top:6px">Importing merges and never overwrites: a key that already exists with different content comes in as <span class="mono">key-2</span> (then <span class="mono">-3</span>…), identical presets are skipped, and a file that fails validation changes nothing. Both the wrapped file and a bare <span class="mono">{key: {label, mode, css}}</span> map are accepted. The single-preset export and Save above work as before.</div>
     </div>
+    </div>
   </div>
 
   <div class="panel">
@@ -1783,6 +1800,7 @@ button.btn:has(>svg.i){display:inline-flex;align-items:center;justify-content:ce
     <p class="hint">Saved values are written into config.yaml in place (comments preserved). <b>Nothing hot-applies</b> — the save response tells you which services to restart. Point these at a different vault / index pair to run this console against another RAG.</p>
     <div class="desc">Typical setups: <b>another vault</b> = change the vault root AND give it its own Chroma dir + BM25 pickle + chunks JSONL (each corpus needs its own index trio — mixing them corrupts nothing but retrieves nonsense). <b>Embedding model</b>: changing it makes every existing vector incompatible — you must re-embed the whole corpus (<code>main.py index</code>) before search works again; the cross-encoder and generation settings are safe to swap freely. Enum defaults (rerank / chunking) only set the <i>config default</i>; per-call overrides in Query/Ingest always win.</div>
     <div id="set-fields" class="grid g2" style="margin-top:10px"><div class="skel"></div></div>
+    <div id="set-embedding" style="margin-top:16px"></div>
     <div id="set-rerankers" style="margin-top:16px"></div>
     <div id="set-ocr" style="margin-top:16px"></div>
     <div id="set-providers" style="margin-top:16px"></div>
@@ -1791,6 +1809,14 @@ button.btn:has(>svg.i){display:inline-flex;align-items:center;justify-content:ce
       <button class="btn" id="set-reload" title="Discard edits and re-read current values">Reload</button>
       <span id="set-msg" class="hint" style="margin:0"></span>
     </div>
+  </div>
+
+  <!-- Fetch engines: versions of the web-import packages, with a dry-run Check and a
+       queued Update (job kind engine_update). No data-key here: Save scans the tab for it. -->
+  <div class="panel" id="fe-panel">
+    <div class="panel-head"><div><span class="kicker">Web import</span><h2>Fetch engines</h2></div><p class="hint" id="fe-env"></p></div>
+    <p class="hint"><b>Check</b> asks PyPI for the latest release and dry-runs the upgrade, listing every package it would change. <b>Update</b> queues an <span class="mono">engine_update</span> job (follow it in the Jobs tab) that upgrades the package past its <span class="mono">requirements.txt</span> pin, then runs its browser installs.</p>
+    <div id="fe-list" class="scrollbox pad" style="--sb-h:40vh"><div class="skel"></div></div>
   </div>
 
   <!-- Experimental features. Rendered from the server's EXPERIMENTAL_FEATURES
@@ -4592,7 +4618,7 @@ async function loadSettings(){
     relocateFields(RERANK_FIELD_KEYS,"#rr-fields");
     relocateFields(PROVIDER_FIELD_KEYS,"#pv-fields");
     wireSettingsInteractions(s);
-    renderEmbedPicker(s);
+    renderEmbedding(s);
     loadOcr();
     /* Choosing a provider from the dropdown itself carries its model along,
        exactly as the Use button does. */
@@ -4760,43 +4786,85 @@ function setField(key,value){
     el.add(new Option(value,value));
   el.value=value;markSelections();return true;
 }
-/* Choose the embedder by NAME. The picker stands before the embedding.* fields
-   and only fills them (provider, model, both prefixes), so Save and the path
-   field work as before. When a finished collection in this vault was built by
-   the choice it offers to point paths.collection_name at it: a swap with no
-   re-embed. With none, it says a re-embed comes first (:8051 refuses vectors
-   from another embedder). */
-function renderEmbedPicker(s){
-  const prov=fieldEl("embedding.provider");if(!prov)return;
-  let anchor=prov;
-  while(anchor.parentElement&&anchor.parentElement.id!=="set-fields")anchor=anchor.parentElement;
+/* ---------- embedding: one decision, kept consistent ----------
+   The model that embeds a query must be the one that built the collection
+   searched, or :8051 refuses to start. Provider, model, both prefixes and the
+   collection are therefore ONE panel, and each side moves the other:
+     - picking a model (here, or in the provider/model fields) switches the
+       collection to one this vault built with it, when there is one;
+     - picking a collection another model built switches the model to it.
+   The model and prefix fields grey out where the provider ignores them, and
+   the verdict line says what :8051 will do with the values as they stand. */
+const EMB_FIELD_KEYS=["embedding.provider","paths.collection_name","embedding.local_model",
+  "embedding.query_prefix","embedding.doc_prefix"];
+function renderEmbedding(s){
+  const box=$("#set-embedding");
+  if(!box||!fieldEl("embedding.provider"))return;
   const opts=s.embedders||[];
-  const optHtml=(o,i)=>`<option value="${i}"${o.error?" disabled":""}>${esc(o.label)}${o.dimension&&!/\d-d\b/.test(o.label)?` · ${o.dimension}-d`:""}${o.collections.length?" · built":""}</option>`;
+  const colls=(s.embed_collections||[]).filter(c=>!c.error);
+  const optHtml=(o,i)=>`<option value="${i}"${o.error?" disabled":""}>${esc(o.label)}${o.dimension&&!/\d-d\b/.test(o.label)?` · ${o.dimension}-d`:""}${o.collections.length?" · built here":""}</option>`;
   const group=(label,test)=>{const rows=opts.map((o,i)=>[o,i]).filter(([o])=>test(o));
     return rows.length?`<optgroup label="${esc(label)}">${rows.map(([o,i])=>optHtml(o,i)).join("")}</optgroup>`:""};
-  const box=document.createElement("div");
-  box.innerHTML=`<label class="f" for="emb-pick">Embedding model by name <span class="mono" style="font-size:11px;color:var(--ink-faint)">embedding.*</span></label>
-    <select id="emb-pick"><option value="">— the fields below —</option>${group("Local models (sentence-transformers)",o=>o.provider==="local")}${group("Endpoints (embedding.providers)",o=>o.provider!=="local")}</select>
-    <div class="hint" id="emb-pick-hint" style="margin:2px 0 0"></div>`;
-  anchor.before(box);
-  const sel=$("#emb-pick"),hint=$("#emb-pick-hint");
-  const match=()=>opts.findIndex(o=>o.provider===liveVal("embedding.provider")
-    &&(o.provider!=="local"||o.model===liveVal("embedding.local_model")));
-  const describe=()=>{
-    const o=opts[+sel.value];
-    if(sel.value===""||!o){hint.textContent="Pick a model to fill the provider, model and prefix fields.";return}
-    const active=liveVal("paths.collection_name");
-    const built=o.collections||[];
-    let html=esc(o.note||"");
-    if(built.includes(active))html+=` <b>This vault's collection ${esc(active)} was built with it.</b>`;
-    else if(built.length)html+=` Built in this vault: `+built.map(c=>`<button class="btn emb-coll" data-coll="${esc(c)}">Use ${esc(c)}</button>`).join(" ");
-    else html+=` <span style="color:var(--red)">No collection in this vault was built with it: re-embed first (<span class="mono">main.py index --rebuild-into NAME --embedding ${esc(o.provider)}</span>), or :8051 refuses to start.</span>`;
-    hint.innerHTML=html;
-    hint.querySelectorAll(".emb-coll").forEach(b=>b.onclick=()=>{setField("paths.collection_name",b.dataset.coll);describe()});
+  box.innerHTML=`<h3 style="margin:0 0 6px">Embedding <span class="hint" style="margin:0;display:inline;font-weight:400">— the model that turns text into vectors, and the collection of vectors it built</span></h3>
+    <p class="hint" style="margin:0 0 10px">The two must match: :8051 embeds every query with the model set here and refuses to start on a collection another model built. Choosing either side moves the other.</p>
+    <label class="f" for="emb-pick">Model by name</label>
+    <select id="emb-pick"><option value="">— custom (the fields below) —</option>${group("Local models (sentence-transformers)",o=>o.provider==="local")}${group("Endpoints (embedding.providers)",o=>o.provider!=="local")}</select>
+    <div id="emb-verdict" class="hint" style="margin:8px 0 0"></div>
+    <div id="emb-fields" class="grid g2" style="margin-top:10px"></div>
+    <datalist id="emb-colls">${colls.map(c=>`<option value="${esc(c.name)}">${esc(c.provider+" · "+c.model+(c.status==="complete"?"":" ("+c.status+")"))}</option>`).join("")}</datalist>`;
+  relocateFields(EMB_FIELD_KEYS,"#emb-fields");
+  const sel=$("#emb-pick"),verdict=$("#emb-verdict");
+  const collEl=fieldEl("paths.collection_name");
+  if(collEl)collEl.setAttribute("list","emb-colls");
+  const coll=name=>colls.find(c=>c.name===name);
+  /* The embedder as the fields stand: an endpoint entry carries its own model. */
+  const current=()=>{
+    const p=liveVal("embedding.provider");
+    const o=opts.find(x=>x.provider===p&&(p!=="local"||x.model===liveVal("embedding.local_model")));
+    return {provider:p,model:p==="local"?liveVal("embedding.local_model"):(o&&o.model)||"",opt:o};
   };
-  const i=match();sel.value=i<0?"":String(i);describe();
-  sel.onchange=()=>{
-    const o=opts[+sel.value];
+  let moved="";
+  const relevance=()=>{
+    const p=liveVal("embedding.provider");
+    [["embedding.local_model",p==="local"],["embedding.query_prefix",p==="local"||p==="openai"],
+     ["embedding.doc_prefix",p==="local"||p==="openai"]].forEach(([k,on])=>{
+      const el=fieldEl(k);if(!el)return;
+      el.disabled=!on;
+      let w=el;while(w.parentElement&&w.parentElement.id!=="emb-fields")w=w.parentElement;
+      w.style.opacity=on?"":".45";
+      w.title=on?"":"Not used: the "+p+" provider carries its own model and prefixes (embedding.providers."+p+").";
+    });
+  };
+  const show=()=>{
+    const cur=current(),name=liveVal("paths.collection_name"),c=coll(name);
+    const i=cur.opt?opts.indexOf(cur.opt):-1;
+    sel.value=i<0?"":String(i);
+    const who=`<b>${esc(cur.provider)}${cur.model?" · "+esc(cur.model):""}</b>`;
+    const dirty=EMB_FIELD_KEYS.some(k=>liveVal(k)!==String(state.settingsOrig[k]??"").trim());
+    const lead=(dirty?`<span class="pill">unsaved</span> `:"")+(moved?`<span class="pill">${esc(moved)}</span> `:"");
+    let line;
+    if(!c){
+      state.embVerdict="unknown";
+      line=`Queries are embedded with ${who}; collection <span class="mono">${esc(name)}</span> has no fingerprint in this vault's Chroma dir (not built yet, or built before fingerprints): :8051 serves it with a warning, and an empty collection finds nothing.`;
+    }else{
+      const same=c.provider===cur.provider&&c.model===cur.model
+        &&(cur.provider!=="local"||(c.query_prefix===fieldEl("embedding.query_prefix").value&&c.doc_prefix===fieldEl("embedding.doc_prefix").value));
+      state.embVerdict=same&&c.status==="complete"?"match":"mismatch";
+      if(state.embVerdict==="match")line=`<span class="pill done">match</span> Queries are embedded with ${who} and search <span class="mono">${esc(name)}</span>, which the same model built.`;
+      else{
+        const fits=(cur.opt&&cur.opt.collections)||[];
+        line=`<span class="pill failed">${c.status!=="complete"?"unfinished":"mismatch"}</span> <span class="mono">${esc(name)}</span> was built with <b>${esc(c.provider+" · "+c.model)}</b>${c.status!=="complete"?" and is still "+esc(c.status):""}, but queries would be embedded with ${who}: :8051 refuses to start. `
+          +(fits.length?`Collections built with this model: `+fits.map(n=>`<button class="btn emb-coll" data-coll="${esc(n)}">Use ${esc(n)}</button>`).join(" ")
+            :`No collection in this vault was built with it: re-embed first (<span class="mono">main.py index --rebuild-into NAME --embedding ${esc(cur.provider)}</span>).`);
+      }
+    }
+    verdict.innerHTML=lead+line;
+    verdict.querySelectorAll(".emb-coll").forEach(b=>b.onclick=()=>{setField("paths.collection_name",b.dataset.coll);moved="";show()});
+    relevance();
+  };
+  /* Model side moved: fill the fields it decides, then bring the collection along. */
+  const fromModel=o=>{
+    moved="";
     if(o){
       setField("embedding.provider",o.provider);
       if(o.provider==="local"){
@@ -4804,9 +4872,36 @@ function renderEmbedPicker(s){
         setField("embedding.query_prefix",o.query_prefix||"");
         setField("embedding.doc_prefix",o.doc_prefix||"");
       }
+      const built=o.collections||[];
+      if(built.length&&!built.includes(liveVal("paths.collection_name"))){
+        setField("paths.collection_name",built[0]);
+        moved="collection → "+built[0];
+      }
     }
-    describe();
+    show();
   };
+  /* Collection side moved: the model follows the one that built it. */
+  const fromCollection=()=>{
+    moved="";
+    const c=coll(liveVal("paths.collection_name"));
+    const cur=current();
+    if(c&&(c.provider!==cur.provider||c.model!==cur.model)){
+      setField("embedding.provider",c.provider);
+      if(c.provider==="local"){
+        setField("embedding.local_model",c.model);
+        setField("embedding.query_prefix",c.query_prefix||"");
+        setField("embedding.doc_prefix",c.doc_prefix||"");
+      }
+      moved="model → "+c.provider+" · "+c.model;
+    }
+    show();
+  };
+  sel.onchange=()=>fromModel(opts[+sel.value]);
+  fieldEl("embedding.provider").addEventListener("change",()=>fromModel(current().opt));
+  fieldEl("embedding.local_model")?.addEventListener("change",()=>fromModel(current().opt));
+  ["embedding.query_prefix","embedding.doc_prefix"].forEach(k=>fieldEl(k)?.addEventListener("input",()=>{moved="";show()}));
+  collEl?.addEventListener("change",fromCollection);
+  show();
 }
 /* Move a field's whole wrapper (label + control + restart badge) into `host`. */
 function relocateFields(keys,hostSel){
@@ -4994,6 +5089,65 @@ async function loadOcr(){
   catch(e){box.innerHTML=`<span style="color:var(--red)">${esc(e.message)}</span>`}
 }
 
+/* Fetch engines: the web-import packages. GET /api/fetch-engines = installed vs pin
+   (no internet); Check = PyPI latest + a dry run of the upgrade; Update shows that
+   dry run's change list, then queues an engine_update job. An upgrade can move
+   numpy/torch under the whole RAG, so Update never runs without a fresh dry run. */
+const FE_CHIP={up_to_date:["pill done","up to date"],update_available:["pill run","update available"],
+  differs_from_pin:["pill","differs from pin"],not_installed:["pill","not installed"],
+  check_failed:["pill failed","check failed"]};
+function feChanges(r){return (r.changes||[]).map(c=>`${c.package}: ${c.from||"(new)"} → ${c.to||"(removed)"}`)}
+function feRow(e){
+  const r=state.fe.checks[e.name];
+  const chips=((r?r.status:e.status)||[]).map(c=>{const[cls,txt]=FE_CHIP[c]||["pill",c];
+    return ` <span class="${cls}" style="margin-left:6px">${esc(txt)}</span>`}).join("");
+  const detail=!r?"":r.error?esc(r.error)
+    :(r.changes.length?"would change: "+esc(feChanges(r).join(" · ")):"the dry run changes nothing");
+  return `<div class="vault-row fe-row" style="align-items:flex-start">
+    <div style="flex:1;min-width:0"><span class="nm">${esc(e.name)}</span>${chips}
+      <div class="pth">installed ${esc(e.installed||"—")} · pin ${esc(e.pin||"—")} · latest ${esc(r?(r.latest||"?"):"—")}${e.note?" · "+esc(e.note):""}</div>
+      ${detail?`<div class="hint" style="margin:3px 0 0">${detail}</div>`:""}</div>
+    <button class="btn fe-check" data-name="${esc(e.name)}" title="Latest on PyPI + a dry run of the upgrade. Installs nothing.">Check</button>
+    <button class="btn fe-update" data-name="${esc(e.name)}" title="Review the dry run, then queue the upgrade as a job">Update</button></div>`;
+}
+function renderFe(){
+  const env=state.fe.env||{};
+  $("#fe-env").textContent=(env.container?"container · ":env.venv?"venv · ":"system Python · ")+(env.python||"?")+" · "+(env.installer||"?");
+  $("#fe-list").innerHTML=state.fe.list.map(feRow).join("")||`<div class="empty">No fetch engines listed.</div>`;
+  $$("#fe-list .fe-check").forEach(b=>b.onclick=()=>feCheck(b.dataset.name,b));
+  $$("#fe-list .fe-update").forEach(b=>b.onclick=()=>feUpdate(b.dataset.name,b));
+}
+async function feCheck(name,b){
+  if(b){b.disabled=true;b.textContent="checking…"}
+  try{state.fe.checks[name]=await api(`/api/fetch-engines/${encodeURIComponent(name)}/check`,{method:"POST"})}
+  catch(e){state.fe.checks[name]=e.body&&e.body.name?e.body:{status:["check_failed"],error:e.message,changes:[]}}
+  renderFe();
+  return state.fe.checks[name];
+}
+async function feUpdate(name,b){
+  const r=await feCheck(name,b);                   // always a fresh dry run before the confirm
+  if(!r.ok){toast(`${name}: check failed, nothing queued — ${r.error}`,1);return}
+  const ch=feChanges(r),env=r.environment||{},row=state.fe.list.find(x=>x.name===name)||{};
+  const post=(row.post_install||[]).join(", then ");
+  const msg=`Upgrade ${name} ${r.installed||"(not installed)"} → ${r.latest}.\n\n`
+    +(ch.length?`The dry run changes ${ch.length} package(s):\n${ch.join("\n")}`:"The dry run changes nothing.")
+    +(r.pin&&r.latest!==r.pin?`\n\nrequirements.txt pins ${r.pin}: this goes past the pin, and a reinstall from requirements.txt puts the pin back.`:"")
+    +(env.note?`\n\n${env.note}`:"")
+    +`\n\nRuns: ${r.command.replace(" --dry-run","")}${post?`\nthen: ${post}`:""}`;
+  if(!await uiConfirm(msg,{title:`Update ${name}?`,okLabel:"Queue update",danger:ch.length>1}))return;
+  try{const q=await api("/api/jobs",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({kind:"engine_update",params:{name}})});
+    toast(`engine_update ${q.job.id} queued — follow it in the Jobs tab, then Check again`)}
+  catch(e){toast(e.message,1)}
+}
+async function loadFetchEngines(){
+  state.fe=state.fe||{list:[],env:null,checks:{}};
+  try{const r=await api("/api/fetch-engines");state.fe.list=r.engines;state.fe.env=r.environment;renderFe()}
+  catch(e){$("#fe-list").innerHTML=`<span style="color:var(--red)">${esc(e.message)}</span>`}
+}
+$("#nav").addEventListener("click",e=>{const b=e.target.closest("button");
+  if(b&&b.dataset.tab==="settings")loadFetchEngines()});
+
 /* Model-hub credentials. Separate from generation backends because they are a
    different kind of thing: this is the credential used to DOWNLOAD embedding
    and reranker models, not to generate text.
@@ -5128,13 +5282,16 @@ $("#set-save").onclick=async()=>{
     if(v!==state.settingsOrig[k])changes[k]=v;
   });
   if(!Object.keys(changes).length){$("#set-msg").textContent="nothing changed";return}
-  const embChanged=["embedding.provider","embedding.local_model","embedding.query_prefix",
-    "embedding.doc_prefix"].some(k=>k in changes);
-  if(embChanged&&"paths.collection_name" in changes){
-    if(!(await uiConfirm(`Switch this vault to the embedder you picked and to collection ${changes["paths.collection_name"]}?\n\nThat collection was built with it, so no re-embed is needed. Restart :8051 to apply.`,
+  /* The embedding panel's verdict decides the warning: a matching collection
+     needs only a restart, a mismatch makes :8051 refuse to start. */
+  const embChanged=EMB_FIELD_KEYS.some(k=>k in changes);
+  if(embChanged&&state.embVerdict==="match"){
+    if(!(await uiConfirm(`Save the embedding change?\n\nThe collection ${liveVal("paths.collection_name")} was built with the model you chose, so no re-embed is needed. Restart :8051 to apply.`,
       {title:"Change the embedding model",okLabel:"Save"})))return;
   }else if(embChanged&&!(await uiConfirm(
-    "Changing the EMBEDDING MODEL invalidates every stored vector — the whole corpus must be re-embedded (main.py index, 30+ minutes) before search works again.\n\nSave anyway?",
+    state.embVerdict==="mismatch"
+      ?"The collection was built with a DIFFERENT model than the one set: :8051 will refuse to start until they match (pick a matching collection, or re-embed with main.py index --rebuild-into, 30+ minutes).\n\nSave anyway?"
+      :"No fingerprint says which model built this collection. If it is not the model set here, search returns nonsense; a new collection must be built (main.py index) before search finds anything.\n\nSave anyway?",
     {title:"Change the embedding model",okLabel:"Save anyway",danger:true})))return;
   if(changes["parser.vault_path"]&&!(await uiConfirm(
     `Point this RAG at a different vault?\n\n${changes["parser.vault_path"]}\n\nRemember: each vault needs its OWN Chroma dir + BM25 pickle + chunks JSONL — reusing another corpus's indexes returns nonsense.`,

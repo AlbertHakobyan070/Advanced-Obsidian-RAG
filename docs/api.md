@@ -899,6 +899,8 @@ annotations and prompts.
 | `GET /api/import/ocr_scan` | Which pages of a staged PDF carry no extractable text — run this before OCRing anything. |
 | `POST /api/rerank/check` | Preflight a cross-encoder: reachable? already cached (and where)? within its context limit? Downloads nothing. |
 | `GET /api/engines` | Every engine per component, with availability and the cost of a switch. See [Engines map](#engines-map). |
+| `GET /api/fetch-engines` | Each web-fetch package (crawl4ai, scrapling, crawlee, playwright, patchright, markitdown): installed version, `requirements.txt` pin, status, post-install commands, and the environment an update lands in (Python, venv, container). No internet. |
+| `POST /api/fetch-engines/{name}/check` | Latest release on PyPI plus a dry run of the upgrade (uv or pip) listing every package it would change. Installs nothing; a failure comes back readable in `error`. The upgrade itself is the `engine_update` job (`mutating`). |
 | `GET /api/eval/progress`, `GET /api/eval/questions`, `GET /api/eval/questions/{qid}` | The eval review queue: per-suite progress, the filtered question list, and one question with its gold texts and validator findings. See [Eval review queue](#eval-review-queue). |
 
 ### Change things — `mutating`

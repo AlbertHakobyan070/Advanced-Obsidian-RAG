@@ -109,3 +109,80 @@ def test_a_null_setting_survives_the_round_trip(management_module, monkeypatch, 
     m.vaults_switch(m.VaultSwitchIn(path=str(vault_b)))
     m.vaults_switch(m.VaultSwitchIn(path=str(vault_a)))
     assert _disk(tmp_path, "graph.embedding_provider") is None
+
+
+def _register(registry, vault, inbox, tree=""):
+    registry.write_text(json.dumps({"vaults": [{"path": str(vault), "label": vault.name, "settings": {
+        "parser.vault_path": vault.as_posix(), "paths.chunks_file": f"data/vaults/{vault.name}/chunks.jsonl",
+        "webui.inbox_dir": inbox, "webui.vault_tree_root": tree}}]}), encoding="utf-8")
+
+
+def test_a_stray_inbox_chain_is_removed_and_one_inbox_is_made(management_module, monkeypatch, tmp_path):
+    """A vault that inherited another vault's inbox path got that whole chain of
+    folder names created in it. The switch removes the empty chain and gives
+    the vault a plain Inbox; a stale tree root goes back to the vault root."""
+    m = management_module
+    registry = _setup(m, monkeypatch, tmp_path)
+    blank = tmp_path / "blank"
+    (blank / "00 – AUA_DS" / "Other" / "Inbox" / "_converted").mkdir(parents=True)
+    _register(registry, blank, "00 – AUA_DS/Other/Inbox", tree="00 – AUA_DS/Other")
+    m.vaults_switch(m.VaultSwitchIn(path=str(blank)))
+    assert _disk(tmp_path, "webui.inbox_dir") == "Inbox"
+    assert sorted(p.name for p in blank.iterdir()) == ["Inbox"]
+    assert _disk(tmp_path, "webui.vault_tree_root") == ""
+
+
+def test_a_real_nested_inbox_is_kept(management_module, monkeypatch, tmp_path):
+    m = management_module
+    registry = _setup(m, monkeypatch, tmp_path)
+    vault = tmp_path / "real"
+    (vault / "Notes" / "Inbox").mkdir(parents=True)
+    (vault / "Notes" / "a.md").write_text("x", encoding="utf-8")
+    _register(registry, vault, "Notes/Inbox", tree="Notes")
+    m.vaults_switch(m.VaultSwitchIn(path=str(vault)))
+    assert _disk(tmp_path, "webui.inbox_dir") == "Notes/Inbox"
+    assert _disk(tmp_path, "webui.vault_tree_root") == "Notes"
+    assert not (vault / "Inbox").exists()
+
+
+def test_back_and_forth_switches_keep_a_single_inbox(management_module, monkeypatch, tmp_path):
+    m = management_module
+    _setup(m, monkeypatch, tmp_path)
+    a, b = tmp_path / "A", tmp_path / "B"
+    a.mkdir()
+    (b / "inbox").mkdir(parents=True)                     # its own, lower-case
+    for target in (a, b, a, b, a):
+        m.vaults_switch(m.VaultSwitchIn(path=str(target)))
+    assert [p.name for p in a.iterdir()] == ["Inbox"]
+    assert [p.name for p in b.iterdir()] == ["inbox"]
+    m.vaults_switch(m.VaultSwitchIn(path=str(b)))
+    assert _disk(tmp_path, "webui.inbox_dir") == "inbox"
+
+
+def test_what_landed_in_a_stray_chain_moves_into_the_vaults_own_inbox(
+        management_module, monkeypatch, tmp_path):
+    """The live case: a fetch wrote into the stray chain before it was noticed.
+    Its file moves into Inbox (subfolders kept) and the chain goes."""
+    m = management_module
+    registry = _setup(m, monkeypatch, tmp_path)
+    vault = tmp_path / "example data"
+    conv = vault / "00 – AUA_DS" / "Other" / "Inbox" / "_converted"
+    conv.mkdir(parents=True)
+    (conv / "page.md").write_text("fetched", encoding="utf-8")
+    _register(registry, vault, "00 – AUA_DS/Other/Inbox")
+    m.vaults_switch(m.VaultSwitchIn(path=str(vault)))
+    assert _disk(tmp_path, "webui.inbox_dir") == "Inbox"
+    assert sorted(p.name for p in vault.iterdir()) == ["Inbox"]
+    assert (vault / "Inbox" / "_converted" / "page.md").read_text(encoding="utf-8") == "fetched"
+
+
+def test_a_single_folder_inbox_of_the_users_choosing_is_kept(management_module, monkeypatch, tmp_path):
+    m = management_module
+    registry = _setup(m, monkeypatch, tmp_path)
+    vault = tmp_path / "custom"
+    (vault / "Drop").mkdir(parents=True)
+    (vault / "Drop" / "a.pdf").write_bytes(b"%PDF")
+    _register(registry, vault, "Drop")
+    m.vaults_switch(m.VaultSwitchIn(path=str(vault)))
+    assert _disk(tmp_path, "webui.inbox_dir") == "Drop"
+    assert sorted(p.name for p in vault.iterdir()) == ["Drop"]

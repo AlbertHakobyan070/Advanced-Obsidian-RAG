@@ -556,6 +556,12 @@ def _build_argv(kind: str, prm: dict) -> list[str]:
         return [py, "rebuild_bm25.py"]
     if kind == "route_pointers":
         return [py, "main.py", "route-pointers"]
+    if kind == "engine_update":
+        from src.fetch_engines import ENGINES
+        name = prm.get("name")
+        if name not in ENGINES:
+            raise ValueError(f"engine_update name must be one of {list(ENGINES)}, got {name!r}")
+        return [py, "-m", "src.fetch_engines", name]
     if kind == "build_tantivy":
         return [py, "build_tantivy.py"]
     if kind == "build_hype":
@@ -1167,8 +1173,12 @@ def overview() -> dict:
     except Exception:
         rag_ready = False
 
+    # Snapshot under the lock, render outside it (as jobs_list does): public()
+    # takes the lock itself for a queued or running job, and it is not
+    # reentrant, so rendering in here deadlocked the console for good.
     with _jobs_lock:
-        recent = [_JOBS[j].public() for j in _ORDER[-6:]][::-1]
+        recent = [_JOBS[j] for j in _ORDER[-6:]][::-1]
+    recent = [j.public() for j in recent]
 
     return {
         "files": len(manifest),
@@ -3409,6 +3419,10 @@ def settings() -> dict:
     editable["embedding.provider"]["values"] = _embedding_provider_values(disk_cfg)
     return {
         "embedders": _embedder_options(disk_cfg),
+        # Every fingerprinted collection in the active chroma_dir and the
+        # embedder that built it: the Settings embedding panel keeps the
+        # collection and the embedder consistent in both directions.
+        "embed_collections": _probe_embeddings(disk_cfg)["collections"],
         "rag_api": RAG_API,
         "providers": provider_details,
         "hub": _hub_credentials(),
@@ -3945,7 +3959,8 @@ def _probe_embeddings(cfg) -> dict:
         if sc["role"] != "chunks":           # HyPE question collections are not switchable
             continue
         collections.append({"name": name, "provider": sc["provider"], "model": sc["model"],
-                            "status": sc["status"],
+                            "status": sc["status"], "query_prefix": sc["query_prefix"],
+                            "doc_prefix": sc["doc_prefix"],
                             "diff": fingerprint_diff(spec, spec.dimensions, sc, role="chunks")})
     return {"active": str(cfg.get("paths.collection_name", "obsidian_vault")),
             "model": spec.label(), "provider": spec.provider,
@@ -4081,6 +4096,27 @@ def engines_set(body: EngineSetIn):
     return {"written": {key: disk.get(key) for key in result["written"]},
             "takes_effect": takes_effect, "next_op": next_op,
             "warnings": warnings + result["notes"] + restart_warnings}
+
+
+# ---- fetch-engine packages: versions, upgrade preview (Settings > Fetch engines) ----
+# The upgrade itself is the engine_update job, so it runs on the serial queue and is logged.
+
+@app.get("/api/fetch-engines")
+def fetch_engines_list() -> dict:
+    """Installed vs requirements.txt pin per package, and where an update would land.
+    Never contacts PyPI: `latest` comes from POST /api/fetch-engines/{name}/check."""
+    from src import fetch_engines
+    return {"engines": fetch_engines.rows(), "environment": fetch_engines.environment()}
+
+
+@app.post("/api/fetch-engines/{name}/check")
+def fetch_engines_check(name: str):
+    """Latest on PyPI plus a dry run of the upgrade: every package it would change."""
+    from src import fetch_engines
+    if name not in fetch_engines.ENGINES:
+        return _refused(f"unknown fetch engine {name!r}; expected one of "
+                        f"{list(fetch_engines.ENGINES)}")
+    return fetch_engines.check(name)
 
 
 # ---- OCR engines (status + warm-up) ----
@@ -5163,6 +5199,54 @@ def _fresh_settings_snapshot() -> dict[str, str]:
     return {k: "null" if (v := disk.get(k)) is None else str(v) for k in VAULT_KEYS}
 
 
+def _merge_into(src: Path, dest: Path) -> None:
+    """Move src's contents into dest, folder by folder. A file present on both
+    sides is a conflict: raise, never overwrite."""
+    dest.mkdir(parents=True, exist_ok=True)
+    for item in src.iterdir():
+        target = dest / item.name
+        if item.is_dir() and target.is_dir():
+            _merge_into(item, target)
+            item.rmdir()
+        elif target.exists():
+            raise ValueError(f"inbox merge: {target} already exists; move {item} by hand")
+        else:
+            shutil.move(str(item), str(target))
+
+
+def _settle_inbox(vault: Path, stored: str) -> str:
+    """The inbox a vault should use, so a vault keeps exactly one.
+
+    A stored path is kept when its top folder holds anything outside the inbox
+    (it is part of this vault), and when it is a single folder (the user's own
+    choice). A NESTED path whose top folder holds nothing but that inbox is a
+    chain another vault's inbox setting made here (`_inbox()` creates whatever
+    it is given): what landed in it moves into this vault's own inbox and the
+    chain's folders are removed. Otherwise an existing top-level inbox folder
+    (any case) is used, else "Inbox"."""
+    own = next((c.name for c in (vault.iterdir() if vault.is_dir() else ())
+                if c.is_dir() and c.name.lower() == "inbox"), None)
+    rel = _vault_rel(stored)
+    parts = rel.split("/") if rel else []
+    top = vault / parts[0] if parts else None
+    if top is not None and top.is_dir():
+        inbox = vault / rel
+        outside = any(p.is_file() and inbox not in p.parents for p in top.rglob("*"))
+        if outside or len(parts) == 1 or parts[0].lower() == "inbox":
+            # Spelled as on disk: "Inbox" and "inbox" are one folder on Windows.
+            return own if own and rel.lower() == own.lower() else rel
+        own = own or "Inbox"
+        if inbox.is_dir():
+            _merge_into(inbox, vault / own)
+        # Deepest first; rmdir refuses anything not empty, so nothing else goes.
+        for d in sorted((p for p in top.rglob("*") if p.is_dir()),
+                        key=lambda p: len(p.parts), reverse=True) + [top]:
+            d.rmdir()
+        log.info("vault %s: moved the stray inbox %s into %s", vault, rel, own)
+        return own
+    return own or "Inbox"
+
+
 def _embedding_from_sidecar(settings: dict) -> dict[str, str]:
     """The embedding keys of the embedder that built this vault's collection,
     read from its fingerprint sidecar; {} when there is none to read. Only the
@@ -5313,6 +5397,14 @@ def vaults_switch(body: VaultSwitchIn) -> dict:
                 tgt["settings"][key] = defaults.get(key, snap.get(key, ""))
             if missing:
                 log.info("vault %s: backfilled %s", tgt.get("label"), missing)
+        # Vault-relative settings must name folders of THIS vault: a stale tree
+        # root browses nothing, and a stale inbox was created here as a chain of
+        # another vault's folder names.
+        ts = tgt["settings"]
+        ts["webui.inbox_dir"] = _settle_inbox(target, ts.get("webui.inbox_dir", ""))
+        tree = _vault_rel(ts.get("webui.vault_tree_root", ""))
+        if tree and not (target / tree).is_dir():
+            ts["webui.vault_tree_root"] = ""
         if body.label:
             tgt["label"] = body.label
         tgt["last_used"] = time.strftime("%Y-%m-%d %H:%M")
@@ -5325,6 +5417,7 @@ def vaults_switch(body: VaultSwitchIn) -> dict:
     if scaffolded:
         Path(tgt["settings"]["paths.chunks_file"]).parent.mkdir(
             parents=True, exist_ok=True)
+    (target / tgt["settings"]["webui.inbox_dir"]).mkdir(parents=True, exist_ok=True)
     return {"ok": True, "written": written, "scaffolded": scaffolded,
             "note": ("New vault: empty per-vault indexes were scaffolded — "
                      "ingest to fill them. " if scaffolded else
@@ -6226,6 +6319,20 @@ def api_schema() -> dict:
                          "engine": "str (one of its swappable options)",
                          "model": "str? (generation: the model id; reranker "
                                   "cross_encoder: the cross-encoder id)"}},
+            "GET /api/fetch-engines": {
+                "permission": "read",
+                "purpose": "each web-fetch package (crawl4ai, scrapling, crawlee, "
+                           "playwright, patchright, markitdown): installed version, "
+                           "requirements.txt pin, status, post-install commands, and "
+                           "the environment an update lands in (python, venv, "
+                           "container + note). No internet: latest comes from check"},
+            "POST /api/fetch-engines/{name}/check": {
+                "permission": "read",
+                "purpose": "latest version on PyPI plus a DRY RUN of the upgrade "
+                           "(uv or pip): `changes` lists every package it would move, "
+                           "so an upgrade that drags numpy/torch is seen first. "
+                           "Installs nothing; failures come back in `error`. Upgrade "
+                           "with the engine_update job"},
             "GET /api/ocr/status": {
                 "permission": "read",
                 "purpose": "resolved Tesseract/VLM OCR capability, model "
@@ -6413,6 +6520,14 @@ def api_schema() -> dict:
                                        "generated_mode: route reads. Reads the chunk JSONLs and the "
                                        "vault; never writes a store. Run after an ingest that adds "
                                        "or changes generated content, then restart :8051"},
+            "engine_update": {"permission": "mutating",
+                              "params": {"name": "crawl4ai|scrapling|crawlee|playwright|"
+                                                 "patchright|markitdown"},
+                              "note": "upgrades one fetch package in the console's own "
+                                      "Python (uv or pip), then its browser installs. Can "
+                                      "move transitive packages: run POST "
+                                      "/api/fetch-engines/{name}/check first. In a "
+                                      "container it lasts until the image is rebuilt"},
             "build_tantivy": {"permission": "mutating", "params": {},
                               "note": "EXPERIMENTAL: build the tantivy index beside "
                                       "the BM25 pickle (needs the optional tantivy "

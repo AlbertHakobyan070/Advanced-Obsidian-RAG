@@ -386,9 +386,11 @@ and any list that grows with use scrolls inside its card. Tabs:
   every vault ever opened together with its own settings (index paths and collection,
   every lane's chunk file, figure and backup folders, the inbox and tree root, and the
   embedder) and swaps the whole set atomically; and the editable config surface with **📁 folder pickers**: vault root,
-  Chroma / BM25 / chunks paths, the embedding model (pick it **by name**: each known
-  model and `embedding.providers` entry, marked when a collection in this vault was
-  built with it, which one click makes the active collection), cross-encoder models, default rerank &
+  Chroma / BM25 / chunks paths, an **Embedding** panel (the model, picked
+  by name, and the collection it searches, kept consistent: choosing a model switches to
+  a collection this vault built with it, choosing a collection switches to the model
+  that built it, fields the provider ignores are greyed out, and a verdict line says
+  whether `:8051` will start), cross-encoder models, default rerank &
   chunking, generation endpoint, and the Graph tab's suggest-label backend and model,
   label-tag indexing and graph seed embedder. Saves rewrite `config.yaml` in place
   (comments preserved); nothing hot-applies — the response says which service to restart.
@@ -400,7 +402,10 @@ and any list that grows with use scrolls inside its card. Tabs:
   states what PyTorch can actually reach — a `cuda` device on a CPU-only torch build
   would otherwise fail silently into a much slower path; and **OCR**, which reports
   what each OCR engine can do right now and can warm a vision-OCR model before the
-  first ingest page.
+  first ingest page. A **Fetch engines** panel lists each web-import package with its
+  installed version and `requirements.txt` pin; **Check** fetches the latest release and
+  dry-runs the upgrade so every package it would change shows first, and **Update** queues
+  that upgrade (plus its browser installs) as an `engine_update` job in the Jobs tab.
 - **Info** — diagrams of the query and the ingestion pipelines. Hovering, focusing or
   clicking a stage shows what it does, which `config.yaml` keys control it, and whether
   it is on in the live config. A **Workspace map** has one card per tab, saying what each

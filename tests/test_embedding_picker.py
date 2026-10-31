@@ -45,6 +45,11 @@ def test_settings_lists_embedders_with_the_collections_they_built(management_mod
     assert by_model[("local", "BAAI/bge-base-en-v1.5")]["collections"] == ["notes_base"]
     assert by_model[("local", "BAAI/bge-small-en-v1.5")]["collections"] == []
     assert "local" in s["editable"]["embedding.provider"]["values"]
+    # Collection -> the embedder that built it, prefixes included: the panel
+    # switches the model to match a picked collection.
+    [c] = s["embed_collections"]
+    assert (c["name"], c["provider"], c["model"], c["query_prefix"], c["doc_prefix"]) == (
+        "notes_base", "local", "BAAI/bge-base-en-v1.5", "", "")
 
 
 def test_saving_a_pick_keeps_the_prefix_trailing_space(management_module, monkeypatch, tmp_path):

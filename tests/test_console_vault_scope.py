@@ -66,3 +66,27 @@ def test_a_restored_job_keeps_the_vault_its_record_names(m):
     assert m._load_job_records() == 2
     assert m._JOBS["withv"].public()["vault"] == "D:/Vaults/Animus"
     assert m._JOBS["nov"].public()["vault"] == ""
+
+
+def test_overview_with_a_running_job_does_not_deadlock(m, tmp_path, monkeypatch):
+    """overview() used to render recent jobs INSIDE _jobs_lock; a running job's
+    view takes that lock again (_typical_seconds), and it is not reentrant, so
+    the first Ledger poll during any job froze /api/overview, /api/jobs and
+    every job log for good."""
+    import threading
+    monkeypatch.setattr(m, "chunk_files", lambda: [])
+    monkeypatch.setattr(m, "build_manifest", lambda: {})
+    monkeypatch.setattr(m, "_collection", lambda: (_ for _ in ()).throw(RuntimeError("no store")))
+    monkeypatch.setattr("requests.get", lambda *a, **kw: (_ for _ in ()).throw(ConnectionError()))
+    job = m.Job(id="run1", kind="fetch_web", argv=[], params={}, status="running",
+                started=time.time(), log_file=str(tmp_path / "run1.log"))
+    m._JOBS["run1"] = job
+    m._ORDER.append("run1")
+    out = {}
+    t = threading.Thread(target=lambda: out.update(m.overview()), daemon=True)
+    t.start()
+    t.join(timeout=20)
+    assert not t.is_alive(), "overview() deadlocked on _jobs_lock"
+    assert [j["id"] for j in out["recent_jobs"]] == ["run1"]
+    assert m._jobs_lock.acquire(timeout=1)          # and it let go of the lock
+    m._jobs_lock.release()

@@ -15,6 +15,46 @@ reconstructed on 2026-10-14 from the commit history and the session notes,
 one per shipped milestone, so read them as a map of when things landed rather
 than as release-day notes.
 
+## [0.32.0] - 2026-11-01
+
+### Added
+- Settings has a Fetch engines panel: crawl4ai, scrapling, crawlee,
+  playwright, patchright and markitdown, each with its installed version,
+  its `requirements.txt` pin and the latest release. Check asks PyPI and runs
+  a dry run of the upgrade that lists every package it would change; Update
+  queues an `engine_update` job that upgrades only that package
+  (`uv pip install --upgrade-package`, or pip) and installs its browser. In a
+  container the panel says an update lasts only until the image is rebuilt.
+  `GET /api/fetch-engines` and `POST /api/fetch-engines/{name}/check` serve it.
+
+### Changed
+- The embedding settings are one Embedding panel whose model and collection
+  move together. Choosing a model (by name, or in the provider or model field)
+  switches the collection to one this vault built with it; choosing a
+  collection another model built switches the model to it. Fields the
+  provider ignores are greyed out, and a verdict line says whether `:8051`
+  will start (match, mismatch, or no fingerprint); Save warns accordingly.
+  `GET /api/settings` adds `embed_collections`.
+- A vault switch settles the target vault on one inbox. A stored inbox whose
+  folder holds the vault's own material is kept; a nested path whose top
+  folder holds nothing but that inbox (another vault's path, created there)
+  has its contents moved into the vault's own `Inbox` and its folders
+  removed, and a file clash stops the switch rather than overwrite. A tree
+  root that does not exist in the target vault goes back to the vault root.
+- The Appearance card scrolls as one region, the Query tab's Answer /
+  Compare / Graph switch is a centred segmented control, and the retrieval
+  lane toggles are compact, so the Query cards no longer stretch.
+
+### Fixed
+- The console could freeze for good: the Ledger's overview rendered recent
+  jobs while holding the job lock, and a running job's view takes that lock
+  again. The first refresh during any job hung, and every later Jobs list,
+  overview and job log waited behind it.
+- Fetching a page as PDF waited for the network to go idle, which a page with
+  constant background traffic never does, so such pages always failed after
+  90 s. It now waits for the page to load, gives late requests 15 s, and
+  prints either way.
+
 ## [0.31.0] - 2026-10-31
 
 ### Added
