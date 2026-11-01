@@ -72,6 +72,23 @@ def test_the_example_config_generates_a_container_config(generator, tmp_path):
     assert tree["knowledge_map"]["staging_dir"] == "/rag_data/canvas_maps/staging"
 
 
+def test_the_container_config_has_one_code_section(generator, tmp_path):
+    """Appending the full code: block after the example's short one left two
+    code.output_file lines, and the vault switch refused to rewrite either."""
+    _generate(generator, tmp_path)
+    text = (tmp_path / "out.yaml").read_text(encoding="utf-8")
+    assert len(re.findall(r"(?m)^code:", text)) == 1
+    tree = yaml.safe_load(text)
+    assert tree["code"]["output_file"] == "data/code_chunks.jsonl"
+    assert tree["code"]["skip_roots"] == []
+
+
+def test_a_repeated_top_level_section_fails_the_build(generator, tmp_path):
+    text = (ROOT / "config.example.yaml").read_text(encoding="utf-8")
+    with pytest.raises(SystemExit, match="repeats top-level"):
+        _generate(generator, tmp_path, text + "\ngraph:\n  enabled: false\n")
+
+
 def test_the_example_config_names_no_machine_path():
     """The example ships to every install, and the release sanitizer rewrites a
     machine path in it, which moves the generator's anchor out from under it."""

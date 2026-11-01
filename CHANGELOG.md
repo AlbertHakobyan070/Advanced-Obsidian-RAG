@@ -15,6 +15,19 @@ reconstructed on 2026-10-14 from the commit history and the session notes,
 one per shipped milestone, so read them as a map of when things landed rather
 than as release-day notes.
 
+## [0.32.1] - 2026-11-01
+
+### Fixed
+- A vault switch works again in a Docker install from the public or cold
+  archive. Since 0.31.0 the generated `config.docker.yaml` carried two
+  `code:` sections (the example's short one and the generator's full one).
+  The server read the last and ran normally, but the console's config writer
+  refuses a key that matches two lines, so every switch stopped with
+  `code.output_file: found 2 matches` before writing anything. The full
+  section now replaces the short one, and the generator fails the build on
+  any repeated top-level section. The personal (mac) archive was not
+  affected: its config comes from the live one.
+
 ## [0.32.0] - 2026-11-01
 
 ### Added

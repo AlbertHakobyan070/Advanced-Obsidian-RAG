@@ -147,17 +147,28 @@ REWRITES: list[tuple[str, str, int]] = [
      1),
 ]
 
-# config.example.yaml has no `code:` section (the live config.yaml does), so
-# every code.* read falls back to its in-code default -- including
-# `skip_roots: null`, which means "the built-in agent-project roots". Those are
-# one developer's folder names and have no business being skipped in someone
-# else's vault. State the block explicitly instead of inheriting that.
-CODE_SECTION = '''
+# config.example.yaml's `code:` section names only output_file (the vault switch
+# needs that key to exist), so every other code.* read falls back to its in-code
+# default -- including `skip_roots: null`, which means "the built-in
+# agent-project roots". Those are one developer's folder names and have no
+# business being skipped in someone else's vault. The short section is REPLACED
+# by this full one: appending it instead left two `code.output_file` lines, and
+# the console's config writer refuses an ambiguous key, so every vault switch
+# failed ("found 2 matches") in the 0.31.0 and 0.32.0 archives.
+CODE_SECTION_SHORT = '''\
+# Script files (.js/.ts/.sql/...) via `ingest-code`; every other code.* key
+# falls back to the notebooks/parser value. Per-vault: the switcher moves it.
+code:
+  # vault_path falls back to notebooks -> pdf -> parser vault_path if unset
+  output_file: "data/code_chunks.jsonl"
+'''
+CODE_SECTION = '''\
 # ---------------------------------------------------------------------------
-# Source-code ingestion (`ingest-code`). Added by make_docker_config.py:
-# config.example.yaml omits this section, so without it every value below comes
-# from code_loader's own defaults -- and `skip_roots: null` would mean "skip
-# the built-in agent-project folder names", which are not yours.
+# Source-code ingestion (`ingest-code`). Expanded by make_docker_config.py:
+# config.example.yaml names only output_file here, so without the rest every
+# value below comes from code_loader's own defaults -- and `skip_roots: null`
+# would mean "skip the built-in agent-project folder names", which are not
+# yours. Per-vault: the switcher moves output_file.
 # ---------------------------------------------------------------------------
 code:
   # vault_path falls back to notebooks -> pdf -> parser vault_path if unset
@@ -275,8 +286,15 @@ def main(argv: list[str]) -> int:
         return 2
     src, dst = Path(argv[1]), Path(argv[2])
     text = src.read_text(encoding="utf-8")
-    text = apply_rewrites(text, REWRITES, src.name)
-    text = HEADER + text.lstrip("\ufeff") + CODE_SECTION
+    text = apply_rewrites(text, REWRITES + [(CODE_SECTION_SHORT, CODE_SECTION, 1)], src.name)
+    text = HEADER + text.lstrip("\ufeff")
+    # PyYAML keeps the last of two same-named sections without a word, so a
+    # duplicate loads fine here and only breaks the console's line-based writer.
+    tops = re.findall(r"(?m)^([A-Za-z_][\w-]*):", text)
+    dups = sorted({k for k in tops if tops.count(k) > 1})
+    if dups:
+        raise SystemExit(f"generated config repeats top-level section(s) {dups}: "
+                         f"the console refuses to rewrite an ambiguous key")
 
     # Parse what we are about to ship. A config that does not load is the one
     # failure mode a generator must never pass on.
