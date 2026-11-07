@@ -220,7 +220,7 @@ def test_query_confidence_error_is_an_error_that_keeps_the_sources(apps, routes,
 
 def test_low_confidence_is_an_answer_not_an_error(apps, routes, services, monkeypatch):
     answer = SimpleNamespace(text="Nothing relevant was found.", confidence="LOW", citations=[],
-                             sources=[], usage=None, timings={}, retrieval=None)
+                             sources=[], usage=None, timings={}, retrieval=None, verification=None)
     monkeypatch.setitem(apps.query._STATE, "rag", _fake_rag(generate=lambda *a, **kw: answer))
     out = K.call_route(routes["POST /query"], {"q": "x"}, services, timeout=5)
     assert not out.is_error and json.loads(out.text)["confidence"] == "LOW"

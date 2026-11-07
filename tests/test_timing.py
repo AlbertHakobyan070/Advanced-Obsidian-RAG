@@ -228,7 +228,7 @@ def test_query_reports_generation_timings_and_nests_both_in_history(monkeypatch)
     import serve_api
     monkeypatch.setattr(serve_api, "_HISTORY", deque(maxlen=50))
     ans = SimpleNamespace(text="a", confidence="HIGH", citations=[], sources=[_DOC],
-                          usage=None, retrieval=None, timings={"generate": 2.0})
+                          usage=None, retrieval=None, timings={"generate": 2.0}, verification=None)
     generator = SimpleNamespace(
         llm=SimpleNamespace(backend="b", provider="p", model="m"),
         generate=lambda q, docs, max_tokens=None: ans)

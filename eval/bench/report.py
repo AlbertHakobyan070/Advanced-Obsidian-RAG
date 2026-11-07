@@ -73,14 +73,19 @@ def _metric_table(summary: dict) -> list[str]:
         + _table(["config", "n"] + metrics, rows)
 
 
+def _excludes_zero(d: dict) -> str:
+    if d["lo"] == d["hi"]:      # one question, or every difference identical: no variance estimated
+        return "no" if d["mean"] == 0 else "indeterminate"
+    return "yes" if d["lo"] > 0 or d["hi"] < 0 else "no"
+
+
 def _ladder_table(summary: dict) -> list[str]:
     rows = []
     for name, c in summary.items():
         for p in filter(None, [c.get("paired"), *c.get("paired_also", [])]):
             d = p["ndcg@10"]
-            real = "yes" if d["lo"] > 0 or d["hi"] < 0 else "no"
             rows.append([f"{name} vs {p['vs']}", str(p["n"]), _signed(d),
-                         f"{p['hit@5_mcnemar_p']:.3f}", real])
+                         f"{p['hit@5_mcnemar_p']:.3f}", _excludes_zero(d)])
     if not rows:
         return []
     return ["## Ladder steps and spec baselines (paired)", "",

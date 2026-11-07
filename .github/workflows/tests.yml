@@ -1,0 +1,27 @@
+name: Tests
+
+# Runs the test suite on the public repository, where Actions minutes are free. The
+# development repository syncs this file there and skips the job for itself.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    if: github.repository == 'AlbertHakobyan070/Advanced-Obsidian-RAG'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # The CPU build, as the Dockerfile installs it (keep the version with its TORCH_VERSION).
+      - run: pip install "torch==2.13.0" --index-url https://download.pytorch.org/whl/cpu
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - run: python -m pytest tests/ -q

@@ -251,12 +251,14 @@ class Reranker:
     @classmethod
     def from_config(cls, cfg: Config) -> "Reranker":
         mode = str(cfg.get("retrieval.rerank_mode", "cross_encoder")).lower()
-        # Any unrecognised CONFIG value maps to "none": historical configs used
-        # e.g. "off" — but a typo such as "cross-encoder" lands here too, and
-        # it switches reranking off without an error. (A per-call mode is
-        # validated in rerank() and raises instead.)
-        if mode not in RERANK_MODES:
+        # "off" is the historical spelling of "none" ("false" is how YAML reads it
+        # unquoted). Anything else is a typo such as "cross-encoder", which must
+        # not switch reranking off without a word.
+        if mode in ("off", "false"):
             mode = "none"
+        if mode not in RERANK_MODES:
+            raise ValueError(f"retrieval.rerank_mode must be one of {RERANK_MODES}, "
+                             f"got {mode!r}: fix it in config.yaml")
         # Built only when the flag is on, and even then it imports and loads
         # nothing until its first score(): a switched-off feature costs
         # nothing.

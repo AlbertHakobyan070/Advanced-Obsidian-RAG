@@ -111,6 +111,23 @@ def test_ladder_steps_say_whether_the_paired_interval_excludes_zero():
     assert "0.040" in real and "0.700" in flat           # the McNemar p-values
 
 
+def _step_verdict(mean, lo, hi):
+    summary = copy.deepcopy(SUMMARY)
+    summary["R3-routing"]["paired"]["ndcg@10"] = {"mean": mean, "lo": lo, "hi": hi}
+    line = next(l for l in render(summary, META).splitlines() if l.startswith("| R3-routing vs R2-hybrid"))
+    return line.rstrip(" |").rsplit("|", 1)[1].strip()
+
+
+def test_a_zero_width_interval_away_from_zero_is_not_called_real():
+    # every paired difference identical, or a single question: no sampling variance was estimated
+    assert _step_verdict(0.2, 0.2, 0.2) == "indeterminate"
+    assert _step_verdict(-0.2, -0.2, -0.2) == "indeterminate"
+
+
+def test_identical_configurations_still_read_no():
+    assert _step_verdict(0.0, 0.0, 0.0) == "no"
+
+
 def test_no_ladder_pair_means_no_ladder_section():
     solo = {"custom": {k: v for k, v in SUMMARY["R2-hybrid"].items()}}
     assert "Ladder" not in render(solo, META)

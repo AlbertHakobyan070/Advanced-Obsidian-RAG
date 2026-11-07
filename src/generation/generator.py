@@ -286,9 +286,10 @@ class Generator:
                 return {"overall": "UNKNOWN", "verdicts": []}
 
             # Fold verdicts back into the Citation objects
-            verdict_map = {v.get("citation"): v for v in data.get("verdicts", [])}
+            # Keyed as strings: a model may write the number as 1 or as "1".
+            verdict_map = {str(v.get("citation")): v for v in data.get("verdicts", [])}
             for c in citations:
-                v = verdict_map.get(c.number)
+                v = verdict_map.get(str(c.number))
                 if v:
                     c.supported = bool(v.get("supported", False))
                     c.note = str(v.get("note", ""))

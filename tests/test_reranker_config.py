@@ -97,6 +97,18 @@ def test_bad_mode_is_rejected():
         Reranker(model_name="x", mode="turbo")
 
 
+@pytest.mark.parametrize("typo", ["cross-encoder", "crossencoder", "turbo"])
+def test_a_mistyped_configured_mode_is_refused_not_switched_off(typo):
+    with pytest.raises(ValueError, match="retrieval.rerank_mode.*" + typo):
+        Reranker.from_config(cfg_of({"retrieval": {"rerank_mode": typo}}))
+
+
+# False and None are how YAML reads an unquoted `off` and `null`.
+@pytest.mark.parametrize("off", ["none", "off", False, None])
+def test_the_spellings_of_off_still_mean_none(off):
+    assert Reranker.from_config(cfg_of({"retrieval": {"rerank_mode": off}})).mode == "none"
+
+
 def test_lexical_and_none_modes_need_no_model():
     """Swapping in a 2.2 GB model must not make these paths load anything."""
     d = docs("gradient clipping rescales the gradient norm",
