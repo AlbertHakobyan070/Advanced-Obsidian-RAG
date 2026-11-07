@@ -183,7 +183,7 @@ configurations:
 | `ladder` (default) | One rung per added component, cumulative: BM25 alone (`R0-bm25`) and dense alone (`R1-dense`), then hybrid (`R2-hybrid`), then + scope routing and the metadata boost (`R3-routing`), + the code lanes and code preset (`R4-code`), + the cross-encoder (`R5-rerank`), + HyDE (`R6-hyde`; the shipped config leaves it off). |
 | `loo` | **Leave-one-out.** The full pipeline (`full`), then the full pipeline minus each factor in turn (`-sparse`, `-dense`, `-routing`, `-code`, `-rerank`, `-hyde`). |
 | `factorial` | **Every subset** of the factors, named `F:<factors joined by +>` (`F:none` is the empty set). A subset with neither dense nor sparse has no lane to search and scores 0 without searching. |
-| `routing` | **Routing split.** `routing` is two mechanisms, so this separates them at the R5 level (HyDE off): `F-full` (scope lanes + metadata boost), `F-noscope` (boost only), `F-noboost` (scope lanes only), `F-none` (neither). Each variant is paired against `F-full` in the report. Switched by the per-call `scope_lanes` and `metadata_boost` keys. |
+| `routing` | **Routing split.** `routing` is two mechanisms, so this separates them at the R5 level (HyDE off): `F-full` (scope lanes + metadata boost), `F-noscope` (boost only), `F-noboost` (scope lanes only), `F-none` (neither). Each variant is paired against `F-full` in the report. Switched by the per-call `scope_lanes` and `metadata_boost` keys. With the reranker on, the boost cannot change a result: the cross-encoder re-scores the whole pool and discards the fused order, so `F-noboost` equals `F-full` and `F-none` equals `F-noscope`. The ladder's `R3-routing` rung, with the reranker off, is where the boost shows. |
 | `hyde` | `H-off` (the R5 pipeline) and `H-on` (R5 plus HyDE), paired. |
 | `diversity` | **Per-file cap.** The shipped retrieval pipeline with HyDE switched off so no LLM is in the loop (R5, scope lanes and metadata boost off) uncapped (`D-off`), then with `max_per_file` 2 (`D-cap2`) and 3 (`D-cap3`), each paired against `D-off`. The cap targets recall@10 and complete@10; nDCG@10 and hit@1 are its guards. |
 | `decompose` | **Query decomposition** over `D-off`'s pipeline: `Q-off`, `Q-on`, and `Q-on-cap2` (decomposition plus the per-file cap at 2), each paired against `Q-off`. It needs an LLM: run it with `--llm replay:<store>` so every sub-query comes from one fixed model (see "Replay stores" below). |
@@ -230,9 +230,10 @@ How a run behaves:
   whole run, before any row, unless the route sidecar exists: build it with
   `python main.py route-pointers`.
 - `--split dev` is the default. `test` and `all` are sealed, see below.
-- `--limit N` keeps the first N questions of the split, for smoke runs;
-  `eval/smoke/` holds a few hand-checked questions for exercising the runner
-  (`--sets eval/smoke`).
+- `--limit N` keeps the first N questions of the split, for smoke runs. Question
+  sets are drawn from the vault, so the public repository ships none: to exercise
+  the runner, point `--sets` at a directory holding a few hand-checked questions
+  of your own.
 - A question that fails is a **row**, not an abort: its `error` is recorded, the
   summary counts it, and the command exits 1. A mistake in the command (an unknown
   suite, a missing sets directory, a sealed split, nothing to run) prints
@@ -324,9 +325,11 @@ so `eval/llm/` is gitignored like `eval/runs/`.
 
 Per question and configuration, over the final list: `hit@1`, `hit@5`, `hit@10`,
 `recall@10`, `complete@10`, `mrr@10`, `ndcg@10`, `p@5`, and the document-level
-`doc_hit@5` and `doc_recall@10` (`eval/bench/metrics.py`). Gain is counted per
-**required gold source**, not per chunk: any number of chunks of one book earn one gain, so
-a retriever cannot inflate nDCG by filling the list with near-duplicates.
+`doc_hit@5` and `doc_recall@10` (`eval/bench/metrics.py`). A rank earns one gain when it
+satisfies a **required gold source** no higher rank already satisfied: any number of chunks
+of one book earn one gain, so a retriever cannot inflate nDCG by filling the list with
+near-duplicates. A single chunk that satisfies two required sources also earns one gain at
+its rank, though recall counts both as found.
 `required: false` marks optional context that does not count toward recall,
 completeness or nDCG. Only answerable questions are scored.
 
@@ -336,7 +339,8 @@ completeness or nDCG. Only answerable questions are scored.
   the per-question difference, which has far less variance than two independent
   means. Binary metrics also get an exact McNemar test. A ladder step is called
   real only when its paired 95% interval excludes zero, and the report says so per
-  step.
+  step. A zero-width interval away from zero (one question, or every difference
+  identical) reads `indeterminate`: no variance was estimated.
 - Each suite reports its `n`. A suite scored on fewer questions than `DIAG_BELOW`
   (`eval/bench/report.py`) is marked *diag*: a diagnostic, not a result.
 - Latency is per stage (p50 / p95 / p99), over **warm** rows only. A row that had to

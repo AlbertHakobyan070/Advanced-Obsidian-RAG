@@ -85,7 +85,8 @@ class _Gen:
 
     def generate(self, q, docs, max_tokens=None):
         self.seen = [d.id for d in docs]
-        return SimpleNamespace(text="ok", confidence="HIGH", citations=[], sources=docs, usage=None)
+        return SimpleNamespace(text="ok", confidence="HIGH", citations=[], sources=docs, usage=None,
+                               verification=None)
 
 
 def _api(monkeypatch, rows=(), generated_mode="drop", provenance_map=None):
@@ -123,7 +124,7 @@ def test_generated_mode_is_on_every_retrieval_model_and_forwarded(monkeypatch):
 def test_a_per_call_off_is_a_422(monkeypatch):
     with pytest.raises(ValidationError):
         S.SearchIn(q="x", generated_mode="off")
-    monkeypatch.setattr(S.app.state, "guard_settings", None)
+    monkeypatch.setitem(S.app.state._state, "guard_settings", None)
     client = TestClient(S.app, base_url="http://127.0.0.1")    # the request guard refuses Host: testserver
     for path, body in (("/search", {"q": "x", "generated_mode": "off"}),
                        ("/query", {"q": "x", "generated_mode": "off"}),

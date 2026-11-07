@@ -214,7 +214,7 @@ def console(management_module, monkeypatch, tmp_path):
     reached = []
     monkeypatch.setattr(m, "_restart_rag_api", lambda: reached.append("restart") or {"port": 8051})
     monkeypatch.setattr(m, "_inbox", lambda: reached.append("upload") or tmp_path)
-    monkeypatch.setattr(m.app.state, "guard_settings", None)
+    monkeypatch.setitem(m.app.state._state, "guard_settings", None)
     return TestClient(m.app, base_url="http://127.0.0.1:8052"), reached
 
 
@@ -233,7 +233,7 @@ def test_a_foreign_page_can_neither_restart_the_query_api_nor_upload(console, or
 
 def test_both_services_refuse_a_host_that_is_not_loopback(console, monkeypatch):
     import serve_api
-    monkeypatch.setattr(serve_api.app.state, "guard_settings", None)
+    monkeypatch.setitem(serve_api.app.state._state, "guard_settings", None)
     query = TestClient(serve_api.app, base_url="http://rebound.example:8051")
     assert query.get("/health").status_code == 400
     assert TestClient(serve_api.app, base_url="http://127.0.0.1:8051").get("/health").status_code == 200
@@ -247,7 +247,7 @@ def test_with_a_token_set_the_query_api_401_still_carries_cors_headers(monkeypat
     from types import SimpleNamespace
     import serve_api
     monkeypatch.setenv(TOKEN_ENV, "s3cret")
-    monkeypatch.setattr(serve_api.app.state, "guard_settings", None)
+    monkeypatch.setitem(serve_api.app.state._state, "guard_settings", None)
     monkeypatch.setitem(serve_api._STATE, "rag", SimpleNamespace(presets={}))
     client = TestClient(serve_api.app, base_url="http://127.0.0.1:8051")
     refused = client.get("/schema", headers={"Origin": CONSOLE})

@@ -56,7 +56,7 @@ def _client_with_rag(monkeypatch, raises=None, search=None):
     monkeypatch.setattr(S, "_HISTORY", deque(maxlen=50))
     monkeypatch.setitem(S._STATE, "rag", SimpleNamespace(search=search or fail, graph_search=fail))
     monkeypatch.setitem(S._STATE, "cfg", Config({}, Path.cwd()))    # /evidence_pack reads it
-    monkeypatch.setattr(S.app.state, "guard_settings", None)
+    monkeypatch.setitem(S.app.state._state, "guard_settings", None)
     return TestClient(S.app, base_url="http://127.0.0.1")         # the guard refuses Host: testserver
 
 

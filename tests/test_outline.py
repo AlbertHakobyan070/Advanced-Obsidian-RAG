@@ -185,7 +185,7 @@ def _client(monkeypatch, outline=None):
     rag = SimpleNamespace(outline=outline or build_outline(PAYLOAD, RULE, POINTERS), provenance_map=RULE,
                           retriever=SimpleNamespace(_get_bm25=lambda: PAYLOAD, route_pointers=POINTERS))
     monkeypatch.setitem(S._STATE, "rag", rag)
-    monkeypatch.setattr(S.app.state, "guard_settings", None)
+    monkeypatch.setitem(S.app.state._state, "guard_settings", None)
     return TestClient(S.app, base_url="http://127.0.0.1")         # the guard refuses Host: testserver
 
 

@@ -280,7 +280,7 @@ retrieval:
   tantivy_filter_pool: 2000                 # tantivy only: hits a filtered lane (scope/code, generated_mode drop) filters
   rrf_k: 60
   rerank_top_k: 7
-  rerank_mode: cross_encoder                # cross_encoder | http | lexical | none | laya
+  rerank_mode: cross_encoder                # cross_encoder | http | lexical | none | laya; anything else is a startup error
                                             # (laya = EXPERIMENTAL, see laya: below)
   # Any HF cross-encoder id. Bigger rerankers score better on public benchmarks
   # but cost far more per query — measure before switching:

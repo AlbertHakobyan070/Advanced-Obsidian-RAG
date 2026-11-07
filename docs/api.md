@@ -109,6 +109,11 @@ alias — endpoints and secrets can never be supplied per request),
     A very small `max_tokens` can truncate the citation footer and drop the
     answer's confidence to `UNKNOWN`. Leave a few hundred tokens of room.
 
+With `generation.verify_citations` on, `/query` and `/answer` also return the second
+pass's result: `verification` (`overall`: `PASS`, `FLAG` or `UNKNOWN`, plus its
+`verdicts`) and `supported` on each citation. Off (the shipped default), both are
+`null`. The verdict is reported only: it never changes the answer or its confidence.
+
 ### When a knob is wrong
 
 A per-call retrieval knob with a bad **value** is never a silent no-op, and it

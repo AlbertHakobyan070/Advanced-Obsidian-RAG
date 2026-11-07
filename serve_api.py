@@ -386,6 +386,9 @@ class SearchIn(BaseModel):
 class CitationOut(BaseModel):
     n: int
     label: str
+    # The verification pass's verdict; None when generation.verify_citations is
+    # off or it returned none for this citation.
+    supported: bool | None = None
 
 
 class FoundViaOut(BaseModel):
@@ -426,6 +429,8 @@ class QueryOut(BaseModel):
     # Echo of what actually ran: preset, effective top_k, hyde_used, etc.
     retrieval: dict[str, Any] = Field(default_factory=dict)
     generation: dict[str, Any] = Field(default_factory=dict)
+    # The verification pass's {overall, verdicts}; None when it did not run.
+    verification: dict[str, Any] | None = None
 
 
 class CompareBranchIn(BaseModel):
@@ -1053,7 +1058,8 @@ def query(body: QueryIn) -> QueryOut:
             },
         )
 
-    citations = [CitationOut(n=c.number, label=c.source_label) for c in ans.citations]
+    citations = [CitationOut(n=c.number, label=c.source_label, supported=c.supported)
+                 for c in ans.citations]
     _record_history("/query", body, ans.retrieval, ans.confidence,
                     len(ans.sources), t0,
                     timings={"retrieval": info.get("timings"),
@@ -1071,6 +1077,7 @@ def query(body: QueryIn) -> QueryOut:
                              body.include_text or 0, body.max_sources),
         retrieval=ans.retrieval or {},
         generation=generation,
+        verification=ans.verification,
     )
 
 
@@ -1309,12 +1316,13 @@ def answer(body: AnswerIn) -> QueryOut:
     return QueryOut(
         answer=ans.text,
         confidence=ans.confidence,
-        citations=[CitationOut(n=c.number, label=c.source_label)
+        citations=[CitationOut(n=c.number, label=c.source_label, supported=c.supported)
                    for c in ans.citations],
         sources=_sources_out(ans.sources, ans.citations,
                              body.include_text or 0, body.max_sources),
         retrieval=info,
         generation=generation,
+        verification=ans.verification,
     )
 
 
@@ -2084,7 +2092,7 @@ def schema() -> dict:
                     "include_text": "0-6000?", "max_sources": "int?",
                 },
                 "response": "the /query shape: answer, citations, sources, "
-                            "generation provenance",
+                            "generation provenance, verification",
             },
             "POST /evidence_pack": {
                 # Available without graph mode: only graph=true needs it.

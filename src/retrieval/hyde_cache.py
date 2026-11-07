@@ -5,9 +5,10 @@ HyDE asks the LLM for a hypothetical answer at temperature 0.3, so two
 identical searches retrieve with different text and an A/B of anything
 downstream is noise. Caching the FIRST answer per question makes repeated
 searches identical (the eval depends on that) and takes an LLM round-trip
-off the warm path. The key covers everything that changes the answer:
-the question (whitespace-normalised, case kept), the prompt, the model
-and the temperature — change any of them and it is a different entry.
+off the warm path. The key is the question (whitespace-normalised, case
+kept), the prompt, the model and the temperature — change any of them and it
+is a different entry. It does not cover the provider or endpoint, so two
+backends serving one model name share entries.
 """
 from __future__ import annotations
 

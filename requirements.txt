@@ -13,6 +13,7 @@ anthropic==0.87.0
 
 # Serving
 fastapi==0.133.1
+starlette==1.3.1   # fastapi only sets a floor; pinned so a fresh install gets the tested version
 uvicorn==0.41.0
 pydantic==2.13.4
 streamlit==1.58.0

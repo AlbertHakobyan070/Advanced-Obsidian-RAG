@@ -5,6 +5,7 @@ Offline: the vault is a tmp folder and every model call is a fake.
 """
 import copy
 import json
+import os
 import re
 import string
 from pathlib import Path
@@ -161,8 +162,11 @@ def test_a_markdown_file_node_is_read_with_frontmatter_stripped(vault):
 def test_file_nodes_outside_the_vault_or_missing_are_placeholders_and_never_read(vault, tmp_path):
     outside = tmp_path / "outside.md"
     outside.write_text("SENTINEL-OUTSIDE", encoding="utf-8")
+    # A Windows absolute path keeps its drive and lands outside; a POSIX one loses its
+    # leading "/" and is looked up inside the vault. Never read, either way.
+    absolute = "outside the vault" if os.name == "nt" else "not found"
     for path, why in [("../outside.md", "outside the vault"),
-                      (str(outside), "outside the vault"),
+                      (str(outside), absolute),
                       ("00 - AUA_DS/renamed.md", "not found")]:
         ctx = _ctx(_with_file(path), "ef", vault)
         f = ctx["to"]
